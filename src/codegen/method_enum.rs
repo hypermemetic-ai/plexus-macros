@@ -103,6 +103,13 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
         .map(|m| m.streaming)
         .collect();
 
+    // Generate bidirectional flags for each method
+    // Bidirectional is explicitly declared via #[hub_method(bidirectional)] attribute
+    let bidirectional_flags: Vec<bool> = methods
+        .iter()
+        .map(|m| m.bidirectional)
+        .collect();
+
     quote! {
         /// Auto-generated method enum for schema extraction
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -136,6 +143,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
                 let hashes: &[&str] = &[#(#method_hashes),*];
                 let streaming: &[bool] = &[#(#streaming_flags),*];
+                let bidirectional: &[bool] = &[#(#bidirectional_flags),*];
                 let return_schemas: Vec<(Option<schemars::Schema>, Vec<&str>)> = vec![#(#return_schema_entries),*];
 
                 // Get the full enum schema and extract each variant
@@ -158,9 +166,10 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     .zip(descriptions.iter())
                     .zip(hashes.iter())
                     .zip(streaming.iter())
+                    .zip(bidirectional.iter())
                     .zip(return_schemas.into_iter())
                     .enumerate()
-                    .map(|(i, ((((name, desc), hash), is_streaming), (returns_opt, variant_filter)))| {
+                    .map(|(i, (((((name, desc), hash), is_streaming), is_bidirectional), (returns_opt, variant_filter)))| {
                         // Get this variant's schema from oneOf, then extract just the "params" portion
                         // The variant looks like: { properties: { method: {...}, params: {...} }, ... }
                         // We want just the params schema, but we need to merge in $defs from the root
@@ -199,6 +208,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                             schema = schema.with_returns(r);
                         }
                         schema = schema.with_streaming(*is_streaming);
+                        schema = schema.with_bidirectional(*is_bidirectional);
                         schema
                     })
                     .collect()

@@ -313,44 +313,119 @@ fn generate_rpc_impl_methods(
             // All methods use wrap_stream for consistent streaming pattern
             let content_type = format!("{}.{}", namespace, method_name_str);
 
-            quote! {
-                async fn #method_name(
-                    &self,
-                    pending: jsonrpsee::PendingSubscriptionSink,
-                    #(#params_with_types),*
-                ) -> jsonrpsee::core::SubscriptionResult {
-                    use futures::StreamExt;
+            // Handle bidirectional methods differently - they need a BidirChannel
+            if m.bidirectional {
+                if let Some(context_param) = &m.context_param {
+                    quote! {
+                        async fn #method_name(
+                            &self,
+                            pending: jsonrpsee::PendingSubscriptionSink,
+                            #(#params_with_types),*
+                        ) -> jsonrpsee::core::SubscriptionResult {
+                            use futures::StreamExt;
 
-                    let sink = pending.accept().await?;
-                    let stream = #struct_name::#method_name(self, #(#param_names),*).await;
-                    let wrapped = #crate_path::plexus::wrap_stream(
-                        stream,
-                        #content_type,
-                        vec![#namespace.into()]
-                    );
+                            let sink = pending.accept().await?;
 
-                    tokio::spawn(async move {
-                        let mut stream = wrapped;
-                        while let Some(item) = stream.next().await {
-                            if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
-                                if sink.send(raw_value).await.is_err() {
-                                    break;
+                            // Create channels for bidirectional communication
+                            let (stream_tx, stream_rx) = tokio::sync::mpsc::channel::<#crate_path::plexus::PlexusStreamItem>(32);
+
+                            // Create the BidirChannel (unidirectional mode for RPC)
+                            let #context_param = #crate_path::plexus::BidirChannel::new(
+                                stream_tx,
+                                false, // RPC doesn't support bidirectional yet
+                                vec![#namespace.into(), #method_name_str.into()],
+                                #crate_path::plexus::PlexusContext::hash(),
+                            );
+
+                            let stream = #struct_name::#method_name(self, &#context_param, #(#param_names),*).await;
+                            let wrapped = #crate_path::plexus::wrap_stream(
+                                stream,
+                                #content_type,
+                                vec![#namespace.into()]
+                            );
+
+                            // Merge activation stream with request stream
+                            let request_stream = tokio_stream::wrappers::ReceiverStream::new(stream_rx);
+                            let merged = futures::stream::select(wrapped, request_stream);
+
+                            tokio::spawn(async move {
+                                futures::pin_mut!(merged);
+                                while let Some(item) = merged.next().await {
+                                    if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
+                                        if sink.send(raw_value).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                // Send done event
+                                let done = #crate_path::plexus::PlexusStreamItem::Done {
+                                    metadata: #crate_path::plexus::StreamMetadata::new(
+                                        vec![#namespace.into()],
+                                        #crate_path::plexus::PlexusContext::hash(),
+                                    ),
+                                };
+                                if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
+                                    let _ = sink.send(raw_value).await;
+                                }
+                            });
+
+                            Ok(())
+                        }
+                    }
+                } else {
+                    // Bidirectional but no context param - shouldn't happen but handle gracefully
+                    quote! {
+                        async fn #method_name(
+                            &self,
+                            pending: jsonrpsee::PendingSubscriptionSink,
+                            #(#params_with_types),*
+                        ) -> jsonrpsee::core::SubscriptionResult {
+                            let _ = pending;
+                            Err(jsonrpsee::core::StringError::from("Method configuration error: bidirectional but no context param"))
+                        }
+                    }
+                }
+            } else {
+                // Regular non-bidirectional method
+                quote! {
+                    async fn #method_name(
+                        &self,
+                        pending: jsonrpsee::PendingSubscriptionSink,
+                        #(#params_with_types),*
+                    ) -> jsonrpsee::core::SubscriptionResult {
+                        use futures::StreamExt;
+
+                        let sink = pending.accept().await?;
+                        let stream = #struct_name::#method_name(self, #(#param_names),*).await;
+                        let wrapped = #crate_path::plexus::wrap_stream(
+                            stream,
+                            #content_type,
+                            vec![#namespace.into()]
+                        );
+
+                        tokio::spawn(async move {
+                            let mut stream = wrapped;
+                            while let Some(item) = stream.next().await {
+                                if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
+                                    if sink.send(raw_value).await.is_err() {
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                        // Send done event
-                        let done = #crate_path::plexus::PlexusStreamItem::Done {
-                            metadata: #crate_path::plexus::StreamMetadata::new(
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ),
-                        };
-                        if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
-                            let _ = sink.send(raw_value).await;
-                        }
-                    });
+                            // Send done event
+                            let done = #crate_path::plexus::PlexusStreamItem::Done {
+                                metadata: #crate_path::plexus::StreamMetadata::new(
+                                    vec![#namespace.into()],
+                                    #crate_path::plexus::PlexusContext::hash(),
+                                ),
+                            };
+                            if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
+                                let _ = sink.send(raw_value).await;
+                            }
+                        });
 
-                    Ok(())
+                        Ok(())
+                    }
                 }
             }
         })
@@ -373,15 +448,75 @@ fn generate_dispatch_arms(
 
             // All methods use wrap_stream for consistent streaming pattern
             let content_type = format!("{}.{}", namespace, method_name);
-            quote! {
-                #method_name => {
-                    #param_extraction
-                    let stream = self.#fn_name(#(#param_names),*).await;
-                    Ok(#crate_path::plexus::wrap_stream(
-                        stream,
-                        #content_type,
-                        vec![#namespace.into()]
-                    ))
+
+            // Handle bidirectional methods differently
+            if m.bidirectional {
+                if let Some(context_param) = &m.context_param {
+                    // Bidirectional method: create a BidirChannel and merge streams
+                    // The activation stream and request stream are merged so that Request
+                    // items from BidirChannel.request() calls are forwarded to the client
+                    quote! {
+                        #method_name => {
+                            #param_extraction
+                            use futures::StreamExt;
+
+                            // Create channels for bidirectional communication
+                            // The stream_tx/stream_rx pair carries PlexusStreamItems
+                            let (stream_tx, stream_rx) = tokio::sync::mpsc::channel::<#crate_path::plexus::PlexusStreamItem>(32);
+
+                            // Create the BidirChannel with unidirectional mode for now
+                            // Full bidirectional support requires transport layer changes
+                            let #context_param = #crate_path::plexus::BidirChannel::new(
+                                stream_tx,
+                                false, // bidirectional_supported - set to true when transport supports it
+                                vec![#namespace.into(), #method_name.into()],
+                                #crate_path::plexus::PlexusContext::hash(),
+                            );
+
+                            // Get the activation stream
+                            let activation_stream = self.#fn_name(&#context_param, #(#param_names),*).await;
+
+                            // Wrap the activation stream with metadata
+                            let wrapped_activation = #crate_path::plexus::wrap_stream(
+                                activation_stream,
+                                #content_type,
+                                vec![#namespace.into()]
+                            );
+
+                            // Convert the request channel receiver to a stream
+                            let request_stream = tokio_stream::wrappers::ReceiverStream::new(stream_rx);
+
+                            // Merge the streams: activation events + request events
+                            // The select combinator interleaves items as they become available
+                            let merged = futures::stream::select(wrapped_activation, request_stream);
+
+                            Ok(Box::pin(merged) as #crate_path::plexus::PlexusStream)
+                        }
+                    }
+                } else {
+                    // Bidirectional but no context param found - generate error
+                    let error_msg = format!(
+                        "Method {} is marked bidirectional but has no BidirChannel parameter",
+                        method_name
+                    );
+                    quote! {
+                        #method_name => {
+                            Err(#crate_path::plexus::PlexusError::Internal(#error_msg.to_string()))
+                        }
+                    }
+                }
+            } else {
+                // Regular non-bidirectional method
+                quote! {
+                    #method_name => {
+                        #param_extraction
+                        let stream = self.#fn_name(#(#param_names),*).await;
+                        Ok(#crate_path::plexus::wrap_stream(
+                            stream,
+                            #content_type,
+                            vec![#namespace.into()]
+                        ))
+                    }
                 }
             }
         })

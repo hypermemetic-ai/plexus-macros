@@ -21,6 +21,9 @@ pub struct HubMethodAttrs {
     /// If false (default), it yields a single result.
     /// Used to determine client API: streaming -> AsyncGenerator, non-streaming -> Promise
     pub streaming: bool,
+    /// If true, this method supports bidirectional communication via BidirChannel.
+    /// The method must have a parameter with type containing "BidirChannel".
+    pub bidirectional: bool,
 }
 
 impl Parse for HubMethodAttrs {
@@ -29,6 +32,7 @@ impl Parse for HubMethodAttrs {
         let mut param_docs = HashMap::new();
         let mut returns_variants = Vec::new();
         let mut streaming = false;
+        let mut bidirectional = false;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -49,6 +53,8 @@ impl Parse for HubMethodAttrs {
                             ));
                         } else if path.is_ident("streaming") {
                             streaming = true;
+                        } else if path.is_ident("bidirectional") {
+                            bidirectional = true;
                         }
                     }
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
@@ -85,7 +91,7 @@ impl Parse for HubMethodAttrs {
             }
         }
 
-        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming })
+        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming, bidirectional })
     }
 }
 
@@ -214,6 +220,10 @@ pub struct MethodInfo {
     /// True if method streams multiple events (from #[hub_method(streaming)])
     /// False (default) means method yields a single result
     pub streaming: bool,
+    /// True if method supports bidirectional communication via BidirChannel
+    pub bidirectional: bool,
+    /// Name of the BidirChannel parameter (if bidirectional is true)
+    pub context_param: Option<syn::Ident>,
 }
 
 impl MethodInfo {
@@ -248,14 +258,27 @@ impl MethodInfo {
         let streaming = hub_method_attrs
             .map(|a| a.streaming)
             .unwrap_or(false);
+        let bidirectional = hub_method_attrs
+            .map(|a| a.bidirectional)
+            .unwrap_or(false);
 
         // Extract parameters after &self
+        // Also track the BidirChannel parameter if bidirectional is true
         let mut params = Vec::new();
+        let mut context_param: Option<syn::Ident> = None;
         for arg in &method.sig.inputs {
             if let FnArg::Typed(pat_type) = arg {
                 if let Pat::Ident(ident) = &*pat_type.pat {
                     let name = ident.ident.clone();
                     let name_str = name.to_string();
+
+                    // Check if this parameter's type contains "BidirChannel"
+                    if bidirectional && contains_bidir_channel(&pat_type.ty) {
+                        context_param = Some(name.clone());
+                        // Skip adding BidirChannel to params - it's not a client-facing parameter
+                        continue;
+                    }
+
                     let description = param_docs.get(&name_str).cloned();
                     params.push(ParamInfo {
                         name,
@@ -304,6 +327,8 @@ impl MethodInfo {
             stream_item_type,
             returns_variants,
             streaming,
+            bidirectional,
+            context_param,
         })
     }
 }
@@ -351,4 +376,20 @@ fn is_result_plexus_stream(ty: &Type) -> bool {
         }
     }
     false
+}
+
+/// Check if a type contains "BidirChannel" in its path
+/// This handles types like `BidirChannel<T>`, `&BidirChannel<T>`, etc.
+fn contains_bidir_channel(ty: &Type) -> bool {
+    match ty {
+        Type::Path(type_path) => {
+            // Check if any segment is "BidirChannel"
+            type_path.path.segments.iter().any(|seg| seg.ident == "BidirChannel")
+        }
+        Type::Reference(type_ref) => {
+            // Check inside references like &BidirChannel or &mut BidirChannel
+            contains_bidir_channel(&type_ref.elem)
+        }
+        _ => false,
+    }
 }

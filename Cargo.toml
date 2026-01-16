@@ -1,9 +1,9 @@
 [package]
-name = "hub-macro"
+name = "hub-macro-bidir"
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Proc macros for hub method definitions with session types"
+description = "Proc macros for hub method definitions with session types and bidirectional support"
 
 [lib]
 proc-macro = true
@@ -15,7 +15,7 @@ syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
 uuid = { version = "1.0", features = ["v5"] }
 
 [dev-dependencies]
-substrate = { path = "../substrate", package = "substrate-hub" }
+substrate = { path = "../substrate-bidir", package = "substrate-hub" }
 dialectic = { version = "0.4.1", features = ["tokio"] }
 schemars = { version = "1.0.4", features = ["derive", "uuid1"] }
 serde = { version = "1.0", features = ["derive"] }
