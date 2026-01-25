@@ -221,12 +221,13 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     })
                     .collect::<Vec<_>>();
 
-                // Add the auto-generated schema method
+                // Add the auto-generated schema method with SchemaResult return type
                 let schema_method = #crate_path::plexus::MethodSchema::new(
                     "schema".to_string(),
                     "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.".to_string(),
                     "auto_schema".to_string(), // Fixed hash since it's auto-generated
-                );
+                )
+                .with_returns(schemars::schema_for!(#crate_path::plexus::SchemaResult));
                 methods.push(schema_method);
 
                 methods
