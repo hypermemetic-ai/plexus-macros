@@ -1,6 +1,6 @@
 [package]
 name = "plexus-macros"
-version = "0.2.1-worktree"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 description = "Procedural macros for Plexus RPC activations"
@@ -15,12 +15,16 @@ syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
 uuid = { version = "1.0", features = ["v5"] }
 
 [dev-dependencies]
-substrate = { path = "../substrate" }
-plexus-core = { path = "../hub-core" }
+plexus-substrate = "0.2.6"
+plexus-core = "0.2.1"
 dialectic = { version = "0.4.1", features = ["tokio"] }
 schemars = { version = "1.0.4", features = ["derive", "uuid1"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 trybuild = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
+
+[patch.crates-io]
+plexus-substrate = { path = "../plexus-substrate" }
+plexus-core = { path = "../plexus-core" }
 

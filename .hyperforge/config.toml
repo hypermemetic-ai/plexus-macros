@@ -1,0 +1,12 @@
+repo_name = "hub-macro"
+org = "hypermemetic"
+forges = [
+    "github",
+    "codeberg",
+]
+visibility = "public"
+default_branch = "main"
+
+[ssh]
+github = "hypermemetic-claude"
+codeberg = "hypermemetic-claude"
