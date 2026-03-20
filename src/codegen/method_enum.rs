@@ -103,6 +103,22 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
         .map(|m| m.streaming)
         .collect();
 
+    // Generate HTTP method enum values for each method (defaults to POST if not specified)
+    let http_methods: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| {
+            match m.http_method.as_deref() {
+                Some("GET") => quote! { #crate_path::plexus::schema::HttpMethod::Get },
+                Some("POST") => quote! { #crate_path::plexus::schema::HttpMethod::Post },
+                Some("PUT") => quote! { #crate_path::plexus::schema::HttpMethod::Put },
+                Some("DELETE") => quote! { #crate_path::plexus::schema::HttpMethod::Delete },
+                Some("PATCH") => quote! { #crate_path::plexus::schema::HttpMethod::Patch },
+                None => quote! { #crate_path::plexus::schema::HttpMethod::Post }, // Default
+                _ => quote! { #crate_path::plexus::schema::HttpMethod::Post }, // Fallback (should not happen due to validation)
+            }
+        })
+        .collect();
+
     // Generate bidirectional schema setup calls and their method indices.
     //
     // Each entry is a (index, TokenStream) pair where the TokenStream fragment
@@ -199,6 +215,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
                 let hashes: &[&str] = &[#(#method_hashes),*];
                 let streaming: &[bool] = &[#(#streaming_flags),*];
+                let http_methods: Vec<#crate_path::plexus::schema::HttpMethod> = vec![#(#http_methods),*];
                 let return_schemas: Vec<(Option<schemars::Schema>, Vec<&str>)> = vec![#(#return_schema_entries),*];
 
                 // Get the cached full enum schema
@@ -220,9 +237,10 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                     .zip(descriptions.iter())
                     .zip(hashes.iter())
                     .zip(streaming.iter())
+                    .zip(http_methods.into_iter())
                     .zip(return_schemas.into_iter())
                     .enumerate()
-                    .map(|(i, ((((name, desc), hash), is_streaming), (returns_opt, variant_filter)))| {
+                    .map(|(i, (((((name, desc), hash), is_streaming), http_method), (returns_opt, variant_filter)))| {
                         // Get this variant's schema from oneOf, then extract just the "params" portion
                         // The variant looks like: { properties: { method: {...}, params: {...} }, ... }
                         // We want just the params schema, but we need to merge in $defs from the root
@@ -261,6 +279,7 @@ pub fn generate(struct_name: &syn::Ident, methods: &[MethodInfo], crate_path: &s
                             schema = schema.with_returns(r);
                         }
                         schema = schema.with_streaming(*is_streaming);
+                        schema = schema.with_http_method(http_method);
 
                         // Apply bidirectional schema configuration.
                         // Uses a compile-time match on the method index so that type-level

@@ -34,6 +34,9 @@ pub struct HubMethodAttrs {
     pub streaming: bool,
     /// Bidirectional channel type (from #[hub_method(bidirectional)] or #[hub_method(bidirectional(request = "...", response = "..."))])
     pub bidirectional: BidirType,
+    /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
+    /// Stored as string during parsing, converted to enum in code generation
+    pub http_method: Option<String>,
 }
 
 impl Parse for HubMethodAttrs {
@@ -43,6 +46,7 @@ impl Parse for HubMethodAttrs {
         let mut returns_variants = Vec::new();
         let mut streaming = false;
         let mut bidirectional = BidirType::None;
+        let mut http_method = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -71,6 +75,25 @@ impl Parse for HubMethodAttrs {
                         if path.is_ident("name") {
                             if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
                                 name = Some(s.value());
+                            }
+                        } else if path.is_ident("http_method") {
+                            if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                                let method = s.value().to_uppercase();
+                                // Validate HTTP method
+                                match method.as_str() {
+                                    "GET" | "POST" | "PUT" | "DELETE" | "PATCH" => {
+                                        http_method = Some(method);
+                                    }
+                                    _ => {
+                                        return Err(syn::Error::new_spanned(
+                                            s,
+                                            format!(
+                                                "Invalid HTTP method '{}'. Valid methods: GET, POST, PUT, DELETE, PATCH",
+                                                method
+                                            ),
+                                        ));
+                                    }
+                                }
                             }
                         }
                     }
@@ -132,7 +155,7 @@ impl Parse for HubMethodAttrs {
             }
         }
 
-        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming, bidirectional })
+        Ok(HubMethodAttrs { name, param_docs, returns_variants, streaming, bidirectional, http_method })
     }
 }
 
@@ -266,6 +289,9 @@ pub struct MethodInfo {
     pub streaming: bool,
     /// Bidirectional channel type (from attribute or inferred from parameter type)
     pub bidirectional: BidirType,
+    /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
+    /// None defaults to POST
+    pub http_method: Option<String>,
 }
 
 impl MethodInfo {
@@ -300,6 +326,8 @@ impl MethodInfo {
         let streaming = hub_method_attrs
             .map(|a| a.streaming)
             .unwrap_or(false);
+        let http_method = hub_method_attrs
+            .and_then(|a| a.http_method.clone());
 
         // Get bidirectional from attribute (may be overridden by parameter type inference)
         let mut bidirectional = hub_method_attrs
@@ -374,6 +402,7 @@ impl MethodInfo {
             returns_variants,
             streaming,
             bidirectional,
+            http_method,
         })
     }
 }
