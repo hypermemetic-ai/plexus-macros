@@ -204,19 +204,84 @@ Explicit control over parameter handling:
 #[method]
 async fn execute(
     &self,
-    command: String,                    // Normal parameter (appears in schema)
+    command: String,                        // Normal parameter (appears in schema)
 
-    #[param(description = "Timeout in seconds")]
-    timeout: Option<u64>,               // Optional with custom description
+    #[desc("Timeout in seconds")]
+    timeout: Option<u64>,                   // Optional with custom description
 
-    #[skip] ctx: &ExecutionContext,     // Explicitly skip from schema
+    #[skip] ctx: &ExecutionContext,         // Explicitly skip from schema
 
-    #[param(default = "10")]
-    max_retries: u32,                   // Parameter with default value
+    #[default(10)]
+    max_retries: u32,                       // Parameter with default value
 ) -> Result<Output> { ... }
 ```
 
-**Key feature:** `#[skip]` makes parameter skipping explicit (no magic name-based detection).
+**Available parameter attributes:**
+- `#[desc("...")]` - Add description to schema (appears in API docs)
+- `#[skip]` - Exclude from schema (framework-provided params)
+- `#[default(value)]` - Specify default value (makes param optional)
+- `#[bidir]` - Mark as bidirectional channel parameter
+
+**Examples of all parameter patterns:**
+
+```rust
+#[method]
+async fn complex_method(
+    &self,
+
+    // Simple parameter (no annotation)
+    user_id: String,
+
+    // Parameter with description
+    #[desc("Maximum results to return")]
+    limit: usize,
+
+    // Optional parameter with description
+    #[desc("Filter by status")]
+    status: Option<Status>,
+
+    // Parameter with default value
+    #[default(10)]
+    page_size: usize,
+
+    // Parameter with both description and default
+    #[desc("Timeout in seconds")]
+    #[default(30)]
+    timeout: u64,
+
+    // Framework-provided parameter (not in schema)
+    #[skip]
+    ctx: &RequestContext,
+
+    // Bidirectional channel (marked explicitly)
+    #[bidir]
+    channel: &BidirChannel<Req, Resp>,
+) -> Result<Output> { ... }
+```
+
+**Key features:**
+- `#[skip]` makes parameter skipping explicit (no magic name-based detection)
+- Descriptions are inline with parameters (no duplication, refactoring-friendly)
+- Multiple attributes can be combined (e.g., `#[desc("...")] #[default(10)]`)
+
+---
+
+### Advanced: Doc Comments on Parameters (Future)
+
+In the future, we could support extracting descriptions from doc comments:
+
+```rust
+#[method]
+async fn execute(
+    &self,
+    /// The command to execute
+    command: String,
+    /// Timeout in seconds
+    timeout: Option<u64>,
+) -> Result<Output> { ... }
+```
+
+This would require rustc API support for parameter doc comments, which is currently unstable. Until then, `#[desc("...")]` is the recommended approach.
 
 ---
 
@@ -380,10 +445,8 @@ impl LogService {
     #[method(stream = Multi)]
     async fn history(
         &self,
-        #[param(description = "Start timestamp")]
-        from: DateTime<Utc>,
-        #[param(description = "End timestamp")]
-        to: DateTime<Utc>,
+        #[desc("Start timestamp")] from: DateTime<Utc>,
+        #[desc("End timestamp")] to: DateTime<Utc>,
     ) -> impl Stream<Item = LogEntry> { ... }
 
     /// Subscribe to live logs (infinite stream)
@@ -471,6 +534,54 @@ impl DatabaseService {
 
 ---
 
+## Parameter Documentation: Old vs New
+
+### Current System (Awkward)
+
+```rust
+#[hub_method(params(
+    command = "Command to execute",
+    timeout = "Timeout in seconds",
+    retries = "Number of retries"
+))]
+async fn execute(
+    &self,
+    command: String,
+    timeout: Option<u64>,
+    retries: usize,
+) -> Result<Output> { ... }
+```
+
+**Problems:**
+- Parameter names are repeated (once in params, once in signature)
+- Easy to get out of sync (rename param → forget to update params)
+- Descriptions are far from the parameters they document
+- No IDE support (params is just a string map)
+- Can't see param type when reading description
+
+---
+
+### New System (Inline & Clear)
+
+```rust
+#[method]
+async fn execute(
+    &self,
+    #[desc("Command to execute")] command: String,
+    #[desc("Timeout in seconds")] timeout: Option<u64>,
+    #[desc("Number of retries")] retries: usize,
+) -> Result<Output> { ... }
+```
+
+**Benefits:**
+- Description right next to parameter (easy to read)
+- No duplication (name appears once)
+- IDE support (attributes on parameters)
+- Refactoring-friendly (rename updates everything)
+- Type visible next to description
+
+---
+
 ## Comparison: Current vs Target DX
 
 ### Current (Implicit, Magical)
@@ -478,7 +589,7 @@ impl DatabaseService {
 ```rust
 #[hub_methods(namespace = "bash", hub)]
 impl Bash {
-    #[hub_method(streaming)]
+    #[hub_method(streaming, params(command = "Shell command to execute"))]
     async fn execute(
         &self,
         command: String,
@@ -491,6 +602,7 @@ impl Bash {
 - `hub` flag is mysterious
 - `streaming` is a boolean (what does true mean exactly?)
 - `ctx` parameter disappears from schema with no indication
+- Parameter docs are awkward: `params(command = "description")`
 - Generated `BashMethod` enum is hidden
 - Auto-injected `schema` method is surprising
 - Can't override any names or behavior
@@ -513,7 +625,7 @@ impl Bash {
     )]
     async fn execute(
         &self,
-        command: String,
+        #[desc("Shell command to execute")] command: String,  // ← Clean inline docs
         #[skip] ctx: &ExecutionContext,  // ← Explicit: skip from schema
     ) -> impl Stream<Item = BashEvent> { ... }
 }
@@ -524,7 +636,8 @@ impl Bash {
 - Enums instead of strings/booleans
 - Generated names are predictable or configurable
 - Magic features are opt-in
-- Parameter handling is clear
+- Parameter handling is clear and inline
+- Descriptions are next to the parameters they document
 
 ---
 
@@ -695,7 +808,9 @@ error: missing required attribute `namespace`
 | **Naming** | `#[hub_methods]` | `#[activation]` | Clear, not overloaded |
 | **Streaming** | `streaming = true` | `stream = Multi` | Explicit intent |
 | **HTTP Methods** | `http_method = "GET"` | `http = GET` | Type-safe |
-| **Parameters** | Magic name detection | `#[skip]` attribute | Explicit |
+| **Param Docs** | `params(x = "desc")` | `#[desc("desc")] x` | Inline, no duplication |
+| **Param Skipping** | Magic name detection | `#[skip]` attribute | Explicit |
+| **Param Defaults** | Not supported | `#[default(val)]` | Native support |
 | **Children** | `hub` boolean | `children = true` | Self-documenting |
 | **Schema Method** | Auto-injected | `schema_method = true` | Opt-in |
 | **Generated Names** | Hidden | `methods_enum = "..."` | Configurable |
