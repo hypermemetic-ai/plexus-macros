@@ -292,6 +292,8 @@ pub struct MethodInfo {
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
     /// None defaults to POST
     pub http_method: Option<String>,
+    /// True if method requires auth context (detected from `auth: &AuthContext` parameter)
+    pub requires_auth: bool,
 }
 
 impl MethodInfo {
@@ -334,6 +336,9 @@ impl MethodInfo {
             .map(|a| a.bidirectional.clone())
             .unwrap_or(BidirType::None);
 
+        // Track if method requires auth
+        let mut requires_auth = false;
+
         // Extract parameters after &self
         let mut params = Vec::new();
         for arg in &method.sig.inputs {
@@ -341,6 +346,16 @@ impl MethodInfo {
                 if let Pat::Ident(ident) = &*pat_type.pat {
                     let name = ident.ident.clone();
                     let name_str = name.to_string();
+
+                    // Check if this is an auth context parameter
+                    // Detect auth: &AuthContext
+                    if name_str == "auth" {
+                        if is_auth_context_type(&pat_type.ty) {
+                            requires_auth = true;
+                            // Don't include auth in params (it's provided by framework)
+                            continue;
+                        }
+                    }
 
                     // Check if this is a bidirectional context parameter
                     // Detect ctx: &BidirChannel<Req, Resp> or ctx: &StandardBidirChannel
@@ -403,8 +418,42 @@ impl MethodInfo {
             streaming,
             bidirectional,
             http_method,
+            requires_auth,
         })
     }
+}
+
+/// Check if a type is &AuthContext or Option<&AuthContext>
+/// Matches:
+/// - &AuthContext
+/// - Option<&AuthContext>
+fn is_auth_context_type(ty: &Type) -> bool {
+    // Handle &AuthContext
+    if let Type::Reference(type_ref) = ty {
+        if let Type::Path(type_path) = &*type_ref.elem {
+            if let Some(last_segment) = type_path.path.segments.last() {
+                if last_segment.ident == "AuthContext" {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Handle Option<&AuthContext>
+    if let Type::Path(type_path) = ty {
+        if let Some(last_segment) = type_path.path.segments.last() {
+            if last_segment.ident == "Option" {
+                if let PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                    if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                        // Recursively check inner type
+                        return is_auth_context_type(inner_ty);
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Extract BidirChannel type parameters from a type like &BidirChannel<Req, Resp>

@@ -48,7 +48,7 @@ pub fn generate(
     // Generate call() fallback - hub routes to children, leaf returns error
     let call_fallback = if hub {
         quote! {
-            #crate_path::plexus::route_to_child(self, method, params).await
+            #crate_path::plexus::route_to_child(self, method, params, auth).await
         }
     } else {
         quote! {
@@ -226,6 +226,7 @@ pub fn generate(
                 &self,
                 method: &str,
                 params: serde_json::Value,
+                auth: Option<&#crate_path::plexus::AuthContext>,
             ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
                 // Try local methods first
                 match method {
@@ -456,14 +457,31 @@ fn generate_dispatch_arms(
 
             let content_type = format!("{}.{}", namespace, method_name);
 
+            // Generate auth injection code if needed
+            let auth_injection = if m.requires_auth {
+                quote! {
+                    let auth_ctx = auth.ok_or_else(|| #crate_path::plexus::PlexusError::Unauthenticated("This method requires authentication".to_string()))?;
+                }
+            } else {
+                quote! {}
+            };
+
+            // Build parameter list for method call
+            let method_params = if m.requires_auth {
+                quote! { auth_ctx, #(#param_names),* }
+            } else {
+                quote! { #(#param_names),* }
+            };
+
             // Generate code based on bidirectional type
             match &m.bidirectional {
                 BidirType::None => {
                     // No bidirectional - simple wrap_stream
                     quote! {
                         #method_name => {
+                            #auth_injection
                             #param_extraction
-                            let stream = self.#fn_name(#(#param_names),*).await;
+                            let stream = self.#fn_name(#method_params).await;
                             Ok(#crate_path::plexus::wrap_stream(
                                 stream,
                                 #content_type,
@@ -473,9 +491,17 @@ fn generate_dispatch_arms(
                     }
                 }
                 BidirType::Standard => {
+                    // Build param list for bidir - ctx comes first, then auth if needed, then regular params
+                    let bidir_params = if m.requires_auth {
+                        quote! { &ctx, auth_ctx, #(#param_names),* }
+                    } else {
+                        quote! { &ctx, #(#param_names),* }
+                    };
+
                     // StandardBidirChannel - use wrap_stream_with_bidir
                     quote! {
                         #method_name => {
+                            #auth_injection
                             #param_extraction
                             // Create bidir channel and wrap stream together
                             let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
@@ -484,7 +510,7 @@ fn generate_dispatch_arms(
                             >(#content_type, vec![#namespace.into()]);
 
                             // Call the method with the bidir channel
-                            let user_stream = self.#fn_name(&ctx, #(#param_names),*).await;
+                            let user_stream = self.#fn_name(#bidir_params).await;
 
                             // Wrap the user's stream and merge with bidir requests
                             let wrapped_user = #crate_path::plexus::wrap_stream(
@@ -497,11 +523,19 @@ fn generate_dispatch_arms(
                     }
                 }
                 BidirType::Custom { request, response } => {
+                    // Build param list for bidir - ctx comes first, then auth if needed, then regular params
+                    let bidir_params = if m.requires_auth {
+                        quote! { &ctx, auth_ctx, #(#param_names),* }
+                    } else {
+                        quote! { &ctx, #(#param_names),* }
+                    };
+
                     // Custom BidirChannel - use wrap_stream_with_bidir with custom types
                     let req_ty: syn::Type = syn::parse_str(request).unwrap_or_else(|_| syn::parse_quote!(()));
                     let resp_ty: syn::Type = syn::parse_str(response).unwrap_or_else(|_| syn::parse_quote!(()));
                     quote! {
                         #method_name => {
+                            #auth_injection
                             #param_extraction
                             // Create bidir channel and wrap stream together
                             let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
@@ -510,7 +544,7 @@ fn generate_dispatch_arms(
                             >(#content_type, vec![#namespace.into()]);
 
                             // Call the method with the bidir channel
-                            let user_stream = self.#fn_name(&ctx, #(#param_names),*).await;
+                            let user_stream = self.#fn_name(#bidir_params).await;
 
                             // Wrap the user's stream and merge with bidir requests
                             let wrapped_user = #crate_path::plexus::wrap_stream(
