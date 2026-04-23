@@ -1,8 +1,8 @@
 //! Generate method enum from hub methods
 
-use crate::parse::{BidirType, ChildMethodInfo, ChildMethodKind, MethodInfo, ParsedDeprecation};
+use crate::parse::{BidirType, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -11,6 +11,7 @@ pub fn generate(
     methods: &[MethodInfo],
     child_methods: &[ChildMethodInfo],
     crate_path: &syn::Path,
+    activation_request_type: Option<&syn::Type>,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
 
@@ -164,6 +165,36 @@ pub fn generate(
         .map(|c| child_schema_entry(c, crate_path))
         .collect();
 
+    // REQ-6: per-method auth resolver entries — ((param_name, resolver_expr_string)).
+    // Used at runtime to inject `x-plexus-source: { from: "auth", resolver: "..." }`
+    // properties into the method's params schema.
+    let auth_entries_per_method: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| {
+            let entries: Vec<TokenStream> = m.auth_resolvers
+                .iter()
+                .map(|r| {
+                    let name = r.param_name.to_string();
+                    let expr_str = r.resolver_expr.to_token_stream().to_string();
+                    quote! { (#name, #expr_str) }
+                })
+                .collect();
+            quote! { &[#(#entries),*] as &[(&str, &str)] }
+        })
+        .collect();
+
+    // REQ-6: per-method override flag — `true` means `request = ()`, skip activation-level merge.
+    let method_override_is_skip: Vec<bool> = methods
+        .iter()
+        .map(|m| matches!(m.request_override, Some(MethodRequestOverride::Skip)))
+        .collect();
+
+    // REQ-6: activation-level request schema token — `Some(schemars::schema_for!(T))` or `None`.
+    let activation_request_schema_expr: TokenStream = match activation_request_type {
+        Some(ty) => quote! { Some(schemars::schema_for!(#ty)) },
+        None     => quote! { None },
+    };
+
     // Generate bidirectional schema setup calls and their method indices.
     //
     // Each entry is a (index, TokenStream) pair where the TokenStream fragment
@@ -263,6 +294,17 @@ pub fn generate(
                 let http_methods: Vec<#crate_path::plexus::schema::HttpMethod> = vec![#(#http_methods),*];
                 let return_schemas: Vec<(Option<schemars::Schema>, Vec<&str>)> = vec![#(#return_schema_entries),*];
 
+                // REQ-6 runtime data: per-method auth resolvers, override flags, activation request schema.
+                let auth_entries_per_method: Vec<&[(&str, &str)]> = vec![#(#auth_entries_per_method),*];
+                let method_override_is_skip: &[bool] = &[#(#method_override_is_skip),*];
+                let activation_request_schema: Option<schemars::Schema> = #activation_request_schema_expr;
+                let activation_request_props: Option<serde_json::Map<String, serde_json::Value>> =
+                    activation_request_schema
+                        .as_ref()
+                        .and_then(|s| serde_json::to_value(s).ok())
+                        .and_then(|v| v.get("properties").cloned())
+                        .and_then(|v| match v { serde_json::Value::Object(m) => Some(m), _ => None });
+
                 // Get the cached full enum schema
                 let schema_value = Self::cached_schema();
 
@@ -310,6 +352,48 @@ pub fn generate(
                             } else {
                                 Self::filter_return_schema(schema, &variant_filter)
                             }
+                        });
+
+                        // REQ-6: augment the method's params schema with:
+                        //   (a) #[from_auth(expr)] properties tagged x-plexus-source: { from: "auth", resolver: ... }
+                        //   (b) activation-level request struct properties (when the activation declared `request = X`
+                        //       and this method does NOT have `request = ()` override)
+                        // Properties added here are NOT marked required — they are server-extracted.
+                        let params = params.map(|p| {
+                            let mut p_val: serde_json::Value = serde_json::to_value(&p).unwrap_or_default();
+                            if let Some(obj) = p_val.as_object_mut() {
+                                // Ensure properties object exists
+                                let properties = obj
+                                    .entry("properties".to_string())
+                                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                                if let serde_json::Value::Object(props_map) = properties {
+                                    // (a) auth resolvers
+                                    for (pname, rexpr) in auth_entries_per_method[i].iter() {
+                                        props_map.insert(
+                                            (*pname).to_string(),
+                                            serde_json::json!({
+                                                "x-plexus-source": {
+                                                    "from": "auth",
+                                                    "resolver": rexpr,
+                                                }
+                                            }),
+                                        );
+                                    }
+                                    // (b) activation-level request fields (if present and not overridden)
+                                    if !method_override_is_skip[i] {
+                                        if let Some(req_props) = activation_request_props.as_ref() {
+                                            for (fname, fschema) in req_props.iter() {
+                                                // Don't clobber existing properties (e.g., an auth resolver
+                                                // param happening to share a name).
+                                                if !props_map.contains_key(fname) {
+                                                    props_map.insert(fname.clone(), fschema.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            serde_json::from_value::<schemars::Schema>(p_val).unwrap_or(p)
                         });
 
                         let mut schema = #crate_path::plexus::MethodSchema::new(

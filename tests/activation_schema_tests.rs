@@ -104,26 +104,48 @@ fn activation_with_no_request_has_no_request_field() {
 }
 
 #[test]
-fn activation_param_not_in_method_rpc_schema() {
+fn activation_param_appears_in_method_schema_with_source_annotation() {
+    // REQ-6: activation-level request fields are merged into every method's
+    // params schema (unless overridden by the method with `request = ()`).
+    // The injected fields carry `x-plexus-source` identifying where they come
+    // from (cookie / header / query / derived), so clients reading the method
+    // schema can see the full contract.
     let hub = TestHub;
     let schema = hub.plugin_schema();
     let schema_json = serde_json::to_value(&schema).unwrap();
 
-    // Find the list method
     let methods = schema_json["methods"].as_array().unwrap();
     let list = methods.iter().find(|m| m["name"].as_str() == Some("list")).unwrap();
 
-    // auth_token is #[activation_param] and must NOT appear in params
+    // search IS an RPC param and MUST appear in the params schema.
     let params = &list["params"];
-    if let Some(props) = params["properties"].as_object() {
-        assert!(
-            !props.contains_key("auth_token"),
-            "#[activation_param] auth_token must not appear in method params schema"
-        );
-    }
+    let props = params["properties"]
+        .as_object()
+        .expect("params.properties must be an object");
+    assert!(props.contains_key("search"), "search must appear in method params");
 
-    // search IS a normal param and MUST appear
-    let has_search = list["params"]["properties"]["search"].is_object()
-        || list["params"].to_string().contains("search");
-    assert!(has_search, "search must appear in method params");
+    // auth_token comes from the activation-level request struct; REQ-6 surfaces
+    // it in the method's params with an x-plexus-source annotation.
+    assert!(
+        props.contains_key("auth_token"),
+        "REQ-6: activation request field auth_token must be merged into method params"
+    );
+    assert_eq!(
+        props["auth_token"]["x-plexus-source"]["from"],
+        "cookie",
+        "auth_token x-plexus-source.from should be 'cookie' (inherited from request struct)"
+    );
+    assert_eq!(
+        props["auth_token"]["x-plexus-source"]["key"],
+        "access_token",
+        "auth_token x-plexus-source.key should be 'access_token'"
+    );
+
+    // peer_addr also inherits via the activation's request struct.
+    assert!(props.contains_key("peer_addr"));
+    assert_eq!(
+        props["peer_addr"]["x-plexus-source"]["from"],
+        "derived",
+        "peer_addr x-plexus-source.from should be 'derived' (#[from_peer])"
+    );
 }

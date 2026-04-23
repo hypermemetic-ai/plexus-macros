@@ -358,8 +358,13 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     );
 
     // Generate pieces
-    let method_enum =
-        method_enum::generate(&struct_name, &methods, &schema_child_methods, &crate_path);
+    let method_enum = method_enum::generate(
+        &struct_name,
+        &methods,
+        &schema_child_methods,
+        &crate_path,
+        args.request_type.as_ref(),  // REQ-6: activation-level request type (for runtime merge)
+    );
     let activation_impl = activation::generate(
         &struct_name,
         self_ty,
