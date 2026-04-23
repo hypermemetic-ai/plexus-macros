@@ -1,0 +1,5 @@
+error: RED-6: activation `StrictMissing` is `auth = "required"` but method `leak` has no #[from_auth(...)] and no #[plexus_macros::method(public)] acknowledgment. Either gate the method with #[from_auth(resolver)] or explicitly mark it public with #[plexus_macros::method(public)].
+  --> tests/compile/red6_required_rejects_unauth_method.rs:37:14
+   |
+37 |     async fn leak(&self) -> impl futures::stream::Stream<Item = String> + Send + 'static {
+   |              ^^^^

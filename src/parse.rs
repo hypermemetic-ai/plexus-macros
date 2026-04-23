@@ -304,11 +304,30 @@ pub struct HubMethodsAttrs {
     pub required_fields: Vec<syn::Ident>,
     /// Span of the `required = [...]` attribute for diagnostics.
     pub required_fields_span: Option<proc_macro2::Span>,
-    /// RED-2: explicit acknowledgment of mixed auth posture.
-    /// When `true` (set by `auth_posture = "mixed"`), the macro suppresses
-    /// the warning that fires when an activation has both `#[from_auth]` and
-    /// non-`#[from_auth]` methods.
-    pub auth_posture_mixed: bool,
+    /// RED-6: declared auth posture for this activation.
+    ///
+    /// - `Required`: every method must have `#[from_auth]` OR
+    ///   `#[plexus_macros::method(public)]` — compile error otherwise.
+    /// - `Optional` (default): no enforcement; RED-2 emits a compile warning
+    ///   when auth is asymmetric across methods.
+    /// - `Mixed`: like `Optional`, but suppresses the RED-2 warning —
+    ///   explicit acknowledgment that the asymmetry is intentional.
+    /// - `None`: no method may have `#[from_auth]` — compile error if any
+    ///   method does. Affirmative declaration of a public activation.
+    ///
+    /// Parsed from `auth = "required" | "optional" | "mixed" | "none"`.
+    pub auth_posture: AuthPosture,
+}
+
+/// RED-6: declared auth enforcement posture for an activation.
+/// See `HubMethodsAttrs::auth_posture` for semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthPosture {
+    Required,
+    #[default]
+    Optional,
+    Mixed,
+    None,
 }
 
 impl Parse for HubMethodsAttrs {
@@ -328,7 +347,7 @@ impl Parse for HubMethodsAttrs {
         let mut children_span: Option<proc_macro2::Span> = None;
         let mut required_fields: Vec<syn::Ident> = Vec::new();
         let mut required_fields_span: Option<proc_macro2::Span> = None;
-        let mut auth_posture_mixed = false;
+        let mut auth_posture = AuthPosture::Optional;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -384,20 +403,23 @@ impl Parse for HubMethodsAttrs {
                                 plugin_id = Some(id_str);
                             } else if path.is_ident("namespace_fn") {
                                 namespace_fn = Some(s.value());
-                            } else if path.is_ident("auth_posture") {
-                                // RED-2: explicit acknowledgment of mixed auth posture.
-                                // Currently the only supported value is "mixed" — silences
-                                // the compile warning that fires when an activation has
-                                // both #[from_auth] and non-#[from_auth] methods.
+                            } else if path.is_ident("auth") {
+                                // RED-6: declared auth enforcement posture.
+                                // See HubMethodsAttrs::auth_posture for semantics.
                                 let v = s.value();
-                                if v == "mixed" {
-                                    auth_posture_mixed = true;
-                                } else {
-                                    return Err(syn::Error::new(
+                                auth_posture = match v.as_str() {
+                                    "required" => AuthPosture::Required,
+                                    "optional" => AuthPosture::Optional,
+                                    "mixed"    => AuthPosture::Mixed,
+                                    "none"     => AuthPosture::None,
+                                    other => return Err(syn::Error::new(
                                         s.span(),
-                                        format!("auth_posture must be \"mixed\" (only supported value), got: {:?}", v),
-                                    ));
-                                }
+                                        format!(
+                                            "auth must be one of \"required\", \"optional\", \"mixed\", \"none\"; got {:?}",
+                                            other,
+                                        ),
+                                    )),
+                                };
                             }
                         }
                     }
@@ -454,7 +476,7 @@ impl Parse for HubMethodsAttrs {
             children_span,
             required_fields,
             required_fields_span,
-            auth_posture_mixed,
+            auth_posture,
         })
     }
 }

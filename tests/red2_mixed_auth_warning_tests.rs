@@ -82,7 +82,7 @@ impl MixedActivationOptOut {
 #[plexus_macros::activation(
     namespace = "mixed_activation_opt_out",
     request = Req,
-    auth_posture = "mixed",
+    auth = "mixed",
     crate_path = "plexus_core",
 )]
 impl MixedActivationOptOut {

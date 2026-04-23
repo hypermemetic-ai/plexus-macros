@@ -405,11 +405,57 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &struct_name,
     );
 
+    // RED-6: enforce declared auth posture.
+    //
+    // - `auth = "required"`: every method must either use #[from_auth] OR
+    //   carry #[plexus_macros::method(public)]. Compile error otherwise.
+    // - `auth = "none"`: no method may use #[from_auth]. Compile error if any.
+    // - `auth = "optional"` (default): no enforcement. RED-2 emits a warning
+    //   when auth is asymmetric across methods in this activation.
+    // - `auth = "mixed"`: like optional but suppresses the RED-2 warning
+    //   (explicit acknowledgment of the asymmetry).
+    match args.auth_posture {
+        crate::parse::AuthPosture::Required => {
+            for m in &methods {
+                if m.auth_resolvers.is_empty() && !m.public {
+                    return Err(syn::Error::new(
+                        m.fn_name.span(),
+                        format!(
+                            "RED-6: activation `{}` is `auth = \"required\"` but method \
+                             `{}` has no #[from_auth(...)] and no \
+                             #[plexus_macros::method(public)] acknowledgment. \
+                             Either gate the method with #[from_auth(resolver)] \
+                             or explicitly mark it public with \
+                             #[plexus_macros::method(public)].",
+                            struct_name, m.method_name,
+                        ),
+                    ));
+                }
+            }
+        }
+        crate::parse::AuthPosture::None => {
+            for m in &methods {
+                if !m.auth_resolvers.is_empty() {
+                    return Err(syn::Error::new(
+                        m.fn_name.span(),
+                        format!(
+                            "RED-6: activation `{}` is `auth = \"none\"` (affirmative public) \
+                             but method `{}` uses #[from_auth(...)]. Remove the \
+                             annotation or change the activation's auth posture.",
+                            struct_name, m.method_name,
+                        ),
+                    ));
+                }
+            }
+        }
+        crate::parse::AuthPosture::Mixed | crate::parse::AuthPosture::Optional => {}
+    }
+
     // RED-2: warn when the activation has methods with #[from_auth] and other
-    // methods without — the asymmetry is almost always a bug (forgot the
-    // annotation). Suppressed by `auth_posture = "mixed"` on the activation
-    // or `#[plexus_macros::method(public)]` on each non-auth method.
-    let mixed_auth_warning = mixed_auth_warning(&methods, args.auth_posture_mixed, &struct_name);
+    // methods without. Suppressed under `auth = "mixed"` (explicit) and the
+    // two strict postures (where compile-time errors already cover the cases).
+    let suppress_mixed_warning = !matches!(args.auth_posture, crate::parse::AuthPosture::Optional);
+    let mixed_auth_warning = mixed_auth_warning(&methods, suppress_mixed_warning, &struct_name);
 
     // Generate pieces
     let method_enum = method_enum::generate(
