@@ -147,6 +147,32 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         }
     }
 
+    // REQ-10: validate per-method request overrides against the activation's
+    // `required = [...]` lock list. If the activation has any required fields
+    // and a method uses `request = ()`, emit a compile error naming the
+    // fields that would be dropped.
+    if !args.required_fields.is_empty() {
+        for m in &methods {
+            if matches!(m.request_override, Some(crate::parse::MethodRequestOverride::Skip)) {
+                let required_names: Vec<String> = args.required_fields
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect();
+                return Err(syn::Error::new(
+                    m.fn_name.span(),
+                    format!(
+                        "REQ-10: method `{}` uses `request = ()` but activation's `required = [{}]` \
+                         locks these fields. Either remove the method-level `request = ()` override \
+                         or remove the activation's `required` list (or move the method to a \
+                         different activation).",
+                        m.method_name,
+                        required_names.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+
     // IR-5: capture activation-level `#[deprecated]` (+ optional
     // `#[plexus_macros::removed_in]`) from the impl block's attributes
     // BEFORE the IR-3 cleanup below strips the `#[removed_in]` companion.

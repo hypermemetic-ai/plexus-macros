@@ -287,6 +287,14 @@ pub struct HubMethodsAttrs {
     pub children: Vec<syn::Ident>,
     /// IR-5: span of the `children = [...]` attribute, for deprecation warning.
     pub children_span: Option<proc_macro2::Span>,
+    /// REQ-10: locked fields of the activation-level request struct.
+    /// When non-empty, methods CANNOT use `#[plexus_macros::method(request = ())]`
+    /// to drop activation-level extraction — the macro emits a compile error
+    /// naming the locked fields. Field idents must be in the activation's
+    /// request struct.
+    pub required_fields: Vec<syn::Ident>,
+    /// Span of the `required = [...]` attribute for diagnostics.
+    pub required_fields_span: Option<proc_macro2::Span>,
 }
 
 impl Parse for HubMethodsAttrs {
@@ -304,6 +312,8 @@ impl Parse for HubMethodsAttrs {
         let mut request_type: Option<syn::Type> = None;
         let mut children: Vec<syn::Ident> = Vec::new();
         let mut children_span: Option<proc_macro2::Span> = None;
+        let mut required_fields: Vec<syn::Ident> = Vec::new();
+        let mut required_fields_span: Option<proc_macro2::Span> = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -379,6 +389,14 @@ impl Parse for HubMethodsAttrs {
                             children = idents.into_iter().collect();
                             children_span = Some(list.path.span());
                         }
+                        // REQ-10: required = [field_a, field_b, ...] — activation-level
+                        // lock list. Methods may not drop these with `request = ()`.
+                        else if list.path.is_ident("required") {
+                            let parser = Punctuated::<syn::Ident, Token![,]>::parse_terminated;
+                            let idents = syn::parse::Parser::parse2(parser, list.tokens.clone())?;
+                            required_fields = idents.into_iter().collect();
+                            required_fields_span = Some(list.path.span());
+                        }
                     }
                 }
             }
@@ -405,6 +423,8 @@ impl Parse for HubMethodsAttrs {
             request_type,
             children,
             children_span,
+            required_fields,
+            required_fields_span,
         })
     }
 }
