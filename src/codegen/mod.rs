@@ -405,6 +405,12 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &struct_name,
     );
 
+    // RED-2: warn when the activation has methods with #[from_auth] and other
+    // methods without — the asymmetry is almost always a bug (forgot the
+    // annotation). Suppressed by `auth_posture = "mixed"` on the activation
+    // or `#[plexus_macros::method(public)]` on each non-auth method.
+    let mixed_auth_warning = mixed_auth_warning(&methods, args.auth_posture_mixed, &struct_name);
+
     // Generate pieces
     let method_enum = method_enum::generate(
         &struct_name,
@@ -444,6 +450,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         #activation_impl
         #hub_deprecation_warning
         #children_deprecation_warning
+        #mixed_auth_warning
     })
 }
 
@@ -523,6 +530,78 @@ fn children_arg_deprecation_warning(
             since = "0.5",
             note = "plexus-macros: the 'children' attribute argument is deprecated; use #[plexus_macros::child] on the accessor method(s) instead. This argument will be removed in plexus-macros 0.6."
         )]
+        const #const_name: () = ();
+
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        fn #touch_fn_name() {
+            let _ = #const_name;
+        }
+    }
+}
+
+/// RED-2: emit a compile-time warning when an activation has a mix of
+/// methods that use `#[from_auth(...)]` and methods that don't. The
+/// asymmetry is almost always a bug — a developer added a new method
+/// to an auth'd activation and forgot the annotation.
+///
+/// Suppression mechanisms:
+/// - Activation declares `auth_posture = "mixed"` (intentional)
+/// - Each non-auth method carries `#[plexus_macros::method(public)]`
+///
+/// Uses the same dummy-deprecated-const pattern as the IR-5 warnings.
+fn mixed_auth_warning(
+    methods: &[crate::parse::MethodInfo],
+    auth_posture_mixed: bool,
+    struct_name: &syn::Ident,
+) -> TokenStream {
+    if auth_posture_mixed {
+        return TokenStream::new();
+    }
+    let any_auth = methods.iter().any(|m| !m.auth_resolvers.is_empty());
+    if !any_auth {
+        return TokenStream::new();
+    }
+    let unauthed: Vec<&crate::parse::MethodInfo> = methods
+        .iter()
+        .filter(|m| m.auth_resolvers.is_empty() && !m.public)
+        .collect();
+    if unauthed.is_empty() {
+        return TokenStream::new();
+    }
+    let names = unauthed
+        .iter()
+        .map(|m| m.method_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let note = format!(
+        "plexus-macros (RED-2): activation `{}` mixes auth and non-auth \
+         methods. The following methods do NOT have `#[from_auth(...)]`: {}. \
+         If this is intentional, add `auth_posture = \"mixed\"` to the \
+         activation attribute, or `#[plexus_macros::method(public)]` to each \
+         intentionally-public method. Otherwise, the missing methods will \
+         dispatch unauthenticated.",
+        struct_name,
+        names,
+    );
+    let span = unauthed
+        .first()
+        .map(|m| m.fn_name.span())
+        .unwrap_or_else(|| struct_name.span());
+    let const_name = format_ident!(
+        "_PLEXUS_MACROS_MIXED_AUTH_WARNING_{}",
+        struct_name,
+        span = span,
+    );
+    let touch_fn_name = format_ident!(
+        "_plexus_macros_touch_mixed_auth_warning_{}",
+        struct_name,
+        span = span,
+    );
+    quote::quote_spanned! { span =>
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals, non_snake_case, dead_code)]
+        #[deprecated(since = "0.5", note = #note)]
         const #const_name: () = ();
 
         #[doc(hidden)]

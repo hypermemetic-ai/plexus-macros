@@ -102,6 +102,10 @@ pub struct HubMethodAttrs {
     /// bypasses the activation-level request extraction even if the activation has
     /// `request = MyType`. `None` means inherit the activation-level behavior.
     pub request_override: Option<MethodRequestOverride>,
+    /// RED-2: explicit acknowledgment that this method is intentionally
+    /// public (no auth). Set by `#[plexus_macros::method(public)]`. Suppresses
+    /// the mixed-auth warning for this method.
+    pub public: bool,
 }
 
 impl Parse for HubMethodAttrs {
@@ -114,6 +118,7 @@ impl Parse for HubMethodAttrs {
         let mut bidirectional = BidirType::None;
         let mut http_method = None;
         let mut request_override: Option<MethodRequestOverride> = None;
+        let mut public = false;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -136,6 +141,10 @@ impl Parse for HubMethodAttrs {
                             streaming = true;
                         } else if path.is_ident("bidirectional") {
                             bidirectional = BidirType::Standard;
+                        } else if path.is_ident("public") {
+                            // RED-2: explicit acknowledgment that this method
+                            // intentionally bypasses activation-level auth.
+                            public = true;
                         }
                     }
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
@@ -245,7 +254,7 @@ impl Parse for HubMethodAttrs {
             }
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override })
+        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public })
     }
 }
 
@@ -295,6 +304,11 @@ pub struct HubMethodsAttrs {
     pub required_fields: Vec<syn::Ident>,
     /// Span of the `required = [...]` attribute for diagnostics.
     pub required_fields_span: Option<proc_macro2::Span>,
+    /// RED-2: explicit acknowledgment of mixed auth posture.
+    /// When `true` (set by `auth_posture = "mixed"`), the macro suppresses
+    /// the warning that fires when an activation has both `#[from_auth]` and
+    /// non-`#[from_auth]` methods.
+    pub auth_posture_mixed: bool,
 }
 
 impl Parse for HubMethodsAttrs {
@@ -314,6 +328,7 @@ impl Parse for HubMethodsAttrs {
         let mut children_span: Option<proc_macro2::Span> = None;
         let mut required_fields: Vec<syn::Ident> = Vec::new();
         let mut required_fields_span: Option<proc_macro2::Span> = None;
+        let mut auth_posture_mixed = false;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -369,6 +384,20 @@ impl Parse for HubMethodsAttrs {
                                 plugin_id = Some(id_str);
                             } else if path.is_ident("namespace_fn") {
                                 namespace_fn = Some(s.value());
+                            } else if path.is_ident("auth_posture") {
+                                // RED-2: explicit acknowledgment of mixed auth posture.
+                                // Currently the only supported value is "mixed" — silences
+                                // the compile warning that fires when an activation has
+                                // both #[from_auth] and non-#[from_auth] methods.
+                                let v = s.value();
+                                if v == "mixed" {
+                                    auth_posture_mixed = true;
+                                } else {
+                                    return Err(syn::Error::new(
+                                        s.span(),
+                                        format!("auth_posture must be \"mixed\" (only supported value), got: {:?}", v),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -425,6 +454,7 @@ impl Parse for HubMethodsAttrs {
             children_span,
             required_fields,
             required_fields_span,
+            auth_posture_mixed,
         })
     }
 }
@@ -1131,6 +1161,10 @@ pub struct MethodInfo {
     /// Per-method request override. `Some(Skip)` means `request = ()` was set on this method,
     /// which causes the dispatch wrapper to skip activation-level request extraction.
     pub request_override: Option<MethodRequestOverride>,
+    /// RED-2: explicit-public flag (mirrored from `HubMethodAttrs::public`).
+    /// `true` when `#[plexus_macros::method(public)]` is set; suppresses the
+    /// mixed-auth diagnostic for this method.
+    pub public: bool,
     /// IR-3: parsed `#[deprecated(...)]` + `#[plexus_macros::removed_in]` info
     /// folded into the emitted `MethodSchema.deprecation` field.
     pub deprecation: Option<ParsedDeprecation>,
@@ -1283,6 +1317,10 @@ impl MethodInfo {
         // codegen strips the `#[plexus_macros::removed_in]` companion).
         let deprecation = parse_deprecation_attrs(&method.attrs, method.sig.span())?;
 
+        // RED-2: capture the `public` flag from the per-method attribute,
+        // if present. Default false.
+        let public = hub_method_attrs.map(|a| a.public).unwrap_or(false);
+
         Ok(MethodInfo {
             fn_name,
             method_name,
@@ -1298,6 +1336,7 @@ impl MethodInfo {
             auth_resolvers,
             activation_params,
             request_override,
+            public,
             deprecation,
         })
     }
