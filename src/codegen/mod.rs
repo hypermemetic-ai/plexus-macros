@@ -147,6 +147,28 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         }
     }
 
+    // RED-3: reject `#[from_auth(...)]` on any method when the activation
+    // has no `request = SomeType` declaration. Auth extraction requires
+    // AuthContext to be populated by the activation-level PlexusRequest
+    // extraction chain. Without `request = ...`, the resolver will
+    // always receive `None` and every call 401s — ergonomics-bad, not
+    // security-bad, but worth catching at compile time.
+    if args.request_type.is_none() {
+        if let Some(m) = methods.iter().find(|m| !m.auth_resolvers.is_empty()) {
+            return Err(syn::Error::new(
+                m.fn_name.span(),
+                format!(
+                    "RED-3: method `{}` uses `#[from_auth(...)]` but the activation \
+                     declares no `request = SomeType`. Auth extraction requires a \
+                     PlexusRequest struct to wire AuthContext through. Add \
+                     `request = MyRequest` to `#[plexus::activation(...)]`, or remove \
+                     the `#[from_auth]` annotation.",
+                    m.method_name
+                ),
+            ));
+        }
+    }
+
     // REQ-10: validate per-method request overrides against the activation's
     // `required = [...]` lock list. If the activation has any required fields
     // and a method uses `request = ()`, emit a compile error naming the
