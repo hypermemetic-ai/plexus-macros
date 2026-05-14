@@ -1,13 +1,6 @@
 [package]
 name = "plexus-macros"
-# AUTHZ-MACRO-OPTIONAL-AUTH-1 (revert to "0.5.0" before merging the PR):
-# bump to a pre-release tag so this worktree's package id is disjoint from
-# sibling worktrees that also expose `plexus-macros 0.5.0` (e.g.
-# AUTHZ-CRED-MACRO-3, which bumps to `0.5.0-AUTHZ-CRED-MACRO-3`). Without
-# disjoint versions cargo refuses the duplicate package id in the
-# lockfile. The matching `version = "0.5.0-AUTHZ-MACRO-OPTIONAL-AUTH-1"`
-# bump in `../plexus-core/Cargo.toml` is the companion change.
-version = "0.5.0-AUTHZ-MACRO-OPTIONAL-AUTH-1"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 description = "Procedural macros for Plexus RPC activations"
