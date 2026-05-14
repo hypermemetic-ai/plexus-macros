@@ -414,10 +414,22 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     //   when auth is asymmetric across methods in this activation.
     // - `auth = "mixed"`: like optional but suppresses the RED-2 warning
     //   (explicit acknowledgment of the asymmetry).
+    //
+    // AUTHZ-MACRO-OPTIONAL-AUTH-1 carve-out: a method whose signature is
+    // `auth: Option<&AuthContext>` is an explicit opt-in to anonymous-friendly
+    // handling. Under `auth = "required"` we downgrade the previous hard error
+    // to a compile-time warning ("handler accepts anonymous but activation
+    // requires auth") so the trak-style "anonymous read, authed write"
+    // pattern is reachable.
+    let mut required_posture_optional_auth_methods: Vec<&crate::parse::MethodInfo> = Vec::new();
     match args.auth_posture {
         crate::parse::AuthPosture::Required => {
             for m in &methods {
                 if m.auth_resolvers.is_empty() && !m.public {
+                    if m.auth_optional {
+                        required_posture_optional_auth_methods.push(m);
+                        continue;
+                    }
                     return Err(syn::Error::new(
                         m.fn_name.span(),
                         format!(
@@ -450,6 +462,10 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         }
         crate::parse::AuthPosture::Mixed | crate::parse::AuthPosture::Optional => {}
     }
+    let required_posture_optional_auth_warning = required_posture_optional_auth_warning(
+        &required_posture_optional_auth_methods,
+        &struct_name,
+    );
 
     // RED-2: warn when the activation has methods with #[from_auth] and other
     // methods without. Suppressed under `auth = "mixed"` (explicit) and the
@@ -497,7 +513,67 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         #hub_deprecation_warning
         #children_deprecation_warning
         #mixed_auth_warning
+        #required_posture_optional_auth_warning
     })
+}
+
+/// AUTHZ-MACRO-OPTIONAL-AUTH-1: emit a compile-time warning when an
+/// activation declares `auth = "required"` and one of its methods uses the
+/// optional-auth handler shape `auth: Option<&AuthContext>`.
+///
+/// The combination is legal — the optional shape was added precisely so an
+/// activation can serve anonymous reads alongside authed writes — but it's
+/// worth flagging because the activation's declared posture says "every
+/// caller must authenticate." Uses the same dummy-deprecated-const trick as
+/// the IR-5 / RED-2 warnings.
+fn required_posture_optional_auth_warning(
+    methods: &[&crate::parse::MethodInfo],
+    struct_name: &syn::Ident,
+) -> TokenStream {
+    if methods.is_empty() {
+        return TokenStream::new();
+    }
+    let names = methods
+        .iter()
+        .map(|m| m.method_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let note = format!(
+        "plexus-macros (AUTHZ-MACRO-OPTIONAL-AUTH-1): activation `{}` declares \
+         `auth = \"required\"` but the following method(s) accept anonymous \
+         callers via `auth: Option<&AuthContext>`: {}. The handlers will see \
+         `None` when no auth context is attached. If this is intentional, \
+         consider `auth = \"mixed\"` to silence this warning; otherwise \
+         change the handler signature to `auth: &AuthContext` (or use \
+         `#[from_auth(...)]`).",
+        struct_name, names,
+    );
+    let span = methods
+        .first()
+        .map(|m| m.fn_name.span())
+        .unwrap_or_else(|| struct_name.span());
+    let const_name = format_ident!(
+        "_PLEXUS_MACROS_REQUIRED_POSTURE_OPTIONAL_AUTH_WARNING_{}",
+        struct_name,
+        span = span,
+    );
+    let touch_fn_name = format_ident!(
+        "_plexus_macros_touch_required_posture_optional_auth_warning_{}",
+        struct_name,
+        span = span,
+    );
+    quote::quote_spanned! { span =>
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals, non_snake_case, dead_code)]
+        #[deprecated(since = "0.5", note = #note)]
+        const #const_name: () = ();
+
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        fn #touch_fn_name() {
+            let _ = #const_name;
+        }
+    }
 }
 
 /// IR-5: emit a compile-time deprecation warning when
