@@ -5,30 +5,14 @@
 //! scheme = "Bearer ")]` compiles and registers one `CredentialFieldMarker`
 //! entry whose metadata matches the attribute clauses.
 //!
-//! Per the run-notes, `CredentialFieldMarker` is defined locally in the
-//! fixture pending its arrival in `plexus_auth_core` (follow-up ticket).
-//! When that lands, the local definition swaps for a `use` line.
+//! `CredentialFieldMarker` is the canonical type from `plexus_auth_core`
+//! (landed in `AUTHZ-CRED-CORE-1C`).
 
 use plexus_auth_core::{
-    AttachmentSite, Credential, CredentialKind, CredentialKindName, CredentialMetadata,
-    CredentialMinter, CredentialScheme, HeaderName, CookieName, MethodPath, Origin, ParamName,
-    Scope, CredentialIssuer,
+    AttachmentSite, Credential, CredentialFieldMarker, CredentialIssuer, CredentialKind,
+    CredentialKindName, CredentialMetadata, CredentialMinter, CredentialScheme, CookieName,
+    HeaderName, MethodPath, Origin, ParamName, Scope,
 };
-
-/// Local stand-in for the `CredentialFieldMarker` type that the macro
-/// references. The fields exactly match the macro's emission contract; see
-/// `plexus-macros/src/credential.rs::emit_field_marker_initializer`.
-#[allow(dead_code)]
-pub struct CredentialFieldMarker {
-    pub variant: Option<&'static str>,
-    pub field: &'static str,
-    pub kind: CredentialKind,
-    pub attach_as: AttachmentSite,
-    pub scheme: Option<CredentialScheme>,
-    pub scopes: Vec<Scope>,
-    pub refresh_via: Option<MethodPath>,
-    pub revoke_via: Option<MethodPath>,
-}
 
 /// The credential payload type. Wrapped in `Credential<T>` on the
 /// return-type struct below.

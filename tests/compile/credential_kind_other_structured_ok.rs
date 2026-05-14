@@ -4,21 +4,9 @@
 //! a `CredentialKind::Other { name: CredentialKindName::new("...") }`.
 
 use plexus_auth_core::{
-    AttachmentSite, Credential, CredentialKind, CredentialKindName, CredentialScheme, HeaderName,
-    MethodPath, Scope,
+    AttachmentSite, Credential, CredentialFieldMarker, CredentialKind, CredentialKindName,
+    CredentialScheme, HeaderName, MethodPath, Scope,
 };
-
-#[allow(dead_code)]
-pub struct CredentialFieldMarker {
-    pub variant: Option<&'static str>,
-    pub field: &'static str,
-    pub kind: CredentialKind,
-    pub attach_as: AttachmentSite,
-    pub scheme: Option<CredentialScheme>,
-    pub scopes: Vec<Scope>,
-    pub refresh_via: Option<MethodPath>,
-    pub revoke_via: Option<MethodPath>,
-}
 
 #[derive(plexus_macros::Credentials)]
 #[allow(dead_code)]

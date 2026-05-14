@@ -4,23 +4,12 @@
 //! registry. The macro emits valid registry helpers with no entries; the
 //! pre-existing struct shape is unchanged.
 
-use plexus_auth_core::{AttachmentSite, CredentialKind, CredentialScheme, MethodPath, Scope};
-
-// Local stand-in for the CredentialFieldMarker registry type. (See run-notes.)
-// Unused here because no fields are credential-tagged; defined to keep the
-// fixture's import surface symmetric with the other compile-pass fixtures.
-
-#[allow(dead_code)]
-pub struct CredentialFieldMarker {
-    pub variant: Option<&'static str>,
-    pub field: &'static str,
-    pub kind: CredentialKind,
-    pub attach_as: AttachmentSite,
-    pub scheme: Option<CredentialScheme>,
-    pub scopes: Vec<Scope>,
-    pub refresh_via: Option<MethodPath>,
-    pub revoke_via: Option<MethodPath>,
-}
+// The canonical `CredentialFieldMarker` is imported so the macro's
+// `__plexus_credential_marker_for_<TypeIdent>` return-type can be named.
+// Unused here because no fields are credential-tagged; kept for symmetry
+// with the other compile-pass fixtures.
+#[allow(unused_imports)]
+use plexus_auth_core::CredentialFieldMarker;
 
 #[derive(plexus_macros::Credentials)]
 #[allow(dead_code)]
