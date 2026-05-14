@@ -1313,7 +1313,17 @@ impl MethodInfo {
                         }
                     }
 
-                    let description = param_docs.get(&name_str).cloned();
+                    // Param description precedence:
+                    //   1. Explicit `params(name = "...")` on the method attribute wins.
+                    //   2. Otherwise fall back to `///` doc comments on the parameter
+                    //      itself (e.g. `async fn foo(&self, /// the input message
+                    //      message: String) -> ...`). Mirrors the function-level
+                    //      doc-fallback already implemented above.
+                    //   3. If neither is present, description is `None`.
+                    let description = param_docs
+                        .get(&name_str)
+                        .cloned()
+                        .or_else(|| extract_doc_description(&pat_type.attrs));
                     // IR-5: parse `#[deprecated(...)]` + optional
                     // `#[plexus_macros::removed_in("...")]` on the parameter.
                     let deprecation =
@@ -1785,5 +1795,86 @@ mod tests {
         let attrs: Vec<syn::Attribute> = vec![parse_quote! { #[doc = "just a comment"] }];
         let parsed = parse_deprecation_attrs(&attrs, Span::call_site()).unwrap();
         assert!(parsed.is_none());
+    }
+
+    /// AUTHZ-MACRO-PARAM-DOC-1: `///` doc comment on a parameter is picked up
+    /// as the param description when no explicit `params(name = "...")` entry
+    /// exists on the method attribute.
+    #[test]
+    fn param_doc_comment_falls_back_when_params_attr_omits_entry() {
+        let method: ImplItemFn = parse_quote! {
+            async fn echo(
+                &self,
+                /// The message to echo back
+                message: String,
+            ) -> impl Stream<Item = MyEvent> + Send + 'static {
+                stream! { yield MyEvent::Echo { message } }
+            }
+        };
+        let info = MethodInfo::from_fn(&method, None).expect("parses cleanly");
+        let param = info.params.iter().find(|p| p.name == "message").unwrap();
+        assert_eq!(
+            param.description.as_deref(),
+            Some("The message to echo back"),
+            "param doc comment should fall back into the description when no params(...) entry exists"
+        );
+    }
+
+    /// AUTHZ-MACRO-PARAM-DOC-1: explicit `params(name = "...")` on the method
+    /// attribute wins over a `///` doc comment on the parameter.
+    #[test]
+    fn explicit_params_attr_wins_over_param_doc_comment() {
+        let method: ImplItemFn = parse_quote! {
+            async fn echo(
+                &self,
+                /// IGNORED — explicit attr wins
+                message: String,
+            ) -> impl Stream<Item = MyEvent> + Send + 'static {
+                stream! { yield MyEvent::Echo { message } }
+            }
+        };
+        let attrs = HubMethodAttrs {
+            name: None,
+            description: None,
+            param_docs: {
+                let mut m = HashMap::new();
+                m.insert("message".to_string(), "explicit description".to_string());
+                m
+            },
+            returns_variants: vec![],
+            streaming: false,
+            bidirectional: BidirType::None,
+            http_method: None,
+            request_override: None,
+            public: false,
+        };
+        let info = MethodInfo::from_fn(&method, Some(&attrs)).expect("parses cleanly");
+        let param = info.params.iter().find(|p| p.name == "message").unwrap();
+        assert_eq!(
+            param.description.as_deref(),
+            Some("explicit description"),
+            "explicit params(...) entry must win over /// doc comment on the param"
+        );
+    }
+
+    /// AUTHZ-MACRO-PARAM-DOC-1: parameter with neither explicit attr nor doc
+    /// comment yields `description: None`.
+    #[test]
+    fn param_with_no_description_yields_none() {
+        let method: ImplItemFn = parse_quote! {
+            async fn echo(
+                &self,
+                message: String,
+            ) -> impl Stream<Item = MyEvent> + Send + 'static {
+                stream! { yield MyEvent::Echo { message } }
+            }
+        };
+        let info = MethodInfo::from_fn(&method, None).expect("parses cleanly");
+        let param = info.params.iter().find(|p| p.name == "message").unwrap();
+        assert!(
+            param.description.is_none(),
+            "no description anywhere should yield None, got: {:?}",
+            param.description
+        );
     }
 }
