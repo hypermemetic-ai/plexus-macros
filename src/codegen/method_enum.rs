@@ -5,12 +5,14 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use syn::{GenericArgument, PathArguments, Type};
 
 pub fn generate(
     struct_name: &syn::Ident,
     methods: &[MethodInfo],
     child_methods: &[ChildMethodInfo],
     crate_path: &syn::Path,
+    auth_core_path: Option<&syn::Path>,
     activation_request_type: Option<&syn::Type>,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
@@ -101,6 +103,81 @@ pub fn generate(
             }
         })
         .collect();
+
+    // AUTHZ-CRED-MACRO-3: per-method credential-decl-vector expression.
+    //
+    // For each method, derive the "credential probe type" (the inner success
+    // / yielded type of the return signature), then emit a call site that
+    // walks the macro-emitted marker registry through the autoref-specialized
+    // `CredentialsRegistryProbe`. Types that derive `#[derive(Credentials)]`
+    // produce a populated `Vec<CredentialFieldDecl>`; types that don't,
+    // produce an empty vec via the trait-default fallback.
+    //
+    // When `auth_core_path` is `None`, the consuming crate does not depend on
+    // `plexus-auth-core`, so we skip emitting the call site — the runtime
+    // match falls through to the `_ => Vec::new()` arm and the schema's
+    // `credentials` field is unchanged (pre-ticket behavior preserved).
+    let (credential_decls_indices, credential_decls_exprs): (Vec<_>, Vec<_>) = methods
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, m)| {
+            let auth_path = auth_core_path?;
+            let probe_ty = effective_credential_probe_type(m)?;
+            let idx_lit = proc_macro2::Literal::usize_suffixed(idx);
+            let method_name = &m.method_name;
+            // Build the issuer placeholder. At schema-build time we don't
+            // know the runtime origin URL, so we synthesize origin "plexus"
+            // plus the method's name as the MethodPath. The runtime can
+            // re-stamp these at mint time; for schema introspection (IR,
+            // CLI, codegen) the issuer is descriptive, not authoritative.
+            //
+            // `MethodPath::try_new` enforces "namespace.method" grammar
+            // (>= 2 dot-separated segments). The method name alone often
+            // fails that grammar (e.g. "echo" has no dot), so we fall back
+            // to "plexus.<name>" — never panics, always at least 2
+            // segments. Activation-level namespace prefixing is a follow-up
+            // (see RUN-NOTES "schema issuer fidelity").
+            let expr = quote! {
+                {
+                    // Bring the `CredentialsRegistryFallback` trait into
+                    // scope so its empty-slice `marker_slice` resolves via
+                    // autoref when the return type does NOT implement
+                    // `HasCredentialMarkers`. For return types that DO
+                    // implement `HasCredentialMarkers` (via the macro-emitted
+                    // `impl` from `#[derive(Credentials)]`), the specialized
+                    // inherent `marker_slice` on
+                    // `CredentialsRegistryProbe<T: HasCredentialMarkers>`
+                    // wins via inherent-first method resolution.
+                    use #auth_path::CredentialsRegistryFallback as _;
+                    // Autoref-specialization call site (per
+                    // AUTHZ-CRED-MACRO-3): the inherent `marker_slice`
+                    // emitted by `#[derive(Credentials)]` wins over the
+                    // blanket trait default for types that derive, and
+                    // falls back to `&[]` otherwise.
+                    let __plexus_markers: &'static [#auth_path::CredentialFieldMarker] =
+                        (&#auth_path::CredentialsRegistryProbe::<#probe_ty>::new())
+                            .marker_slice();
+                    let __plexus_method_path = #auth_path::MethodPath::try_new(#method_name)
+                        .or_else(|_| #auth_path::MethodPath::try_new(
+                            concat!("plexus.", #method_name)
+                        ))
+                        .unwrap_or_else(|_| #auth_path::MethodPath::try_new("plexus.unknown")
+                            .expect("placeholder MethodPath always parses"));
+                    let __plexus_issuer = #auth_path::CredentialIssuer::new(
+                        #auth_path::Origin::new("plexus"),
+                        __plexus_method_path,
+                    );
+                    __plexus_markers
+                        .iter()
+                        .map(|m| #crate_path::plexus::schema::CredentialFieldDecl::from_marker(
+                            m, &[], __plexus_issuer.clone()
+                        ))
+                        .collect::<::std::vec::Vec<#crate_path::plexus::schema::CredentialFieldDecl>>()
+                }
+            };
+            Some((quote! { #idx_lit }, expr))
+        })
+        .unzip();
 
     // Generate streaming flags for each method
     // Streaming is explicitly declared via #[hub_method(streaming)] attribute
@@ -447,6 +524,25 @@ pub fn generate(
                             _ => {}
                         }
 
+                        // AUTHZ-CRED-MACRO-3: apply credential decls projected
+                        // from the return type's `CredentialFieldMarker`
+                        // registry (see `credential_decls_per_method` above).
+                        //
+                        // Like `bidir_schema_calls`, this is a per-index
+                        // compile-time match so that type-level calls (here,
+                        // `CredentialsRegistryProbe::<RT>::new()`) resolve at
+                        // macro-expansion time against each method's concrete
+                        // return type.
+                        let __plexus_cred_decls: ::std::vec::Vec<#crate_path::plexus::schema::CredentialFieldDecl> = match i {
+                            #(
+                                #credential_decls_indices => #credential_decls_exprs,
+                            )*
+                            _ => ::std::vec::Vec::new(),
+                        };
+                        if !__plexus_cred_decls.is_empty() {
+                            schema = schema.with_credentials(__plexus_cred_decls);
+                        }
+
                         schema
                     })
                     .collect::<Vec<_>>();
@@ -712,4 +808,58 @@ pub fn is_option_type(ty: &syn::Type) -> bool {
         }
     }
     false
+}
+
+/// AUTHZ-CRED-MACRO-3: derive the "credential probe type" for a method —
+/// the type that should be probed for `#[derive(Credentials)]` markers.
+///
+/// Resolution order:
+/// 1. If the method has `stream_item_type` populated (streaming method
+///    returning `impl Stream<Item = T>` or `impl Stream<Item = T> + Send`),
+///    the probe type is `T`.
+/// 2. Otherwise, if the return type is `Result<T, _>`, the probe type is `T`
+///    (the Ok variant). This is the most common shape for non-streaming
+///    methods.
+/// 3. Otherwise, the probe type is the return type as-is.
+/// 4. Returns `None` only when the return type contains a syntactic pattern
+///    we don't know how to handle (e.g., bare `impl Trait` with no
+///    extractable inner type, or a tuple). For those, the macro emits an
+///    empty credential decls vec — same as pre-ticket behavior.
+///
+/// We deliberately do NOT recurse into `Option<T>`, `Vec<T>`, etc. The
+/// autoref-probe handles the fallback uniformly: if the probe type doesn't
+/// derive `Credentials`, the trait's empty-slice default applies and the
+/// schema's `credentials` field stays empty.
+fn effective_credential_probe_type(m: &MethodInfo) -> Option<Type> {
+    // Streaming: probe the stream item type. The stream's `Item = T`
+    // associated type IS the user's per-event payload, which is where
+    // `#[derive(Credentials)]` lives in the streaming case.
+    if let Some(item_ty) = &m.stream_item_type {
+        return Some(item_ty.clone());
+    }
+
+    // Non-streaming: unwrap `Result<T, _>` to T if present, else use the
+    // return type as-is. The recursion stops at one level — a user with
+    // `Result<Result<T, E1>, E2>` would get the inner `Result<T, E1>`
+    // probed, which falls through to empty via the trait default.
+    if let Type::Path(tp) = &m.return_type {
+        if let Some(seg) = tp.path.segments.last() {
+            if seg.ident == "Result" {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(GenericArgument::Type(ok_ty)) = args.args.first() {
+                        return Some(ok_ty.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Bare `impl Trait` returns aren't probable without the Stream-item
+    // extraction having succeeded — there's no syntactic handle on the
+    // concrete type. Emit `None` so the caller skips the credentials wiring.
+    if matches!(&m.return_type, Type::ImplTrait(_)) {
+        return None;
+    }
+
+    Some(m.return_type.clone())
 }

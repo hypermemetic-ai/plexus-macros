@@ -43,6 +43,28 @@ fn resolve_crate_path(explicit: Option<&str>, err_span: Span) -> syn::Result<syn
     }
 }
 
+/// Resolve the path to `plexus-auth-core` for AUTHZ-CRED-MACRO-3's
+/// credentials-registry call site. Unlike `resolve_crate_path`, absence is
+/// **not** an error — consuming crates that don't depend on
+/// `plexus-auth-core` (e.g., plexus-substrate today) simply skip the
+/// credentials wiring, leaving `MethodSchema.credentials` at its empty
+/// default. This preserves behavior for all pre-AUTHZ-CRED-MACRO-3 callers
+/// and lets new callers opt in by adding the dep.
+///
+/// Returns `Some(path)` when `plexus-auth-core` is reachable; `None`
+/// otherwise. The path respects user renaming (e.g.,
+/// `plexus_auth_core = { package = "plexus-auth-core" }`).
+pub(crate) fn resolve_auth_core_path(err_span: Span) -> Option<syn::Path> {
+    match crate_name("plexus-auth-core") {
+        Ok(FoundCrate::Itself) => syn::parse_str("crate").ok(),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = syn::Ident::new(&name, err_span);
+            Some(syn::parse_quote!(::#ident))
+        }
+        Err(_) => None,
+    }
+}
+
 /// Generate all code from a #[hub_methods] impl block
 pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Result<TokenStream> {
     let crate_path: syn::Path =
@@ -473,12 +495,20 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let suppress_mixed_warning = !matches!(args.auth_posture, crate::parse::AuthPosture::Optional);
     let mixed_auth_warning = mixed_auth_warning(&methods, suppress_mixed_warning, &struct_name);
 
+    // AUTHZ-CRED-MACRO-3: resolve the optional `plexus-auth-core` path used by
+    // the credentials-registry call site in `compute_method_schemas`. None
+    // means the consuming crate doesn't depend on `plexus-auth-core` and so
+    // the macro should emit empty credential metadata (preserving pre-ticket
+    // behavior).
+    let auth_core_path = resolve_auth_core_path(Span::call_site());
+
     // Generate pieces
     let method_enum = method_enum::generate(
         &struct_name,
         &methods,
         &schema_child_methods,
         &crate_path,
+        auth_core_path.as_ref(),
         args.request_type.as_ref(),  // REQ-6: activation-level request type (for runtime merge)
     );
     let activation_impl = activation::generate(
