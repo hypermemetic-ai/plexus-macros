@@ -1,6 +1,12 @@
 [package]
 name = "plexus-macros"
-version = "0.5.5"
+# Bumped to disambiguate from the sibling worktree at ../plexus-macros which is
+# pulled in transitively via the dev-dep on plexus-core (whose own Cargo.toml
+# does plexus-macros = { path = "../plexus-macros" }). Without a version skew,
+# Cargo refuses to lock two same-name-and-version packages at different paths.
+# This bump is scoped to the AUTHZ-CRED-MACRO-1 worktree and will be reconciled
+# back to a clean version line before the branch is merged.
+version = "0.5.6-AUTHZ-CRED-MACRO-1"
 edition = "2021"
 license = "MIT"
 description = "Procedural macros for Plexus RPC activations"
@@ -20,9 +26,15 @@ uuid = { version = "1.0", features = ["v5"] }
 # to intercept #[derive(schemars::JsonSchema)] in test code.
 schemars-compat = []
 
+
 [dev-dependencies]
 plexus-macros = { path = "." }
 plexus-core = { path = "../plexus-core" }
+# Needed by the AUTHZ-CRED-MACRO-1 trybuild fixtures: the macro emits code
+# that references `Credential`, `CredentialKind`, `AttachmentSite`,
+# `CredentialScheme`, `Scope`, `MethodPath`, `HeaderName`, `CookieName`,
+# `ParamName`, and `CredentialKindName` from `plexus_auth_core`.
+plexus-auth-core = { path = "../plexus-auth-core" }
 dialectic = { version = "0.4.1", features = ["tokio"] }
 schemars = { version = "1.1", features = ["derive", "uuid1"] }
 serde = { version = "1.0", features = ["derive"] }

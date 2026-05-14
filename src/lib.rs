@@ -61,6 +61,7 @@
 //! flags on `#[activation]`. See the migration section of the README.
 
 mod codegen;
+mod credential;
 mod handle_enum;
 mod parse;
 mod request;
@@ -422,6 +423,80 @@ pub fn activation(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
     activation(attr, item)
+}
+
+/// Derive macro for declaring credential-bearing fields on a return-type
+/// struct or enum (per `AUTHZ-CRED-MACRO-1`).
+///
+/// Apply `#[derive(Credentials)]` to a struct or enum. Within the item,
+/// annotate each credential-bearing field with the helper attribute
+/// `#[credential(kind = "...", attach_as = "...", ...)]` carrying the
+/// per-field metadata. The field's type must be `Credential<T>` (the sealed
+/// wrapper from `plexus_auth_core`); any other type produces a compile
+/// error citing the wrapper requirement.
+///
+/// **Why a derive macro and not a freestanding attribute macro?** Stable Rust
+/// proc-macros cannot intercept attribute macros applied directly to struct
+/// fields; only derive-helper attributes can appear there. See
+/// `plans/AUTHZ/AUTHZ-CRED-MACRO-1-RUN-NOTES.md` for the rationale.
+///
+/// # Example
+///
+/// ```ignore
+/// use plexus_auth_core::{
+///     AttachmentSite, Credential, CredentialKind, CredentialScheme,
+///     HeaderName, MethodPath, Scope,
+/// };
+///
+/// // `CredentialFieldMarker` lands in plexus-auth-core in a follow-up; for
+/// // now the macro emits code that references it by name and consumers
+/// // provide the definition (see run-notes).
+///
+/// #[derive(plexus_macros::Credentials, serde::Serialize)]
+/// pub struct LoginEvent {
+///     pub user_id: String,
+///
+///     #[credential(
+///         kind = "bearer",
+///         attach_as = "header:authorization",
+///         scheme = "Bearer ",
+///     )]
+///     pub session: Credential<String>,
+/// }
+/// ```
+///
+/// # Clauses
+///
+/// | Clause | Required? | Notes |
+/// |---|---|---|
+/// | `kind = "<name>"` | required | Closed enum: `"bearer"`, `"cookie"`, `"oauth_access"`, `"oauth_refresh"`, `"oidc_id"`, `"aws_sts"`, `"macaroon"`. The escape valve `kind(other = "<name>")` carries a backend-specific kind. |
+/// | `attach_as = "<spec>"` | required | One of `"header:<name>"`, `"cookie:<name>"`, `"first_frame:<setup-method>:<param>"`, `"in_rpc_param:<name>"`. |
+/// | `scheme = "<prefix>"` | optional | E.g. `"Bearer "` (trailing space significant). |
+/// | `scopes = ["a.b", ...]` | optional, default empty | List of scope identifiers. |
+/// | `refresh_via = "<method-path>"` | optional | E.g. `"auth.refresh"`. |
+/// | `revoke_via = "<method-path>"` | optional | E.g. `"auth.logout"`. |
+/// | `sensitive` | optional flag | Accepted for clarity; credentials are always sensitive. |
+///
+/// # Emitted artifacts
+///
+/// The macro emits two free functions in the same module:
+///
+/// - `fn __plexus_credential_marker_for_<TypeIdent>() -> Vec<CredentialFieldMarker>`
+/// - `fn __plexus_sensitive_fields_for_<TypeIdent>() -> Vec<(Option<&'static str>, &'static str)>`
+///
+/// The consumer (per `AUTHZ-CRED-CORE-3`) calls the first function during
+/// schema build; the second mirrors the implicit `#[sensitive]` rule for the
+/// redaction pipeline (per `AUTHZ-PRIVACY-2`).
+///
+/// The emitted code requires `CredentialFieldMarker`, `CredentialKind`,
+/// `AttachmentSite`, `CredentialScheme`, `Scope`, `MethodPath`, `HeaderName`,
+/// `CookieName`, `ParamName`, and `CredentialKindName` to be in scope at the
+/// emission site. Importing `plexus_auth_core::*` (or the equivalent named
+/// imports) at the top of the consuming module satisfies all but
+/// `CredentialFieldMarker`, which lands in `plexus_auth_core` in a follow-up.
+#[proc_macro_derive(Credentials, attributes(credential))]
+pub fn credentials_derive(input: TokenStream) -> TokenStream {
+    credential::expand_credentials_derive(input)
 }
 
 /// **DEPRECATED**: This derive macro is no longer needed.
