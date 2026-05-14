@@ -615,6 +615,7 @@ pub fn expand_credentials_derive(
 
 fn expand_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
     let type_ident = input.ident.clone();
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let mut parsed_fields: Vec<ParsedCredentialField> = Vec::new();
 
     // We do NOT mutate the input (helper attributes are auto-consumed by the
@@ -658,6 +659,41 @@ fn expand_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
         })
         .collect::<Vec<_>>();
 
+    // AUTHZ-CRED-MACRO-3: emit `impl HasCredentialMarkers for UserType` so
+    // the autoref-specialized inherent path on
+    // `CredentialsRegistryProbe<T>` (gated on `T: HasCredentialMarkers`)
+    // resolves to the populated marker slice at the
+    // `#[plexus_macros::method]` call site.
+    //
+    // Why a trait impl (not an inherent impl on the probe): inherent impls
+    // must live in the type's home crate (orphan rule E0116);
+    // `CredentialsRegistryProbe` lives in `plexus_auth_core`, so the user's
+    // derive cannot add inherent methods on it from a downstream crate.
+    // Trait impls ARE orphan-allowed when one of the type or trait is local
+    // to the impl crate — here both are: `HasCredentialMarkers` is foreign,
+    // but `UserType` is local. The single-direction blanket-and-specialized
+    // dance is wired in `plexus_auth_core::credential` via
+    // `CredentialsRegistryFallback`.
+    //
+    // The slice is built lazily via `OnceLock` so it has `'static`
+    // lifetime (the trait's signature is
+    // `fn credential_markers() -> &'static [...]`) and so each type's slice
+    // is materialized at most once across the program's lifetime.
+    //
+    // Generics: we thread `impl_generics` / `ty_generics` / `where_clause`
+    // verbatim from the input. For generic types like `LoginEvent<T>`, the
+    // OnceLock is per-monomorphization — that's fine because the markers
+    // describe the type's FIELDS (declared once at the type definition),
+    // not properties that vary with `T`.
+    //
+    // We pin the fully-qualified path `::plexus_auth_core::*` rather than
+    // the bare names used by the per-type registry function: the trait
+    // impl's body is invoked from `compute_method_schemas` at the
+    // activation site — a different module from the user's — where the
+    // user's `use` declarations don't propagate. Fully-qualified is the
+    // safe form. Users with a renamed `plexus_auth_core` dep will need an
+    // alias here in a follow-up; current workspace consumers all use the
+    // canonical name.
     Ok(quote! {
         /// Macro-emitted credential field registry. One entry per
         /// `#[credential(...)]`-annotated field on this type, in stable
@@ -684,6 +720,27 @@ fn expand_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
         #[allow(non_snake_case, dead_code)]
         pub fn #sensitive_fn_name() -> ::std::vec::Vec<(::core::option::Option<&'static str>, &'static str)> {
             ::std::vec![ #( #sensitive_entries ),* ]
+        }
+
+        // AUTHZ-CRED-MACRO-3: HasCredentialMarkers impl. Opts the user's
+        // type into the specialized inherent path on
+        // `CredentialsRegistryProbe<T>`; the macro emitted by
+        // `#[plexus_macros::method]` calls
+        // `(&CredentialsRegistryProbe::<RT>::new()).marker_slice()` at
+        // schema-build time. Autoref method resolution prefers the
+        // specialized inherent over the fallback trait impl on
+        // `&CredentialsRegistryProbe<T>`.
+        #[allow(non_snake_case, dead_code)]
+        impl #impl_generics ::plexus_auth_core::HasCredentialMarkers
+            for #type_ident #ty_generics #where_clause
+        {
+            fn credential_markers() -> &'static [::plexus_auth_core::CredentialFieldMarker] {
+                static __PLEXUS_MARKER_SLICE: ::std::sync::OnceLock<::std::vec::Vec<::plexus_auth_core::CredentialFieldMarker>> =
+                    ::std::sync::OnceLock::new();
+                __PLEXUS_MARKER_SLICE
+                    .get_or_init(|| #registry_fn_name())
+                    .as_slice()
+            }
         }
     })
 }

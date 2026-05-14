@@ -1,6 +1,12 @@
 [package]
 name = "plexus-macros"
-version = "0.5.0"
+# AUTHZ-CRED-MACRO-3 worktree-scoped bump: avoids the lockfile collision
+# `plexus-macros v0.5.0 (worktree A) != plexus-macros v0.5.0 (worktree B)`
+# while my feature branch is active alongside the sibling worktree
+# `plexus-macros-AUTHZ-MACRO-OPTIONAL-AUTH-1`. The version is reverted to
+# `0.5.0` at merge time, per the precedent set by AUTHZ-CRED-MACRO-1
+# (commit c19139b).
+version = "0.5.0-AUTHZ-CRED-MACRO-3"
 edition = "2021"
 license = "MIT"
 description = "Procedural macros for Plexus RPC activations"
@@ -41,5 +47,7 @@ async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
 async-stream = "0.3"
+
+
 
 
