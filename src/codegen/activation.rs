@@ -904,10 +904,28 @@ fn generate_dispatch_arms(
 
             let content_type = format!("{}.{}", namespace, method_name);
 
-            // Generate auth injection code if needed
+            // Generate auth injection code if needed.
+            //
+            // AUTHZ-MACRO-OPTIONAL-AUTH-1: branch on the parsed shape.
+            //   - `auth: &AuthContext`            → unwrap or `Unauthenticated`
+            //   - `auth: Option<&AuthContext>`    → pass `Option` straight through
+            // `auth_ctx` is the name handed to the user's method. In the
+            // optional case, it is itself an `Option<&AuthContext>`, which is
+            // exactly the type the handler asked for. `#[from_auth]` resolver
+            // bindings always run with `&auth_ctx`, so they need the
+            // dereferenced form — that path stays on the force-unwrap branch.
             let auth_injection = if m.requires_auth {
-                quote! {
-                    let auth_ctx = auth.ok_or_else(|| #crate_path::plexus::PlexusError::Unauthenticated("This method requires authentication".to_string()))?;
+                if m.auth_optional && m.auth_resolvers.is_empty() {
+                    // Optional-auth: hand the user the raw `Option<&AuthContext>`.
+                    quote! {
+                        let auth_ctx: ::std::option::Option<&#crate_path::plexus::AuthContext> = auth;
+                    }
+                } else {
+                    // Force-auth (or any path that uses #[from_auth] resolvers,
+                    // which expect a concrete `&AuthContext`): unwrap or error.
+                    quote! {
+                        let auth_ctx = auth.ok_or_else(|| #crate_path::plexus::PlexusError::Unauthenticated("This method requires authentication".to_string()))?;
+                    }
                 }
             } else {
                 quote! {}

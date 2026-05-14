@@ -1173,8 +1173,21 @@ pub struct MethodInfo {
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
     /// None defaults to POST
     pub http_method: Option<String>,
-    /// True if method requires auth context (detected from `auth: &AuthContext` parameter)
+    /// True if method requires auth context (detected from `auth: &AuthContext`
+    /// or `auth: Option<&AuthContext>` parameter, or `#[from_auth(...)]` use).
+    ///
+    /// AUTHZ-MACRO-OPTIONAL-AUTH-1: this stays true for both shapes; the
+    /// distinction lives in `auth_optional` below. Codegen uses both flags
+    /// together to decide between `auth.ok_or_else(...)?` (force) and a
+    /// straight `auth` pass-through (optional).
     pub requires_auth: bool,
+    /// True iff the method declared `auth: Option<&AuthContext>` (vs.
+    /// `auth: &AuthContext`). Meaningful only when `requires_auth` is true.
+    ///
+    /// AUTHZ-MACRO-OPTIONAL-AUTH-1: when set, the dispatch wrapper passes the
+    /// raw `Option<&AuthContext>` through to the handler instead of
+    /// unwrapping it.
+    pub auth_optional: bool,
     /// Parameters resolved from auth context via `#[from_auth(resolver)]`
     pub auth_resolvers: Vec<AuthResolver>,
     /// Parameters injected from the activation's request struct via `#[activation_param]`
@@ -1233,6 +1246,11 @@ impl MethodInfo {
 
         // Track if method requires auth
         let mut requires_auth = false;
+        // AUTHZ-MACRO-OPTIONAL-AUTH-1: track whether the user wrote
+        // `auth: Option<&AuthContext>` (optional) vs `auth: &AuthContext`
+        // (force-required). Defaults to false; gets flipped on only if the
+        // optional shape is detected below.
+        let mut auth_optional = false;
         let mut auth_resolvers: Vec<AuthResolver> = Vec::new();
         let mut activation_params: Vec<ActivationParamInfo> = Vec::new();
 
@@ -1271,10 +1289,14 @@ impl MethodInfo {
                     }
 
                     // Check if this is an auth context parameter
-                    // Detect auth: &AuthContext
+                    // Detect auth: &AuthContext or auth: Option<&AuthContext>
                     if name_str == "auth" {
-                        if is_auth_context_type(&pat_type.ty) {
+                        if let Some(shape) = classify_auth_context_type(&pat_type.ty) {
                             requires_auth = true;
+                            // AUTHZ-MACRO-OPTIONAL-AUTH-1: remember which shape
+                            // the user wrote so codegen emits the right
+                            // unwrap/pass-through behavior.
+                            auth_optional = matches!(shape, AuthParamShape::Optional);
                             // Don't include auth in params (it's provided by framework)
                             continue;
                         }
@@ -1355,6 +1377,7 @@ impl MethodInfo {
             bidirectional,
             http_method,
             requires_auth,
+            auth_optional,
             auth_resolvers,
             activation_params,
             request_override,
@@ -1433,17 +1456,21 @@ fn extract_from_auth_attr(attrs: &[syn::Attribute]) -> Option<syn::Expr> {
     None
 }
 
-/// Check if a type is &AuthContext or Option<&AuthContext>
-/// Matches:
-/// - &AuthContext
-/// - Option<&AuthContext>
-fn is_auth_context_type(ty: &Type) -> bool {
+/// Classify an auth-context parameter type as either force-required
+/// (`&AuthContext`) or optional (`Option<&AuthContext>`).
+///
+/// Returns `None` if `ty` is not an auth-context shape we recognize.
+///
+/// AUTHZ-MACRO-OPTIONAL-AUTH-1: split out from `is_auth_context_type` so that
+/// downstream codegen can emit `auth.ok_or_else(...)?` for force-required
+/// handlers and a plain `auth` pass-through for optional handlers.
+pub(crate) fn classify_auth_context_type(ty: &Type) -> Option<AuthParamShape> {
     // Handle &AuthContext
     if let Type::Reference(type_ref) = ty {
         if let Type::Path(type_path) = &*type_ref.elem {
             if let Some(last_segment) = type_path.path.segments.last() {
                 if last_segment.ident == "AuthContext" {
-                    return true;
+                    return Some(AuthParamShape::Required);
                 }
             }
         }
@@ -1455,15 +1482,31 @@ fn is_auth_context_type(ty: &Type) -> bool {
             if last_segment.ident == "Option" {
                 if let PathArguments::AngleBracketed(args) = &last_segment.arguments {
                     if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
-                        // Recursively check inner type
-                        return is_auth_context_type(inner_ty);
+                        // Option<&AuthContext> — inner must be the reference form
+                        if classify_auth_context_type(inner_ty)
+                            == Some(AuthParamShape::Required)
+                        {
+                            return Some(AuthParamShape::Optional);
+                        }
                     }
                 }
             }
         }
     }
 
-    false
+    None
+}
+
+/// Shape of the `auth: ...` parameter on a hub method.
+///
+/// `Required` means the user wrote `auth: &AuthContext` and missing context
+/// should produce an `Unauthenticated` error. `Optional` means the user
+/// wrote `auth: Option<&AuthContext>` and missing context should be passed
+/// through as `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthParamShape {
+    Required,
+    Optional,
 }
 
 /// Extract BidirChannel type parameters from a type like &BidirChannel<Req, Resp>
