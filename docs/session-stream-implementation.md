@@ -1,5 +1,7 @@
 # Session Types as Runtime-Typed Streams
 
+> **📘 HISTORICAL — describes a removed/superseded design.** The shipped surface differs; see README.md.
+
 ## The Hub as a Self-Describing Type System
 
 The hub isn't just an RPC server—it's a **typed system that exposes its own types at runtime**. Every method's protocol is introspectable: clients can discover not just "what methods exist" but "what is the exact shape of the conversation I'll have with this method."

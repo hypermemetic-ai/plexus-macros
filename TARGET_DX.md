@@ -1,5 +1,7 @@
 # Target Developer Experience (DX) for Plexus Macros v2
 
+> **⚠️ ASPIRATIONAL PROPOSAL — most items below are NOT shipped.** Streaming is a boolean flag (`#[method(streaming)]`), `http_method` is a string, and there is no `#[validate]`/`#[default]`/`#[skip]`/type-extractor support. See README.md "Per-macro reference" for the actual shipped surface.
+
 This document defines the ideal syntax and behavior for the next-generation Plexus macro system, designed to address all pain points identified in MACRO_ANALYSIS.md.
 
 ---

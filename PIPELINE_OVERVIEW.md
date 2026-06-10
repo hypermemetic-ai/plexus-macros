@@ -1,5 +1,7 @@
 # Complete Pipeline: Rust → JSON Schema → Synapse IR → Client Libraries
 
+> **⚠️ Uses deprecated `#[hub_methods]`/`#[hub_method]` syntax (now `#[activation]`/`#[method]`). The "Pain Points" / "v2 Recommendations" are largely shipped. The pipeline shape is still accurate.**
+
 Understanding the full type extraction and code generation pipeline.
 
 ---

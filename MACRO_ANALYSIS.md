@@ -1,5 +1,7 @@
 # Plexus Macro System Analysis
 
+> **📘 HISTORICAL — describes a removed/superseded design.** The shipped surface differs; see README.md.
+
 This document analyzes the current macro system (`#[hub_methods]` and `#[hub_method]`) to identify pain points, confusing patterns, and areas for improvement before building a replacement.
 
 ---

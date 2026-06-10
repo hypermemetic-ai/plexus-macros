@@ -519,6 +519,19 @@ If a value would be the same for every method call in a request, it belongs in t
 
 ---
 
+## Security model
+
+This documents the **actual generated behavior**, not an aspiration. Read it before assuming a method is protected.
+
+- **Auth is fail-open by default.** A method whose signature carries no auth signal — no `auth: &AuthContext`, no `auth: Option<&AuthContext>`, no `#[from_auth(...)]` resolver — is generated with **no auth check at all** and is callable **unauthenticated**. The dispatch arm only injects an auth check when the method requested one (`src/codegen/activation.rs`, the `auth_injection` logic in `generate_dispatch_arms`).
+- **Default activation posture is `Optional` — it enforces nothing.** `auth = "required"` is opt-in and is the **only** fail-closed posture. Even under `required`, a method declaring `Option<&AuthContext>` is downgraded to a warning (it still receives `None` rather than being rejected).
+- **Roles, scopes, and credential metadata are schema metadata only.** Declared roles/scopes and `#[credential(...)]` clauses are reflected into the schema for clients and tooling. They are **never enforced at dispatch** — the framework does not check them before invoking your method.
+- **A `#[from_auth(expr)]` resolver must itself fail closed.** The macro splices `expr` verbatim into the dispatch arm and binds its result with `?`. It does **not** verify that the resolver actually denies unauthorized callers. If your resolver returns `Ok(...)` for an unauthenticated/under-privileged principal, the call proceeds. Enforcement is entirely the resolver's responsibility.
+
+The practical consequence: authorization is opt-in, per-method, and only as strong as the code you write. The macro provides plumbing, not a policy.
+
+---
+
 ## Per-macro reference
 
 ### `#[plexus_macros::activation(...)]`
@@ -633,6 +646,72 @@ Variant-level `#[handle(...)]` arguments:
 | `key = "..."` | no | Primary key column. |
 | `key_field = "..."` | no | Which variant field holds the key. Defaults to the first field. |
 | `strip_prefix = "..."` | no | Strip this prefix before looking up by key. |
+
+### `#[derive(Credentials)]`
+
+Marks the credential-bearing fields of a response struct or enum so the
+framework can mint, redact, and reflect them. Applied to the **item**
+(struct / enum); individual fields carry an inner `#[credential(...)]`
+helper attribute. The derive is additive — your type is re-emitted
+unchanged; the macro emits sibling registry functions plus an
+`impl HasCredentialMarkers` for the type.
+
+A credential-bearing field's type **must** be `Credential<T>` (the sealed
+wrapper from `plexus_auth_core`); the macro errors otherwise.
+
+```rust,ignore
+use plexus_macros::Credentials;
+use plexus_auth_core::Credential;
+
+#[derive(Credentials, Serialize, Deserialize, JsonSchema)]
+pub struct LoginEvent {
+    pub user_id: String,
+    #[credential(
+        kind = "bearer",
+        attach_as = "header:authorization",
+        scheme = "Bearer ",
+        scopes = ["account.read", "account.write"],
+    )]
+    pub session: Credential<SessionToken>,
+}
+```
+
+Field-level `#[credential(...)]` clauses:
+
+| Clause | Required? | Notes |
+|---|---|---|
+| `kind = "..."` | yes | Closed `CredentialKind`: `bearer`, `cookie`, `oauth_access`, `oauth_refresh`, `oidc_id`, `aws_sts`, `macaroon`. Validated at compile time (a typo is a compile error). |
+| `kind(other = "name")` | (alt) | Structured escape valve for backend-specific kinds. The bare `kind = "other"` form is rejected — use this parenthesized form. |
+| `attach_as = "..."` | yes | Where the credential is projected on the wire. Prefixed-string grammar (see below). |
+| `scheme = "..."` | no | Value prefix, e.g. `"Bearer "`. |
+| `scopes = ["a.b", ...]` | no | Array of scope-name string literals. |
+| `refresh_via = "ns.method"` | no | MethodPath (`<namespace>.<method>[.<sub>]*`, each segment `[a-z][a-z0-9_]*`). Validated at macro time. |
+| `revoke_via = "ns.method"` | no | Same MethodPath grammar. |
+| `sensitive` | no | Bare flag or `sensitive = true|false`. Accepted for clarity only — credentials are **always** treated as sensitive regardless. `expires_at` is rejected (it is set at mint time, not compile time). |
+
+`attach_as` grammar (one of four prefixed-string forms):
+
+| Form | Meaning |
+|---|---|
+| `"header:<name>"` | Project to the named response header (e.g. `"header:authorization"`). |
+| `"cookie:<name>"` | Project to a `Set-Cookie` with the named cookie. |
+| `"in_rpc_param:<name>"` | Carried in the named RPC parameter. |
+| `"first_frame:<setup-method>:<param>"` | Supplied as `<param>` on the first frame of `<setup-method>`. |
+
+What the macro emits (consumed downstream for schema + redaction):
+
+- `__plexus_credential_marker_for_<Type>() -> Vec<CredentialFieldMarker>` —
+  one entry per credential field, in declaration order, with all parsed
+  metadata. For enums each entry carries its variant name.
+- `__plexus_sensitive_fields_for_<Type>() -> Vec<(Option<&str>, &str)>` —
+  the `(variant, field)` pairs treated as sensitive (mirrors the
+  credential set, since credentials are always sensitive — used for
+  log/serialization redaction).
+- `impl HasCredentialMarkers for <Type>` — opts the type into the
+  specialized marker-slice path read by `#[plexus_macros::method]` at
+  schema-build time.
+
+`#[derive(Credentials)]` cannot be applied to a union.
 
 ### `#[derive(StreamEvent)]` — **deprecated**
 

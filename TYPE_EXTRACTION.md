@@ -191,7 +191,7 @@ enum BashEvent {
     Error { message: String },
 }
 
-#[method(stream = Multi)]
+#[method(streaming)]
 async fn execute(&self, command: String) -> impl Stream<Item = BashEvent> { }
 ```
 
@@ -245,44 +245,49 @@ for await (const event of client.bash.execute({ command: "ls" })) {
 
 ## 5. Validation from Types
 
-### Using JsonSchema Validation Attributes
+> **⚠️ PLANNED — NOT IMPLEMENTED.** Automatic, framework-enforced
+> validation from `#[validate(...)]` attributes is a *proposed* feature
+> (see `TARGET_DX.md` / `DX_INSPIRATION.md`). The macro does **not**
+> recognize `#[validate]`, does not invoke `validator::Validate`, and
+> performs **no** server-side validation before a method runs. Today, any
+> validation is application code you write inside the method body. The
+> type-mapping context below is retained only to show how `schemars`
+> constraint annotations would surface in the schema if/when this lands.
+
+### Type → schema constraint mapping (illustrative; enforcement not shipped)
 
 ```rust
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 
-#[derive(Serialize, Deserialize, JsonSchema, Validate)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct CreateUserRequest {
-    #[validate(email)]
+    // `#[schemars(...)]` annotations only shape the emitted JSON Schema.
+    // They are descriptive metadata — nothing enforces them at dispatch.
     #[schemars(regex(pattern = r"^[^@]+@[^@]+\.[^@]+$"))]
     email: String,
 
-    #[validate(length(min = 2, max = 100))]
     #[schemars(length(min = 2, max = 100))]
     name: String,
 
-    #[validate(range(min = 18, max = 120))]
     #[schemars(range(min = 18, max = 120))]
     age: u8,
 
-    #[validate(url)]
     #[schemars(url)]
     website: Option<String>,
 }
 
 #[method]
 async fn create_user(&self, req: CreateUserRequest) -> User {
-    // Validation happens automatically before this runs!
+    // No automatic validation. If you need it, validate `req` here yourself.
 }
 ```
 
-**Extracted Schema with Validation:**
+**Schema the `#[schemars(...)]` annotations would emit:**
 ```json
 {
   "email": {
     "type": "string",
-    "format": "email",
     "pattern": "^[^@]+@[^@]+\\.[^@]+$"
   },
   "name": {
@@ -302,11 +307,10 @@ async fn create_user(&self, req: CreateUserRequest) -> User {
 }
 ```
 
-**Benefits:**
-- Server validates before method runs
-- Client validates before sending
-- OpenAPI docs show constraints
-- Both sides enforce same rules
+**Status:**
+- Schema annotations (`#[schemars(...)]`) DO surface as constraint metadata.
+- The server does **not** validate before the method runs (not implemented).
+- The framework does **not** enforce these rules on either side.
 
 ---
 
@@ -550,10 +554,10 @@ enum CheckoutError {
 
 #[activation(namespace = "shop")]
 impl ShopActivation {
-    #[method(http = GET)]
+    #[method(http_method = "GET")]
     async fn get_product(&self, id: ProductId) -> Option<Product> { }
 
-    #[method(http = POST)]
+    #[method(http_method = "POST")]
     async fn checkout(
         &self,
         items: Vec<CartItem>,
@@ -566,13 +570,13 @@ impl ShopActivation {
 - ✅ Money has currency attached
 - ✅ Errors are discriminated unions
 - ✅ Clients get full TypeScript types
-- ✅ Validation happens automatically
+- ⚠️ Automatic validation is NOT implemented — see §5
 
 ---
 
 ## Summary: Type Safety Across Boundaries
 
-| Rust Type | JSON Schema | TypeScript | Validation |
+| Rust Type | JSON Schema | TypeScript | Schema-typed |
 |-----------|-------------|------------|------------|
 | `String` | `string` | `string` | ✅ |
 | `u32`, `i64` | `integer` | `number` | ✅ |
@@ -584,5 +588,7 @@ impl ShopActivation {
 | `enum` | `oneOf` | `union` | ✅ |
 | `struct` | `object` | `interface` | ✅ |
 | `Result<T,E>` | `oneOf` | `{ok:T}\|{error:E}` | ✅ |
+
+(The "Schema-typed" column means the type maps to a JSON Schema shape that generated clients enforce statically; the framework does not run runtime value validation — see §5.)
 
 **The protocol is strongly typed end-to-end!** 🎯
