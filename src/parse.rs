@@ -105,7 +105,70 @@ pub struct HubMethodAttrs {
     /// RED-2: explicit acknowledgment that this method is intentionally
     /// public (no auth). Set by `#[plexus_macros::method(public)]`. Suppresses
     /// the mixed-auth warning for this method.
+    ///
+    /// R-1 (AUTHZ-CORE-2): also emitted into the generated `MethodSchema` as
+    /// the `public` flag — the method is exempt from the default-deny gate.
+    /// `public` and `scope = "..."` together is a compile error (a public
+    /// method has no required scope to enforce).
     pub public: bool,
+    /// R-1 (AUTHZ-CORE-2): explicit required scopes from one or more
+    /// `scope = "..."` arguments. Multi-scope means conjunction — the caller
+    /// must satisfy ALL listed scopes (AND, not OR; AUTHZ-S01-output §4).
+    /// Empty means the implicit `<activation>.<method>` rule applies at
+    /// registry-build time (AUTHZ-CORE-4's `ScopeRegistry` resolves it; the
+    /// IR carries nothing for the implicit case).
+    ///
+    /// Each literal is validated against the AUTHZ-CORE-4 scope grammar at
+    /// macro-expansion time (see [`validate_scope_literal`]).
+    pub scopes: Vec<String>,
+}
+
+/// R-1 (AUTHZ-CORE-2 acceptance criterion #3): validate a `scope = "..."`
+/// literal against the AUTHZ-CORE-4 scope grammar pinned by AUTHZ-S01-output
+/// §1/§4:
+///
+/// - bare `*` ("all scopes"), or
+/// - ASCII dot-separated segments, each matching `[a-z][a-z0-9_]*`,
+/// - optionally ending in a `.*` segment wildcard (segment-bounded:
+///   `cone.*` matches `cone.send_message`, not `forms.list`).
+///
+/// Returns a human-readable description of the violation on failure. The
+/// canonical `Scope::try_new` (AUTHZ-CORE-4 / R-0) enforces the same grammar
+/// at registry-build time; this compile-time check fails fast at the literal.
+pub fn validate_scope_literal(s: &str) -> Result<(), String> {
+    if s == "*" {
+        return Ok(());
+    }
+    if s.is_empty() {
+        return Err("scope must not be empty".to_string());
+    }
+    let segments: Vec<&str> = s.split('.').collect();
+    for (i, seg) in segments.iter().enumerate() {
+        let is_last = i == segments.len() - 1;
+        if *seg == "*" {
+            if is_last && segments.len() > 1 {
+                continue; // trailing `.*` segment wildcard
+            }
+            return Err(
+                "`*` is only valid as the entire scope or as the trailing `.*` segment"
+                    .to_string(),
+            );
+        }
+        let mut chars = seg.chars();
+        let valid = match chars.next() {
+            Some(c) if c.is_ascii_lowercase() => {
+                chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(format!(
+                "segment `{}` must match [a-z][a-z0-9_]*",
+                seg
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Parse for HubMethodAttrs {
@@ -119,6 +182,11 @@ impl Parse for HubMethodAttrs {
         let mut http_method = None;
         let mut request_override: Option<MethodRequestOverride> = None;
         let mut public = false;
+        // R-1 (AUTHZ-CORE-2): explicit `scope = "..."` literals plus the
+        // spans needed to anchor the `public` + `scope` contradiction error.
+        let mut scopes: Vec<String> = Vec::new();
+        let mut public_span: Option<proc_macro2::Span> = None;
+        let mut first_scope_span: Option<proc_macro2::Span> = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -144,7 +212,10 @@ impl Parse for HubMethodAttrs {
                         } else if path.is_ident("public") {
                             // RED-2: explicit acknowledgment that this method
                             // intentionally bypasses activation-level auth.
+                            // R-1: also emitted as the MethodSchema `public`
+                            // flag (exempt from the default-deny gate).
                             public = true;
+                            public_span = Some(path.span());
                         }
                     }
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
@@ -175,6 +246,35 @@ impl Parse for HubMethodAttrs {
                                     }
                                 }
                             }
+                        } else if path.is_ident("scope") {
+                            // R-1 (AUTHZ-CORE-2): explicit required scope.
+                            // Repeatable — `scope = "x.y", scope = "x.z"`
+                            // means the caller must satisfy ALL (AND).
+                            let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value else {
+                                return Err(syn::Error::new_spanned(
+                                    &path,
+                                    "scope = ... expects a string literal, e.g. \
+                                     #[plexus_macros::method(scope = \"facet.write\")]",
+                                ));
+                            };
+                            let literal = s.value();
+                            if let Err(why) = validate_scope_literal(&literal) {
+                                return Err(syn::Error::new(
+                                    s.span(),
+                                    format!(
+                                        "invalid scope literal `{}`: {}. Scopes are ASCII \
+                                         dot-separated segments matching [a-z][a-z0-9_]*, \
+                                         optionally ending in a `.*` segment wildcard, or \
+                                         the bare `*` (AUTHZ-CORE-4 scope grammar; see \
+                                         `Scope::try_new`).",
+                                        literal, why,
+                                    ),
+                                ));
+                            }
+                            if first_scope_span.is_none() {
+                                first_scope_span = Some(s.span());
+                            }
+                            scopes.push(literal);
                         } else if path.is_ident("request") {
                             // request = ()  → skip activation-level request extraction
                             // request = SomeType → use a different request type (future)
@@ -254,7 +354,20 @@ impl Parse for HubMethodAttrs {
             }
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public })
+        // R-1 (AUTHZ-CORE-2 acceptance criterion #2): `public` and
+        // `scope = "..."` together is a contradiction — a public method has
+        // no required scope to enforce.
+        if public && !scopes.is_empty() {
+            let span = public_span
+                .or(first_scope_span)
+                .unwrap_or_else(proc_macro2::Span::call_site);
+            return Err(syn::Error::new(
+                span,
+                "a public method has no required scope; remove `public` or remove `scope = ...`",
+            ));
+        }
+
+        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes })
     }
 }
 
@@ -316,7 +429,13 @@ pub struct HubMethodsAttrs {
     ///   method does. Affirmative declaration of a public activation.
     ///
     /// Parsed from `auth = "required" | "optional" | "mixed" | "none"`.
-    pub auth_posture: AuthPosture,
+    ///
+    /// R-1 (joint AP-1): `None` means the activation never declared a
+    /// posture — enforcement treats that as `Optional` (unchanged), but the
+    /// IR emission stays silent so posture-silent activations produce
+    /// byte-identical schemas to pre-R-1 (AP-1 acceptance criterion #2).
+    /// `Some(p)` is emitted into every generated `MethodSchema.auth_posture`.
+    pub auth_posture: Option<AuthPosture>,
 }
 
 /// RED-6: declared auth enforcement posture for an activation.
@@ -347,7 +466,9 @@ impl Parse for HubMethodsAttrs {
         let mut children_span: Option<proc_macro2::Span> = None;
         let mut required_fields: Vec<syn::Ident> = Vec::new();
         let mut required_fields_span: Option<proc_macro2::Span> = None;
-        let mut auth_posture = AuthPosture::Optional;
+        // R-1: `None` = posture never declared (enforced as Optional, not
+        // emitted); `Some(p)` = declared and emitted.
+        let mut auth_posture: Option<AuthPosture> = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -408,10 +529,10 @@ impl Parse for HubMethodsAttrs {
                                 // See HubMethodsAttrs::auth_posture for semantics.
                                 let v = s.value();
                                 auth_posture = match v.as_str() {
-                                    "required" => AuthPosture::Required,
-                                    "optional" => AuthPosture::Optional,
-                                    "mixed"    => AuthPosture::Mixed,
-                                    "none"     => AuthPosture::None,
+                                    "required" => Some(AuthPosture::Required),
+                                    "optional" => Some(AuthPosture::Optional),
+                                    "mixed"    => Some(AuthPosture::Mixed),
+                                    "none"     => Some(AuthPosture::None),
                                     other => return Err(syn::Error::new(
                                         s.span(),
                                         format!(
@@ -1199,7 +1320,17 @@ pub struct MethodInfo {
     /// RED-2: explicit-public flag (mirrored from `HubMethodAttrs::public`).
     /// `true` when `#[plexus_macros::method(public)]` is set; suppresses the
     /// mixed-auth diagnostic for this method.
+    ///
+    /// R-1: also emitted into the generated `MethodSchema.public` flag.
     pub public: bool,
+    /// R-1 (AUTHZ-CORE-2): explicit required scopes (mirrored from
+    /// `HubMethodAttrs::scopes`). Emitted into the generated
+    /// `MethodSchema.requires_credential` via
+    /// `RequiredCredential::from_method_scope(s)` (single) /
+    /// `from_method_scopes` (conjunction). Empty = implicit
+    /// `<activation>.<method>` rule; nothing is emitted (the registry
+    /// resolves implicit scopes at build time, AUTHZ-CORE-4).
+    pub scopes: Vec<String>,
     /// IR-3: parsed `#[deprecated(...)]` + `#[plexus_macros::removed_in]` info
     /// folded into the emitted `MethodSchema.deprecation` field.
     pub deprecation: Option<ParsedDeprecation>,
@@ -1375,6 +1506,12 @@ impl MethodInfo {
         // if present. Default false.
         let public = hub_method_attrs.map(|a| a.public).unwrap_or(false);
 
+        // R-1: capture the explicit `scope = "..."` literals (already
+        // grammar-validated at attribute-parse time).
+        let scopes = hub_method_attrs
+            .map(|a| a.scopes.clone())
+            .unwrap_or_default();
+
         Ok(MethodInfo {
             fn_name,
             method_name,
@@ -1392,6 +1529,7 @@ impl MethodInfo {
             activation_params,
             request_override,
             public,
+            scopes,
             deprecation,
         })
     }
@@ -1847,6 +1985,7 @@ mod tests {
             http_method: None,
             request_override: None,
             public: false,
+            scopes: vec![],
         };
         let info = MethodInfo::from_fn(&method, Some(&attrs)).expect("parses cleanly");
         let param = info.params.iter().find(|p| p.name == "message").unwrap();
@@ -1875,6 +2014,76 @@ mod tests {
             param.description.is_none(),
             "no description anywhere should yield None, got: {:?}",
             param.description
+        );
+    }
+
+    /// R-1 (AUTHZ-CORE-2 AC #3): the compile-time scope-grammar check
+    /// mirrors AUTHZ-CORE-4's `Scope::try_new` grammar.
+    #[test]
+    fn scope_literal_grammar_accepts_and_rejects() {
+        // Accepted forms.
+        for ok in [
+            "facet.write",
+            "cone.send_message",
+            "a",
+            "a.b.c",
+            "a1.b_2",
+            "cone.*",
+            "a.b.*",
+            "*",
+        ] {
+            assert!(
+                validate_scope_literal(ok).is_ok(),
+                "`{ok}` should satisfy the scope grammar"
+            );
+        }
+        // Rejected forms.
+        for bad in [
+            "",
+            "INVALID-CHARS",
+            "Facet.write",
+            "facet..write",
+            ".facet",
+            "facet.",
+            "facet write",
+            "1facet.write",
+            "*.facet",      // wildcard must be trailing
+            "facet.*.read", // wildcard must be trailing
+            "**",
+            "facet.wr*te",
+        ] {
+            assert!(
+                validate_scope_literal(bad).is_err(),
+                "`{bad}` should violate the scope grammar"
+            );
+        }
+    }
+
+    /// R-1: `scope = "..."` parses into `HubMethodAttrs::scopes` in
+    /// declaration order; `public` + `scope` is rejected at parse time.
+    #[test]
+    fn method_attrs_parse_scopes_and_reject_public_scope_conflict() {
+        let attrs: HubMethodAttrs =
+            syn::parse_str("scope = \"x.y\", scope = \"x.z\"").expect("parses cleanly");
+        assert_eq!(attrs.scopes, vec!["x.y".to_string(), "x.z".to_string()]);
+        assert!(!attrs.public);
+
+        let err = match syn::parse_str::<HubMethodAttrs>("public, scope = \"x.y\"") {
+            Ok(_) => panic!("public + scope must be a parse error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("a public method has no required scope"),
+            "unexpected error: {err}"
+        );
+
+        let err = match syn::parse_str::<HubMethodAttrs>("scope = \"BAD CHARS\"") {
+            Ok(_) => panic!("invalid literal must be a parse error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("invalid scope literal"),
+            "unexpected error: {err}"
         );
     }
 }

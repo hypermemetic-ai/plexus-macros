@@ -1,6 +1,6 @@
 //! Generate method enum from hub methods
 
-use crate::parse::{BidirType, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
+use crate::parse::{AuthPosture, BidirType, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use std::collections::hash_map::DefaultHasher;
@@ -18,6 +18,11 @@ pub fn generate(
     // serde_json / schemars references in the emitted enum + schema code
     // resolve relatively through it.
     deps: &syn::Ident,
+    // R-1 (joint AP-1): the activation's DECLARED auth posture. `Some(p)` is
+    // stamped onto every generated RPC `MethodSchema` via
+    // `with_auth_posture`; `None` (posture never declared) emits nothing so
+    // posture-silent activations keep their pre-R-1 wire shape.
+    auth_posture: Option<AuthPosture>,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
 
@@ -302,6 +307,85 @@ pub fn generate(
         None     => quote! { None },
     };
 
+    // R-1 (AUTHZ-CORE-2): per-method explicit-scope emission. Methods that
+    // declare `scope = "..."` (one or more) get a populated
+    // `MethodSchema.requires_credential`:
+    //
+    // - one scope  → `RequiredCredential::from_method_scope(Scope::new(s))`
+    // - N scopes   → `RequiredCredential::from_method_scopes(vec![..])`
+    //                (conjunction — the caller must satisfy ALL)
+    //
+    // Methods with no `scope = "..."` emit nothing: the implicit
+    // `<activation>.<method>` rule is resolved by AUTHZ-CORE-4's
+    // `ScopeRegistry` at registry-build time, not carried in the IR
+    // (superseding AUTHZ-CORE-7's `resolved_implicit_scope` — clients can
+    // compute it from `activation.method` themselves).
+    //
+    // `Scope` is reached through plexus-core's re-export
+    // (`#crate_path::plexus::schema::Scope`) so consumers don't need a
+    // direct plexus-auth-core dependency, and umbrella-only consumers
+    // resolve it through `::plexus_rpc::core` (Z2H-2).
+    let (authz_scope_index, authz_scope_calls): (Vec<_>, Vec<_>) = methods
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, m)| {
+            if m.scopes.is_empty() {
+                return None;
+            }
+            let idx_lit = proc_macro2::Literal::usize_suffixed(idx);
+            let call = if m.scopes.len() == 1 {
+                let s = &m.scopes[0];
+                quote! {
+                    schema = schema.with_requires_credential(
+                        #crate_path::plexus::schema::RequiredCredential::from_method_scope(
+                            #crate_path::plexus::schema::Scope::new(#s),
+                        ),
+                    );
+                }
+            } else {
+                let scope_news = m
+                    .scopes
+                    .iter()
+                    .map(|s| quote! { #crate_path::plexus::schema::Scope::new(#s) });
+                quote! {
+                    schema = schema.with_requires_credential(
+                        #crate_path::plexus::schema::RequiredCredential::from_method_scopes(
+                            vec![#(#scope_news),*],
+                        ),
+                    );
+                }
+            };
+            Some((quote! { #idx_lit }, call))
+        })
+        .unzip();
+
+    // R-1: per-method `public` flags. Only `true` entries change the wire
+    // (plexus-core skips serializing `public: false`), so pre-R-1 methods
+    // keep their exact wire shape.
+    let public_flags: Vec<bool> = methods.iter().map(|m| m.public).collect();
+
+    // R-1 (joint AP-1): activation-declared posture stamp, applied to every
+    // generated RPC method schema. Undeclared posture emits nothing.
+    // Framework-injected entries (the auto `schema` method, `#[child]`
+    // entries) are NOT stamped — the declaration describes the activation's
+    // RPC enforcement surface.
+    let posture_call: TokenStream = match auth_posture {
+        Option::None => quote! {},
+        Option::Some(p) => {
+            let variant = match p {
+                AuthPosture::Required => quote! { Required },
+                AuthPosture::Optional => quote! { Optional },
+                AuthPosture::Mixed => quote! { Mixed },
+                AuthPosture::None => quote! { None },
+            };
+            quote! {
+                schema = schema.with_auth_posture(
+                    #crate_path::plexus::schema::AuthPosture::#variant,
+                );
+            }
+        }
+    };
+
     // Generate bidirectional schema setup calls and their method indices.
     //
     // Each entry is a (index, TokenStream) pair where the TokenStream fragment
@@ -405,6 +489,8 @@ pub fn generate(
                 // REQ-6 runtime data: per-method auth resolvers, override flags, activation request schema.
                 let auth_entries_per_method: Vec<&[(&str, &str)]> = vec![#(#auth_entries_per_method),*];
                 let method_override_is_skip: &[bool] = &[#(#method_override_is_skip),*];
+                // R-1: per-method explicit-public flags (AUTHZ-CORE-2).
+                let public_flags: &[bool] = &[#(#public_flags),*];
                 let activation_request_schema: Option<#deps::schemars::Schema> = #activation_request_schema_expr;
                 let activation_request_props: Option<#deps::serde_json::Map<String, #deps::serde_json::Value>> =
                     activation_request_schema
@@ -517,6 +603,28 @@ pub fn generate(
                         }
                         schema = schema.with_streaming(*is_streaming);
                         schema = schema.with_http_method(http_method);
+
+                        // R-1 (joint AP-1): stamp the activation-declared
+                        // auth posture (no-op when undeclared).
+                        #posture_call
+
+                        // R-1: explicit-public flag (AUTHZ-CORE-2). Only
+                        // `true` reaches the wire (serde skips false).
+                        if public_flags[i] {
+                            schema = schema.with_public(true);
+                        }
+
+                        // R-1: explicit `scope = "..."` requirements →
+                        // `requires_credential` (AUTHZ-CORE-2). Compile-time
+                        // per-index match, same shape as the bidir calls.
+                        match i {
+                            #(
+                                #authz_scope_index => {
+                                    #authz_scope_calls
+                                }
+                            )*
+                            _ => {}
+                        }
 
                         // Apply bidirectional schema configuration.
                         // Uses a compile-time match on the method index so that type-level

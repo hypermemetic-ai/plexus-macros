@@ -152,6 +152,21 @@ impl Parse for HubMethodAttrs {
 ///     }
 /// }
 /// ```
+///
+/// # Authorization arguments (R-1 / AUTHZ-CORE-2)
+///
+/// - `scope = "..."` — explicit required scope, emitted into the generated
+///   `MethodSchema.requires_credential`. Repeatable: `scope = "x.y",
+///   scope = "x.z"` means the caller must satisfy **ALL** listed scopes
+///   (conjunction — AND, not OR). Literals are validated at compile time
+///   against the AUTHZ-CORE-4 scope grammar (dot-separated `[a-z][a-z0-9_]*`
+///   segments, optional trailing `.*` segment wildcard, or bare `*`).
+/// - `public` — the method is exempt from the default-deny gate; emitted as
+///   `MethodSchema.public = true`. Mixing `public` with `scope = "..."` is a
+///   compile error (a public method has no required scope to enforce).
+/// - Neither — the implicit `<activation>.<method>` scope rule applies at
+///   registry-build time (AUTHZ-CORE-4); the schema carries no
+///   `requires_credential` for the implicit case.
 #[proc_macro_attribute]
 pub fn method(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as HubMethodAttrs);

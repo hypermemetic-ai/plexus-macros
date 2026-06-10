@@ -556,8 +556,13 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     // to a compile-time warning ("handler accepts anonymous but activation
     // requires auth") so the trak-style "anonymous read, authed write"
     // pattern is reachable.
+    // R-1 (joint AP-1): enforcement treats an undeclared posture as
+    // `Optional` (unchanged RED-6 semantics); only a DECLARED posture is
+    // emitted into the generated MethodSchema entries (see
+    // `method_enum::generate`).
+    let effective_auth_posture = args.auth_posture.unwrap_or_default();
     let mut required_posture_optional_auth_methods: Vec<&crate::parse::MethodInfo> = Vec::new();
-    match args.auth_posture {
+    match effective_auth_posture {
         crate::parse::AuthPosture::Required => {
             for m in &methods {
                 if m.auth_resolvers.is_empty() && !m.public {
@@ -605,7 +610,8 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     // RED-2: warn when the activation has methods with #[from_auth] and other
     // methods without. Suppressed under `auth = "mixed"` (explicit) and the
     // two strict postures (where compile-time errors already cover the cases).
-    let suppress_mixed_warning = !matches!(args.auth_posture, crate::parse::AuthPosture::Optional);
+    let suppress_mixed_warning =
+        !matches!(effective_auth_posture, crate::parse::AuthPosture::Optional);
     let mixed_auth_warning = mixed_auth_warning(&methods, suppress_mixed_warning, &struct_name);
 
     // AUTHZ-CRED-MACRO-3: resolve the optional `plexus-auth-core` path used by
@@ -631,6 +637,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         auth_core_path.as_ref(),
         args.request_type.as_ref(),  // REQ-6: activation-level request type (for runtime merge)
         &deps,
+        args.auth_posture, // R-1: declared posture (None = silent, pre-R-1 wire)
     );
     let activation_impl = activation::generate(
         &struct_name,

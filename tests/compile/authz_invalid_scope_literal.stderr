@@ -1,0 +1,5 @@
+error: invalid scope literal `INVALID-CHARS`: segment `INVALID-CHARS` must match [a-z][a-z0-9_]*. Scopes are ASCII dot-separated segments matching [a-z][a-z0-9_]*, optionally ending in a `.*` segment wildcard, or the bare `*` (AUTHZ-CORE-4 scope grammar; see `Scope::try_new`).
+  --> tests/compile/authz_invalid_scope_literal.rs:10:37
+   |
+10 |     #[plexus_macros::method(scope = "INVALID-CHARS")]
+   |                                     ^^^^^^^^^^^^^^^
