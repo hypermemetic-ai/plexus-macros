@@ -59,6 +59,14 @@
 //! Deprecated surfaces kept through 0.5.x (removed in 0.6): `#[hub_methods]`,
 //! `#[hub_method]`, `#[derive(StreamEvent)]`, the `hub` and `children = [...]`
 //! flags on `#[activation]`. See the migration section of the README.
+//!
+//! ## Crate version (UMB-2)
+//!
+//! This crate is `proc-macro = true`, which means it can only export macro
+//! attributes — `pub const VERSION` etc. are forbidden by the compiler. The
+//! `plexus-rpc` umbrella reads `plexus-macros`'s version via a build-time
+//! environment variable populated from `Cargo.toml`'s dependency pin
+//! (see `plexus-rpc/build.rs`).
 
 mod codegen;
 mod credential;

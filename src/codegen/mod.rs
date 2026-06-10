@@ -147,10 +147,14 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                     !matches!(last.as_deref(), Some("removed_in"))
                 });
 
-                // Strip #[from_auth(...)], #[activation_param], and IR-5's
-                // #[deprecated] / #[plexus_macros::removed_in] attributes from
-                // parameters so rustc doesn't complain about unknown / unused
-                // attributes in the emitted code.
+                // Strip #[from_auth(...)], #[activation_param], IR-5's
+                // #[deprecated] / #[plexus_macros::removed_in], AND
+                // AUTHZ-MACRO-PARAM-DOC-1's `///` doc comments from
+                // parameters so rustc doesn't complain about unknown /
+                // unstable attributes on parameters when the emitted
+                // function signature is re-rendered. The doc-comment
+                // text has already been captured into
+                // `ParamInfo.description` by `MethodInfo::from_fn`.
                 for arg in &mut method.sig.inputs {
                     if let FnArg::Typed(pat_type) = arg {
                         pat_type.attrs.retain(|attr| {
@@ -158,6 +162,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                                 attr.path().segments.last().map(|s| s.ident.to_string());
                             !attr.path().is_ident("from_auth")
                                 && !attr.path().is_ident("activation_param")
+                                && !attr.path().is_ident("doc")
                                 && !matches!(
                                     last.as_deref(),
                                     Some("deprecated") | Some("removed_in")
