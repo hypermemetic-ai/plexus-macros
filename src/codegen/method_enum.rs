@@ -14,8 +14,38 @@ pub fn generate(
     crate_path: &syn::Path,
     auth_core_path: Option<&syn::Path>,
     activation_request_type: Option<&syn::Type>,
+    // Z2H-2: ident of the per-expansion dependency shim module. serde /
+    // serde_json / schemars references in the emitted enum + schema code
+    // resolve relatively through it.
+    deps: &syn::Ident,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
+
+    // Z2H-2: derives are the one place the relative shim path does NOT work —
+    // serde/schemars derive expansions emit `use <crate-attr-path> ...` inside
+    // their own const blocks, which resolves module-relatively and cannot see
+    // a shim module that lives in a fn body (activations declared inside test
+    // fns are common). So the derive list + both crates' `crate =` escape
+    // hatches use the ABSOLUTE umbrella path in umbrella mode, and today's
+    // bare extern-prelude names (with no `crate =` attrs at all) in direct
+    // mode — preserving pre-Z2H-2 derive semantics exactly for existing
+    // consumers.
+    let umbrella = crate::codegen::umbrella_crate(proc_macro2::Span::call_site());
+    let (serde_derive_path, schemars_derive_path, derive_crate_attrs) = match &umbrella {
+        Some(u) => {
+            let serde_crate_attr = format!("::{}::__deps::serde", u);
+            let schemars_crate_attr = format!("::{}::__deps::schemars", u);
+            (
+                quote! { ::#u::__deps::serde },
+                quote! { ::#u::__deps::schemars },
+                quote! {
+                    #[serde(crate = #serde_crate_attr)]
+                    #[schemars(crate = #schemars_crate_attr)]
+                },
+            )
+        }
+        None => (quote! { serde }, quote! { schemars }, quote! {}),
+    };
 
     let variants: Vec<TokenStream> = methods
         .iter()
@@ -92,11 +122,11 @@ pub fn generate(
             if let Some(item_ty) = &m.stream_item_type {
                 if m.returns_variants.is_empty() {
                     // No filtering - return full schema
-                    quote! { (Some(schemars::schema_for!(#item_ty)), Vec::<&str>::new()) }
+                    quote! { (Some(#deps::schemars::schema_for!(#item_ty)), Vec::<&str>::new()) }
                 } else {
                     // Return schema with filter list
                     let variants = &m.returns_variants;
-                    quote! { (Some(schemars::schema_for!(#item_ty)), vec![#(#variants),*]) }
+                    quote! { (Some(#deps::schemars::schema_for!(#item_ty)), vec![#(#variants),*]) }
                 }
             } else {
                 quote! { (None, Vec::<&str>::new()) }
@@ -268,7 +298,7 @@ pub fn generate(
 
     // REQ-6: activation-level request schema token — `Some(schemars::schema_for!(T))` or `None`.
     let activation_request_schema_expr: TokenStream = match activation_request_type {
-        Some(ty) => quote! { Some(schemars::schema_for!(#ty)) },
+        Some(ty) => quote! { Some(#deps::schemars::schema_for!(#ty)) },
         None     => quote! { None },
     };
 
@@ -299,16 +329,16 @@ pub fn generate(
                 )),
                 BidirType::Custom { request, response } => {
                     let req_ty: syn::Type = syn::parse_str(request)
-                        .unwrap_or_else(|_| syn::parse_str("serde_json::Value").unwrap());
+                        .unwrap_or_else(|_| syn::parse_quote!(#deps::serde_json::Value));
                     let resp_ty: syn::Type = syn::parse_str(response)
-                        .unwrap_or_else(|_| syn::parse_str("serde_json::Value").unwrap());
+                        .unwrap_or_else(|_| syn::parse_quote!(#deps::serde_json::Value));
                     Some((
                         quote! { #idx_lit },
                         quote! {
                             schema = schema
                                 .with_bidirectional(true)
-                                .with_request_type(schemars::schema_for!(#req_ty).into())
-                                .with_response_type(schemars::schema_for!(#resp_ty).into());
+                                .with_request_type(#deps::schemars::schema_for!(#req_ty).into())
+                                .with_response_type(#deps::schemars::schema_for!(#resp_ty).into());
                         },
                     ))
                 }
@@ -318,8 +348,9 @@ pub fn generate(
 
     quote! {
         /// Auto-generated method enum for schema extraction
-        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+        #[derive(Debug, Clone, #serde_derive_path::Serialize, #serde_derive_path::Deserialize, #schemars_derive_path::JsonSchema)]
         #[serde(tag = "method", content = "params", rename_all = "snake_case")]
+        #derive_crate_attrs
         pub enum #enum_name {
             #(#variants),*
         }
@@ -330,10 +361,10 @@ pub fn generate(
             }
 
             /// Cached schema value - computed once on first access
-            fn cached_schema() -> &'static serde_json::Value {
-                static SCHEMA_CACHE: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            fn cached_schema() -> &'static #deps::serde_json::Value {
+                static SCHEMA_CACHE: std::sync::OnceLock<#deps::serde_json::Value> = std::sync::OnceLock::new();
                 SCHEMA_CACHE.get_or_init(|| {
-                    serde_json::to_value(schemars::schema_for!(#enum_name)).expect("Schema should serialize")
+                    #deps::serde_json::to_value(#deps::schemars::schema_for!(#enum_name)).expect("Schema should serialize")
                 })
             }
         }
@@ -343,7 +374,7 @@ pub fn generate(
                 &[#(#method_names),*]
             }
 
-            fn schema_with_consts() -> serde_json::Value {
+            fn schema_with_consts() -> #deps::serde_json::Value {
                 // Return cached schema (cloned since caller may mutate)
                 Self::cached_schema().clone()
             }
@@ -369,18 +400,18 @@ pub fn generate(
                 let hashes: &[&str] = &[#(#method_hashes),*];
                 let streaming: &[bool] = &[#(#streaming_flags),*];
                 let http_methods: Vec<#crate_path::plexus::schema::HttpMethod> = vec![#(#http_methods),*];
-                let return_schemas: Vec<(Option<schemars::Schema>, Vec<&str>)> = vec![#(#return_schema_entries),*];
+                let return_schemas: Vec<(Option<#deps::schemars::Schema>, Vec<&str>)> = vec![#(#return_schema_entries),*];
 
                 // REQ-6 runtime data: per-method auth resolvers, override flags, activation request schema.
                 let auth_entries_per_method: Vec<&[(&str, &str)]> = vec![#(#auth_entries_per_method),*];
                 let method_override_is_skip: &[bool] = &[#(#method_override_is_skip),*];
-                let activation_request_schema: Option<schemars::Schema> = #activation_request_schema_expr;
-                let activation_request_props: Option<serde_json::Map<String, serde_json::Value>> =
+                let activation_request_schema: Option<#deps::schemars::Schema> = #activation_request_schema_expr;
+                let activation_request_props: Option<#deps::serde_json::Map<String, #deps::serde_json::Value>> =
                     activation_request_schema
                         .as_ref()
-                        .and_then(|s| serde_json::to_value(s).ok())
+                        .and_then(|s| #deps::serde_json::to_value(s).ok())
                         .and_then(|v| v.get("properties").cloned())
-                        .and_then(|v| match v { serde_json::Value::Object(m) => Some(m), _ => None });
+                        .and_then(|v| match v { #deps::serde_json::Value::Object(m) => Some(m), _ => None });
 
                 // Get the cached full enum schema
                 let schema_value = Self::cached_schema();
@@ -418,7 +449,7 @@ pub fn generate(
                                     if let (Some(params_obj), Some(defs)) = (p.as_object_mut(), &root_defs) {
                                         params_obj.insert("$defs".to_string(), defs.clone());
                                     }
-                                    serde_json::from_value::<schemars::Schema>(p).ok()
+                                    #deps::serde_json::from_value::<#deps::schemars::Schema>(p).ok()
                                 })
                         });
 
@@ -437,18 +468,18 @@ pub fn generate(
                         //       and this method does NOT have `request = ()` override)
                         // Properties added here are NOT marked required — they are server-extracted.
                         let params = params.map(|p| {
-                            let mut p_val: serde_json::Value = serde_json::to_value(&p).unwrap_or_default();
+                            let mut p_val: #deps::serde_json::Value = #deps::serde_json::to_value(&p).unwrap_or_default();
                             if let Some(obj) = p_val.as_object_mut() {
                                 // Ensure properties object exists
                                 let properties = obj
                                     .entry("properties".to_string())
-                                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-                                if let serde_json::Value::Object(props_map) = properties {
+                                    .or_insert_with(|| #deps::serde_json::Value::Object(#deps::serde_json::Map::new()));
+                                if let #deps::serde_json::Value::Object(props_map) = properties {
                                     // (a) auth resolvers
                                     for (pname, rexpr) in auth_entries_per_method[i].iter() {
                                         props_map.insert(
                                             (*pname).to_string(),
-                                            serde_json::json!({
+                                            #deps::serde_json::json!({
                                                 "x-plexus-source": {
                                                     "from": "auth",
                                                     "resolver": rexpr,
@@ -470,7 +501,7 @@ pub fn generate(
                                     }
                                 }
                             }
-                            serde_json::from_value::<schemars::Schema>(p_val).unwrap_or(p)
+                            #deps::serde_json::from_value::<#deps::schemars::Schema>(p_val).unwrap_or(p)
                         });
 
                         let mut schema = #crate_path::plexus::MethodSchema::new(
@@ -570,9 +601,9 @@ pub fn generate(
             /// This handles the case where a method returns an enum but only uses
             /// specific variants. The schema is filtered at runtime to only include
             /// those variants in the oneOf array.
-            fn filter_return_schema(schema: schemars::Schema, allowed_variants: &[&str]) -> schemars::Schema {
+            fn filter_return_schema(schema: #deps::schemars::Schema, allowed_variants: &[&str]) -> #deps::schemars::Schema {
                 // Convert to JSON for manipulation
-                let mut schema_value = serde_json::to_value(&schema).expect("Schema should serialize");
+                let mut schema_value = #deps::serde_json::to_value(&schema).expect("Schema should serialize");
 
                 // Check if this is a oneOf enum schema
                 if let Some(one_of) = schema_value.get_mut("oneOf").and_then(|v| v.as_array_mut()) {
@@ -619,7 +650,7 @@ pub fn generate(
                 }
 
                 // Convert back to Schema
-                serde_json::from_value(schema_value).expect("Filtered schema should deserialize")
+                #deps::serde_json::from_value(schema_value).expect("Filtered schema should deserialize")
             }
         }
     }

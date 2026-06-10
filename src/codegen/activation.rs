@@ -41,17 +41,21 @@ pub fn generate(
     search_method: Option<&ListSearchMethodInfo>,
     // IR-5: activation-level `#[deprecated]` parsed off the impl block.
     activation_deprecation: Option<&ParsedDeprecation>,
+    // Z2H-2: ident of the per-expansion dependency shim module emitted by
+    // `generate_all`. All third-party names (jsonrpsee, serde_json, uuid,
+    // async_trait, futures, tokio) are referenced relatively through it.
+    deps: &syn::Ident,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
     let rpc_server_name = format_ident!("{}RpcServer", struct_name);
     let method_names: Vec<&str> = methods.iter().map(|m| m.method_name.as_str()).collect();
 
-    let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type);
+    let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type, deps);
     let help_arms = generate_help_arms(methods);
     let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && m.activation_params.is_empty());
-    let rpc_trait_methods = generate_rpc_trait_methods(methods);
-    let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path);
+    let rpc_trait_methods = generate_rpc_trait_methods(methods, deps);
+    let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path, deps);
 
     // Conditionally generate resolve_handle method
     let resolve_handle_impl = if resolve_handle {
@@ -278,17 +282,17 @@ pub fn generate(
     let into_rpc_body = if has_public_rpc_methods {
         quote! { self.into_rpc().into() }
     } else {
-        quote! { jsonrpsee::core::server::Methods::new() }
+        quote! { #deps::jsonrpsee::core::server::Methods::new() }
     };
 
     let rpc_block = if has_public_rpc_methods {
         quote! {
-            #[jsonrpsee::proc_macros::rpc(server, namespace = #namespace)]
+            #[#deps::jsonrpsee::proc_macros::rpc(server, namespace = #namespace)]
             pub trait #rpc_trait_name {
                 #(#rpc_trait_methods)*
             }
 
-            #[async_trait::async_trait]
+            #[#deps::async_trait::async_trait]
             impl #impl_generics #rpc_server_name for #self_ty #where_clause {
                 #(#rpc_impl_methods)*
             }
@@ -433,12 +437,12 @@ pub fn generate(
             // We use a long-form path to avoid leaking extra imports into user
             // code.
             quote! {
-                futures::stream::iter(
+                #deps::futures::stream::iter(
                     [#(#static_names_strs,)*].into_iter().map(::std::string::String::from)
                 )
             }
         } else {
-            quote! { futures::stream::empty::<::std::string::String>() }
+            quote! { #deps::futures::stream::empty::<::std::string::String>() }
         };
 
         let dynamic_list_expr = if let Some(lm) = list_method {
@@ -449,7 +453,7 @@ pub fn generate(
             // rewrap, which is fine.
             Some(quote! {
                 {
-                    use futures::stream::StreamExt;
+                    use #deps::futures::stream::StreamExt;
                     self.#fn_name() #await_tok
                 }
             })
@@ -461,7 +465,7 @@ pub fn generate(
             (true, Some(dyn_expr)) => {
                 quote! {
                     {
-                        use futures::stream::StreamExt;
+                        use #deps::futures::stream::StreamExt;
                         let __static = #static_stream_expr;
                         let __dyn = #dyn_expr;
                         __static.chain(__dyn).boxed()
@@ -471,7 +475,7 @@ pub fn generate(
             (true, None) => {
                 quote! {
                     {
-                        use futures::stream::StreamExt;
+                        use #deps::futures::stream::StreamExt;
                         #static_stream_expr.boxed()
                     }
                 }
@@ -479,7 +483,7 @@ pub fn generate(
             (false, Some(dyn_expr)) => {
                 quote! {
                     {
-                        use futures::stream::StreamExt;
+                        use #deps::futures::stream::StreamExt;
                         #dyn_expr.boxed()
                     }
                 }
@@ -488,7 +492,7 @@ pub fn generate(
         };
 
         quote! {
-            async fn list_children(&self) -> Option<futures::stream::BoxStream<'_, ::std::string::String>> {
+            async fn list_children(&self) -> Option<#deps::futures::stream::BoxStream<'_, ::std::string::String>> {
                 Some(#combined)
             }
         }
@@ -500,8 +504,8 @@ pub fn generate(
         let fn_name = &sm.fn_name;
         let await_tok = if sm.is_async { quote! { .await } } else { quote! {} };
         quote! {
-            async fn search_children(&self, query: &str) -> Option<futures::stream::BoxStream<'_, ::std::string::String>> {
-                use futures::stream::StreamExt;
+            async fn search_children(&self, query: &str) -> Option<#deps::futures::stream::BoxStream<'_, ::std::string::String>> {
+                use #deps::futures::stream::StreamExt;
                 Some(self.#fn_name(query) #await_tok.boxed())
             }
         }
@@ -524,7 +528,7 @@ pub fn generate(
         quote! {
             // Generated ChildRouter impl — enables this activation to participate in
             // hub routing without any hand-written boilerplate.
-            #[async_trait::async_trait]
+            #[#deps::async_trait::async_trait]
             impl #impl_generics #crate_path::plexus::ChildRouter for #self_ty #where_clause {
                 fn router_namespace(&self) -> &str {
                     #namespace
@@ -533,7 +537,7 @@ pub fn generate(
                 async fn router_call(
                     &self,
                     method: &str,
-                    params: serde_json::Value,
+                    params: #deps::serde_json::Value,
                     auth: Option<&#crate_path::plexus::AuthContext>,
                     raw_ctx: Option<&#crate_path::request::RawRequestContext>,
                 ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
@@ -612,10 +616,10 @@ pub fn generate(
         impl #impl_generics #self_ty #where_clause {
             pub const NAMESPACE: &'static str = #namespace;
             /// Stable plugin instance ID for handle routing
-            pub const PLUGIN_ID: uuid::Uuid = uuid::uuid!(#plugin_id_str);
+            pub const PLUGIN_ID: #deps::uuid::Uuid = #deps::uuid::uuid!(#plugin_id_str);
 
             /// Get the plugin's stable instance ID
-            pub fn plugin_id(&self) -> uuid::Uuid {
+            pub fn plugin_id(&self) -> #deps::uuid::Uuid {
                 Self::PLUGIN_ID
             }
 
@@ -626,7 +630,7 @@ pub fn generate(
 
         #child_router_impl
 
-        #[async_trait::async_trait]
+        #[#deps::async_trait::async_trait]
         impl #impl_generics #crate_path::plexus::Activation for #self_ty #where_clause {
             type Methods = #enum_name;
 
@@ -650,7 +654,7 @@ pub fn generate(
             async fn call(
                 &self,
                 method: &str,
-                params: serde_json::Value,
+                params: #deps::serde_json::Value,
                 auth: Option<&#crate_path::plexus::AuthContext>,
                 raw_ctx: Option<&#crate_path::request::RawRequestContext>,
             ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
@@ -680,7 +684,7 @@ pub fn generate(
                         };
 
                         Ok(#crate_path::plexus::wrap_stream(
-                            futures::stream::once(async move { result }),
+                            #deps::futures::stream::once(async move { result }),
                             concat!(#namespace, ".schema"),
                             vec![#namespace.into()]
                         ))
@@ -706,7 +710,7 @@ pub fn generate(
                             }) {
                                 let result = #crate_path::plexus::SchemaResult::Method(m.clone());
                                 return Ok(#crate_path::plexus::wrap_stream(
-                                    futures::stream::once(async move { result }),
+                                    #deps::futures::stream::once(async move { result }),
                                     concat!(#namespace, ".method_schema"),
                                     vec![#namespace.into()]
                                 ));
@@ -722,7 +726,7 @@ pub fn generate(
                 }
             }
 
-            fn into_rpc_methods(self) -> jsonrpsee::core::server::Methods {
+            fn into_rpc_methods(self) -> #deps::jsonrpsee::core::server::Methods {
                 #into_rpc_body
             }
 
@@ -735,7 +739,7 @@ pub fn generate(
     }
 }
 
-fn generate_rpc_trait_methods(methods: &[MethodInfo]) -> Vec<TokenStream> {
+fn generate_rpc_trait_methods(methods: &[MethodInfo], deps: &syn::Ident) -> Vec<TokenStream> {
     methods
         .iter()
         // Auth-requiring methods and methods with activation_params are dispatched through
@@ -760,8 +764,8 @@ fn generate_rpc_trait_methods(methods: &[MethodInfo]) -> Vec<TokenStream> {
 
             quote! {
                 #[doc = #doc]
-                #[subscription(name = #method_name_str, unsubscribe = #unsubscribe_name, item = serde_json::Value)]
-                async fn #method_name(&self, #(#params),*) -> jsonrpsee::core::SubscriptionResult;
+                #[subscription(name = #method_name_str, unsubscribe = #unsubscribe_name, item = #deps::serde_json::Value)]
+                async fn #method_name(&self, #(#params),*) -> #deps::jsonrpsee::core::SubscriptionResult;
             }
         })
         .collect()
@@ -772,6 +776,7 @@ fn generate_rpc_impl_methods(
     methods: &[MethodInfo],
     namespace: &str,
     crate_path: &syn::Path,
+    deps: &syn::Ident,
 ) -> Vec<TokenStream> {
     use crate::parse::BidirType;
 
@@ -802,7 +807,7 @@ fn generate_rpc_impl_methods(
                 BidirType::Standard => {
                     (
                         quote! {
-                            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+                            let (tx, _rx) = #deps::tokio::sync::mpsc::channel(32);
                             let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
                                 #crate_path::plexus::StandardRequest,
                                 #crate_path::plexus::StandardResponse,
@@ -821,7 +826,7 @@ fn generate_rpc_impl_methods(
                     let resp_ty: syn::Type = syn::parse_str(response).unwrap_or_else(|_| syn::parse_quote!(()));
                     (
                         quote! {
-                            let (tx, _rx) = tokio::sync::mpsc::channel(32);
+                            let (tx, _rx) = #deps::tokio::sync::mpsc::channel(32);
                             let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
                                 #req_ty,
                                 #resp_ty,
@@ -843,10 +848,10 @@ fn generate_rpc_impl_methods(
             quote! {
                 async fn #method_name(
                     &self,
-                    pending: jsonrpsee::PendingSubscriptionSink,
+                    pending: #deps::jsonrpsee::PendingSubscriptionSink,
                     #(#params_with_types),*
-                ) -> jsonrpsee::core::SubscriptionResult {
-                    use futures::StreamExt;
+                ) -> #deps::jsonrpsee::core::SubscriptionResult {
+                    use #deps::futures::StreamExt;
 
                     let sink = pending.accept().await?;
                     #bidir_setup
@@ -857,10 +862,10 @@ fn generate_rpc_impl_methods(
                         vec![#namespace.into()]
                     );
 
-                    tokio::spawn(async move {
+                    #deps::tokio::spawn(async move {
                         let mut stream = wrapped;
                         while let Some(item) = stream.next().await {
-                            if let Ok(raw_value) = serde_json::value::to_raw_value(&item) {
+                            if let Ok(raw_value) = #deps::serde_json::value::to_raw_value(&item) {
                                 if sink.send(raw_value).await.is_err() {
                                     break;
                                 }
@@ -873,7 +878,7 @@ fn generate_rpc_impl_methods(
                                 #crate_path::plexus::PlexusContext::hash(),
                             ),
                         };
-                        if let Ok(raw_value) = serde_json::value::to_raw_value(&done) {
+                        if let Ok(raw_value) = #deps::serde_json::value::to_raw_value(&done) {
                             let _ = sink.send(raw_value).await;
                         }
                     });
@@ -890,6 +895,7 @@ fn generate_dispatch_arms(
     namespace: &str,
     crate_path: &syn::Path,
     request_type: Option<&syn::Type>,
+    deps: &syn::Ident,
 ) -> Vec<TokenStream> {
     use crate::parse::BidirType;
 
@@ -900,7 +906,7 @@ fn generate_dispatch_arms(
             let fn_name = &m.fn_name;
 
             // Generate param extraction code
-            let (param_extraction, param_names) = generate_param_extraction(m, crate_path);
+            let (param_extraction, param_names) = generate_param_extraction(m, crate_path, deps);
 
             let content_type = format!("{}.{}", namespace, method_name);
 
@@ -1114,7 +1120,7 @@ fn generate_dispatch_arms(
 }
 
 /// Generate param extraction code and return the param names for the call
-fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (TokenStream, Vec<&'a syn::Ident>) {
+fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps: &syn::Ident) -> (TokenStream, Vec<&'a syn::Ident>) {
     let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
 
     let extraction = match m.params.len() {
@@ -1129,15 +1135,15 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (
                 // For Option<T>, missing field OR explicit null = None (not an error)
                 quote! {
                     let #param_name = match &params {
-                        serde_json::Value::Object(map) => {
+                        #deps::serde_json::Value::Object(map) => {
                             map.get(#param_str)
                                 .filter(|v| !v.is_null())  // Treat explicit null as missing
-                                .map(|v| serde_json::from_value(v.clone()))
+                                .map(|v| #deps::serde_json::from_value(v.clone()))
                                 .transpose()
                                 .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
                         }
-                        serde_json::Value::Null => None,
-                        _ => serde_json::from_value(params.clone())
+                        #deps::serde_json::Value::Null => None,
+                        _ => #deps::serde_json::from_value(params.clone())
                             .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
                     };
                 }
@@ -1145,9 +1151,9 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (
                 // For required param, try to extract from object or deserialize directly
                 quote! {
                     let #param_name = match &params {
-                        serde_json::Value::Object(map) => {
+                        #deps::serde_json::Value::Object(map) => {
                             if let Some(val) = map.get(#param_str) {
-                                serde_json::from_value(val.clone())
+                                #deps::serde_json::from_value(val.clone())
                                     .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
                             } else {
                                 return Err(#crate_path::plexus::PlexusError::InvalidParams(
@@ -1155,7 +1161,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (
                                 ));
                             }
                         }
-                        _ => serde_json::from_value(params.clone())
+                        _ => #deps::serde_json::from_value(params.clone())
                             .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
                     };
                 }
@@ -1175,7 +1181,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (
                         quote! {
                             let #name = map.get(#name_str)
                                 .filter(|v| !v.is_null())  // Treat explicit null as missing
-                                .map(|v| serde_json::from_value(v.clone()))
+                                .map(|v| #deps::serde_json::from_value(v.clone()))
                                 .transpose()
                                 .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?;
                         }
@@ -1186,7 +1192,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path) -> (
                                 .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
                                     format!("missing field: {}", #name_str)
                                 ))
-                                .and_then(|v| serde_json::from_value(v.clone())
+                                .and_then(|v| #deps::serde_json::from_value(v.clone())
                                     .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string())))?;
                         }
                     }

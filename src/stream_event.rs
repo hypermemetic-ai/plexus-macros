@@ -26,6 +26,10 @@ fn derive_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
     // Generate is_terminal() based on #[terminal] attributes on variants
     let terminal_check = generate_terminal_check(&input)?;
 
+    // Z2H-2: resolve serde_json absolutely (umbrella-aware) instead of
+    // relying on the consumer's extern prelude.
+    let sj = crate::codegen::derive_serde_json_path(proc_macro2::Span::call_site());
+
     Ok(quote! {
         impl #crate_path::plugin_system::types::ActivationStreamItem for #name {
             fn content_type() -> &'static str
@@ -44,7 +48,7 @@ fn derive_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
                     plexus_hash.to_string(),
                     provenance,
                     Self::content_type().to_string(),
-                    serde_json::to_value(&self).unwrap(),
+                    #sj::to_value(&self).unwrap(),
                 )
             }
 

@@ -13,6 +13,102 @@ use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote};
 use syn::{spanned::Spanned, FnArg, ImplItem, ItemImpl, Meta, Type};
 
+/// Z2H-2: locate the `plexus-rpc` umbrella crate in the consumer's manifest.
+///
+/// Returns `Some(ident)` (rename-respecting) when the consuming crate depends
+/// on `plexus-rpc`; `None` otherwise (including `FoundCrate::Itself`, which
+/// only occurs for plexus-rpc's own examples/tests — those carry direct
+/// dev-deps and take the direct-emission path).
+pub(crate) fn umbrella_crate(err_span: Span) -> Option<syn::Ident> {
+    match crate_name("plexus-rpc") {
+        Ok(FoundCrate::Name(name)) => Some(syn::Ident::new(&name, err_span)),
+        _ => None,
+    }
+}
+
+/// Z2H-2: emit the per-expansion dependency shim module.
+///
+/// Every third-party name the activation macro emits (`async_trait`,
+/// `futures`, `jsonrpsee`, `schemars`, `serde`, `serde_json`, `tokio`,
+/// `uuid`) is referenced relatively through this module, so the umbrella /
+/// direct decision is made ONCE here instead of at ~80 quote! sites:
+///
+/// - umbrella consumer (depends on `plexus-rpc`) → re-export from
+///   `::plexus_rpc::__deps::*`; the consumer needs none of these crates in
+///   its own Cargo.toml.
+/// - direct consumer (today's sibling-checkout shape) → re-export from the
+///   extern prelude, preserving pre-Z2H-2 semantics exactly.
+///
+/// The module ident is per-struct (`__plexus_deps_<Struct>`) so two
+/// activations in one module don't collide.
+pub(crate) fn deps_shim(shim_ident: &syn::Ident, err_span: Span) -> TokenStream {
+    match umbrella_crate(err_span) {
+        Some(umbrella) => quote! {
+            #[doc(hidden)]
+            #[allow(unused_imports, non_snake_case)]
+            mod #shim_ident {
+                pub use ::#umbrella::__deps::{
+                    async_trait, futures, jsonrpsee, schemars, serde, serde_json, tokio, uuid,
+                };
+            }
+        },
+        None => quote! {
+            #[doc(hidden)]
+            #[allow(unused_imports, non_snake_case)]
+            mod #shim_ident {
+                pub use ::async_trait;
+                pub use ::futures;
+                pub use ::jsonrpsee;
+                pub use ::schemars;
+                pub use ::serde;
+                pub use ::serde_json;
+                pub use ::tokio;
+                pub use ::uuid;
+            }
+        },
+    }
+}
+
+/// Z2H-2: absolute path to `plexus-core` for derive-macro emission
+/// (`#[derive(PlexusRequest)]`), which historically hardcoded
+/// `::plexus_core::...`. Resolution is additive over that behavior: the only
+/// case that changes is "no plexus-core dep but the plexus-rpc umbrella is
+/// present", which now routes through `::<plexus_rpc>::core`.
+pub(crate) fn derive_core_path(err_span: Span) -> syn::Path {
+    match crate_name("plexus-core") {
+        Ok(FoundCrate::Name(name)) => {
+            let ident = syn::Ident::new(&name, err_span);
+            syn::parse_quote!(::#ident)
+        }
+        // `Itself` only fires for plexus-core's own build/tests; integration
+        // tests see the lib in the extern prelude, so the historical
+        // hardcoded path keeps working there. Preserve it.
+        Ok(FoundCrate::Itself) => syn::parse_quote!(::plexus_core),
+        Err(_) => match umbrella_crate(err_span) {
+            Some(umbrella) => syn::parse_quote!(::#umbrella::core),
+            None => syn::parse_quote!(::plexus_core),
+        },
+    }
+}
+
+/// Z2H-2: absolute path to `serde_json` for derive-macro emission. Same
+/// additive contract as [`derive_core_path`]: umbrella-only consumers route
+/// through `::<plexus_rpc>::__deps::serde_json`; everyone else keeps the
+/// historical `::serde_json`.
+pub(crate) fn derive_serde_json_path(err_span: Span) -> syn::Path {
+    match crate_name("serde_json") {
+        Ok(FoundCrate::Name(name)) => {
+            let ident = syn::Ident::new(&name, err_span);
+            syn::parse_quote!(::#ident)
+        }
+        Ok(FoundCrate::Itself) => syn::parse_quote!(::serde_json),
+        Err(_) => match umbrella_crate(err_span) {
+            Some(umbrella) => syn::parse_quote!(::#umbrella::__deps::serde_json),
+            None => syn::parse_quote!(::serde_json),
+        },
+    }
+}
+
 /// Resolve the `crate_path` to a syn::Path.
 ///
 /// If the caller passed `crate_path = "..."` explicitly, parse that string.
@@ -20,6 +116,8 @@ use syn::{spanned::Spanned, FnArg, ImplItem, ItemImpl, Meta, Type};
 /// correct path:
 ///   - `FoundCrate::Itself`    → `crate`  (code being compiled IS plexus-core)
 ///   - `FoundCrate::Name(n)`   → `::<n>`  (external; respects renaming)
+///   - `Err` + umbrella        → `::<plexus_rpc>::core` (Z2H-2: the consumer
+///                               depends only on the `plexus-rpc` umbrella)
 ///   - `Err`                   → a compile error naming the missing dependency
 fn resolve_crate_path(explicit: Option<&str>, err_span: Span) -> syn::Result<syn::Path> {
     if let Some(s) = explicit {
@@ -32,14 +130,20 @@ fn resolve_crate_path(explicit: Option<&str>, err_span: Span) -> syn::Result<syn
             let ident = syn::Ident::new(&name, err_span);
             Ok(syn::parse_quote!(::#ident))
         }
-        Err(e) => Err(syn::Error::new(
-            err_span,
-            format!(
-                "#[plexus_macros::activation] could not locate the `plexus-core` \
-                 dependency in Cargo.toml ({e}). Add `plexus-core` as a dependency, \
-                 or pass `crate_path = \"...\"` explicitly to override."
-            ),
-        )),
+        // Z2H-2: umbrella fallback — a consumer depending only on plexus-rpc
+        // reaches plexus-core through the umbrella's re-export.
+        Err(e) => match umbrella_crate(err_span) {
+            Some(umbrella) => Ok(syn::parse_quote!(::#umbrella::core)),
+            None => Err(syn::Error::new(
+                err_span,
+                format!(
+                    "#[plexus_macros::activation] could not locate the `plexus-core` \
+                     dependency in Cargo.toml ({e}). Add `plexus-core` (or the \
+                     `plexus-rpc` umbrella) as a dependency, or pass \
+                     `crate_path = \"...\"` explicitly to override."
+                ),
+            )),
+        },
     }
 }
 
@@ -61,7 +165,11 @@ pub(crate) fn resolve_auth_core_path(err_span: Span) -> Option<syn::Path> {
             let ident = syn::Ident::new(&name, err_span);
             Some(syn::parse_quote!(::#ident))
         }
-        Err(_) => None,
+        // Z2H-2: umbrella fallback — plexus-rpc always bundles auth-core, so
+        // an umbrella-only consumer gets the credentials wiring through the
+        // re-export instead of silently skipping it.
+        Err(_) => umbrella_crate(err_span)
+            .map(|umbrella| syn::parse_quote!(::#umbrella::auth_core)),
     }
 }
 
@@ -507,6 +615,13 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     // behavior).
     let auth_core_path = resolve_auth_core_path(Span::call_site());
 
+    // Z2H-2: per-expansion dependency shim. Every third-party name in the
+    // emitted code resolves relatively through this module; whether it
+    // re-exports `::plexus_rpc::__deps::*` (umbrella consumer) or the extern
+    // prelude (direct consumer) is decided once in `deps_shim`.
+    let deps = format_ident!("__plexus_deps_{}", struct_name);
+    let deps_shim_mod = deps_shim(&deps, Span::call_site());
+
     // Generate pieces
     let method_enum = method_enum::generate(
         &struct_name,
@@ -515,6 +630,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &crate_path,
         auth_core_path.as_ref(),
         args.request_type.as_ref(),  // REQ-6: activation-level request type (for runtime merge)
+        &deps,
     );
     let activation_impl = activation::generate(
         &struct_name,
@@ -539,9 +655,11 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         list_method.as_ref(),
         search_method.as_ref(),
         activation_deprecation.as_ref(),
+        &deps,
     );
 
     Ok(quote! {
+        #deps_shim_mod
         #input_impl
         #method_enum
         #activation_impl

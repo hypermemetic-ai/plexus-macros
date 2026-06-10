@@ -365,9 +365,22 @@ fn generate_schema_fn(
     return_type: &Type,
     crate_path: &syn::Path,
 ) -> TokenStream2 {
+    // Z2H-2: the standalone `#[method]` macro has no activation-level shim
+    // module, so resolve the dep roots absolutely: through the plexus-rpc
+    // umbrella's `__deps` re-exports when the consumer depends on it, or the
+    // extern prelude (today's semantics) otherwise.
+    let (serde_json_root, schemars_root) =
+        match codegen::umbrella_crate(proc_macro2::Span::call_site()) {
+            Some(umbrella) => (
+                quote! { ::#umbrella::__deps::serde_json },
+                quote! { ::#umbrella::__deps::schemars },
+            ),
+            None => (quote! { serde_json }, quote! { schemars }),
+        };
+
     let input_schema = if let Some(input_ty) = input_type {
         quote! {
-            Some(serde_json::to_value(schemars::schema_for!(#input_ty)).unwrap())
+            Some(#serde_json_root::to_value(#schemars_root::schema_for!(#input_ty)).unwrap())
         }
     } else {
         quote! { None }
@@ -379,8 +392,8 @@ fn generate_schema_fn(
     quote! {
         /// Generated schema function for this hub method
         #[allow(dead_code)]
-        pub fn #fn_name() -> serde_json::Value {
-            serde_json::json!({
+        pub fn #fn_name() -> #serde_json_root::Value {
+            #serde_json_root::json!({
                 "name": #method_name,
                 "description": #description,
                 "input": #input_schema,
