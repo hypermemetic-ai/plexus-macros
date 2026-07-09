@@ -662,26 +662,12 @@ pub fn generate(
                 match method {
                     #(#dispatch_arms)*
                     "schema" => {
-                        // Check if a specific method was requested
-                        let method_name: Option<String> = params.get("method")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-
-                        let plugin_schema = self.plugin_schema();
-
-                        let result = if let Some(ref name) = method_name {
-                            // Find the specific method
-                            plugin_schema.methods.iter()
-                                .find(|m| m.name == *name)
-                                .map(|m| #crate_path::plexus::SchemaResult::Method(m.clone()))
-                                .ok_or_else(|| #crate_path::plexus::PlexusError::MethodNotFound {
-                                    activation: #namespace.to_string(),
-                                    method: name.clone(),
-                                })?
-                        } else {
-                            // Return full plugin schema
-                            #crate_path::plexus::SchemaResult::Plugin(plugin_schema)
-                        };
+                        // PROT schema unification (PLX-13): `.schema` always yields the
+                        // single unified PluginSchema. Per-method detail is read from
+                        // `PluginSchema::methods`; there is no `SchemaResult::Method`
+                        // variant and no `method`-param branch. An old client that still
+                        // sends `{"method": ...}` gets the full plugin schema.
+                        let result = #crate_path::plexus::SchemaResult::Plugin(self.plugin_schema());
 
                         Ok(#crate_path::plexus::wrap_stream(
                             #deps::futures::stream::once(async move { result }),
@@ -690,35 +676,13 @@ pub fn generate(
                         ))
                     }
                     _ => {
-                        // Check for {method}.schema pattern (e.g., "echo.schema")
-                        // Only if the prefix is an actual local user method (NOT a
-                        // child-role entry). Child-role methods are listed in
-                        // `plugin_schema.methods` with `role = StaticChild` or
-                        // `DynamicChild { .. }` (CHILD-8 / IR-10); matching them
-                        // here would return a `SchemaResult::Method` when the
-                        // caller actually wants the child's `PluginSchema` via
-                        // `route_to_child` (HF-AUDIT-3 / HF-AUDIT-4).
-                        if let Some(method_name) = method.strip_suffix(".schema") {
-                            let plugin_schema = self.plugin_schema();
-                            if let Some(m) = plugin_schema.methods.iter().find(|m| {
-                                m.name == method_name
-                                    && !matches!(
-                                        m.role,
-                                        #crate_path::plexus::MethodRole::StaticChild
-                                            | #crate_path::plexus::MethodRole::DynamicChild { .. }
-                                    )
-                            }) {
-                                let result = #crate_path::plexus::SchemaResult::Method(m.clone());
-                                return Ok(#crate_path::plexus::wrap_stream(
-                                    #deps::futures::stream::once(async move { result }),
-                                    concat!(#namespace, ".method_schema"),
-                                    vec![#namespace.into()]
-                                ));
-                            }
-                            // Not a local user method (child-role entry or no
-                            // match) - fall through to child routing.
-                        }
-
+                        // PROT schema unification (PLX-13): the `{method}.schema`
+                        // strip-suffix shortcut (and the HF-AUDIT-4 child-role guard
+                        // that fenced it) is deleted. `<name>.schema` is no longer a
+                        // per-method result path — it resolves to a child plugin's own
+                        // `.schema` via child routing, or is method-not-found. The
+                        // `.method_schema` content-type no longer exists.
+                        //
                         // For hubs: try routing to child plugin via ChildRouter trait
                         // For leaves: return MethodNotFound
                         #call_fallback
