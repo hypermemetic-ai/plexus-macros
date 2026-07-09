@@ -4,7 +4,7 @@ version = "0.6.0"
 edition = "2021"
 license = "MIT"
 description = "Procedural macros for Plexus RPC activations"
-
+repository = "https://github.com/hypermemetic-ai/plexus-macros"
 [lib]
 proc-macro = true
 
