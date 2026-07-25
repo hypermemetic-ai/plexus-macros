@@ -1,0 +1,5 @@
+error: `Client` must name its capability set, e.g. `Client<(Permission, FsRead)>` — an inferred set declares nothing
+ --> tests/compile/plx79_handle_without_set.rs:9:35
+  |
+9 |         async fn f(&self, client: Client) -> Result<String, String>;
+  |                                   ^^^^^^
