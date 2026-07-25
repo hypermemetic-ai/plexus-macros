@@ -121,6 +121,12 @@ pub struct HubMethodAttrs {
     /// Each literal is validated against the AUTHZ-CORE-4 scope grammar at
     /// macro-expansion time (see [`validate_scope_literal`]).
     pub scopes: Vec<String>,
+    /// PLX-71: open extension slot — comma-separated `key = literal` pairs from
+    /// `#[method(ext(...))]`. Unknown keys are allowed by design (no allowlist);
+    /// duplicate keys within one `ext(...)` are a compile error. Emitted
+    /// verbatim into `MethodSchema.extensions` at codegen time. Values are
+    /// string / integer / bool literals mapped to the matching JSON type.
+    pub extensions: Vec<(String, serde_json::Value)>,
 }
 
 /// R-1 (AUTHZ-CORE-2 acceptance criterion #3): validate a `scope = "..."`
@@ -185,6 +191,8 @@ impl Parse for HubMethodAttrs {
         // R-1 (AUTHZ-CORE-2): explicit `scope = "..."` literals plus the
         // spans needed to anchor the `public` + `scope` contradiction error.
         let mut scopes: Vec<String> = Vec::new();
+        // PLX-71: accumulated `#[method(ext(key = literal, ...))]` pairs.
+        let mut extensions: Vec<(String, serde_json::Value)> = Vec::new();
         let mut public_span: Option<proc_macro2::Span> = None;
         let mut first_scope_span: Option<proc_macro2::Span> = None;
 
@@ -348,6 +356,55 @@ impl Parse for HubMethodAttrs {
                                     ));
                                 }
                             }
+                        } else if path.is_ident("ext") {
+                            // PLX-71: open extension passthrough.
+                            // `ext(key = literal, ...)` — comma-separated
+                            // `key = literal` pairs where literal is a string,
+                            // integer, or bool. Keys are namespaced strings with
+                            // NO allowlist (unknown keys are the whole point);
+                            // duplicate keys within one `ext(...)` are rejected
+                            // with a `syn::Error` naming the key. Each pair is
+                            // stamped verbatim into `MethodSchema.extensions`.
+                            let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
+                            let nested = syn::parse::Parser::parse2(parser, tokens.clone())?;
+                            for MetaNameValue { path, value, .. } in nested {
+                                let key = match path.get_ident() {
+                                    Some(ident) => ident.to_string(),
+                                    None => {
+                                        return Err(syn::Error::new_spanned(
+                                            &path,
+                                            "ext(...) keys must be simple identifiers, e.g. ext(nostr_kind = 30023)",
+                                        ));
+                                    }
+                                };
+                                if extensions.iter().any(|(k, _)| *k == key) {
+                                    return Err(syn::Error::new_spanned(
+                                        &path,
+                                        format!("duplicate ext key `{}` in one ext(...)", key),
+                                    ));
+                                }
+                                let json_value = match &value {
+                                    Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => {
+                                        serde_json::Value::String(s.value())
+                                    }
+                                    Expr::Lit(ExprLit { lit: Lit::Int(i), .. }) => {
+                                        serde_json::Value::Number(i.base10_parse::<i64>()?.into())
+                                    }
+                                    Expr::Lit(ExprLit { lit: Lit::Bool(b), .. }) => {
+                                        serde_json::Value::Bool(b.value)
+                                    }
+                                    other => {
+                                        return Err(syn::Error::new_spanned(
+                                            other,
+                                            format!(
+                                                "ext value for `{}` must be a string, integer, or bool literal",
+                                                key
+                                            ),
+                                        ));
+                                    }
+                                };
+                                extensions.push((key, json_value));
+                            }
                         }
                     }
                 }
@@ -367,7 +424,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes })
+        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes, extensions })
     }
 }
 
@@ -1334,6 +1391,10 @@ pub struct MethodInfo {
     /// IR-3: parsed `#[deprecated(...)]` + `#[plexus_macros::removed_in]` info
     /// folded into the emitted `MethodSchema.deprecation` field.
     pub deprecation: Option<ParsedDeprecation>,
+    /// PLX-71: open extension pairs mirrored from `HubMethodAttrs::extensions`.
+    /// Emitted into `MethodSchema.extensions` via `with_extension` at codegen
+    /// time. Empty when the method declares no `ext(...)`.
+    pub extensions: Vec<(String, serde_json::Value)>,
 }
 
 impl MethodInfo {
@@ -1512,6 +1573,11 @@ impl MethodInfo {
             .map(|a| a.scopes.clone())
             .unwrap_or_default();
 
+        // PLX-71: mirror the open extension pairs from the attribute.
+        let extensions = hub_method_attrs
+            .map(|a| a.extensions.clone())
+            .unwrap_or_default();
+
         Ok(MethodInfo {
             fn_name,
             method_name,
@@ -1531,6 +1597,7 @@ impl MethodInfo {
             public,
             scopes,
             deprecation,
+            extensions,
         })
     }
 }
@@ -1986,6 +2053,7 @@ mod tests {
             request_override: None,
             public: false,
             scopes: vec![],
+            extensions: vec![],
         };
         let info = MethodInfo::from_fn(&method, Some(&attrs)).expect("parses cleanly");
         let param = info.params.iter().find(|p| p.name == "message").unwrap();

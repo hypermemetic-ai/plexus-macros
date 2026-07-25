@@ -7,6 +7,44 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use syn::{GenericArgument, PathArguments, Type};
 
+/// PLX-71: reconstruct a parsed `serde_json::Value` extension value into tokens
+/// that rebuild the same value at runtime, resolving `serde_json` through the
+/// per-expansion dependency shim (`deps`). The `#[method(ext(...))]` parser
+/// only produces string / integer / bool values; other JSON shapes fall back to
+/// a general `from_str` reconstruction so nothing is silently dropped.
+fn ext_value_tokens(value: &serde_json::Value, deps: &syn::Ident) -> TokenStream {
+    match value {
+        serde_json::Value::String(s) => {
+            quote! { #deps::serde_json::Value::String(#s.to_string()) }
+        }
+        serde_json::Value::Bool(b) => {
+            quote! { #deps::serde_json::Value::Bool(#b) }
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                let lit = proc_macro2::Literal::u64_unsuffixed(u);
+                quote! { #deps::serde_json::json!(#lit) }
+            } else if let Some(i) = n.as_i64() {
+                let lit = proc_macro2::Literal::i64_unsuffixed(i);
+                quote! { #deps::serde_json::json!(#lit) }
+            } else {
+                let f = n.as_f64().unwrap_or(0.0);
+                let lit = proc_macro2::Literal::f64_unsuffixed(f);
+                quote! { #deps::serde_json::json!(#lit) }
+            }
+        }
+        other => {
+            // Forward-compat safety net for any non-literal value the parser
+            // might accept in future: rebuild it from its JSON text.
+            let json = other.to_string();
+            quote! {
+                #deps::serde_json::from_str::<#deps::serde_json::Value>(#json)
+                    .expect("PLX-71: extension value must be valid JSON")
+            }
+        }
+    }
+}
+
 pub fn generate(
     struct_name: &syn::Ident,
     methods: &[MethodInfo],
@@ -364,6 +402,28 @@ pub fn generate(
     // keep their exact wire shape.
     let public_flags: Vec<bool> = methods.iter().map(|m| m.public).collect();
 
+    // PLX-71: per-method open extension pairs, emitted via the parallel-slice
+    // idiom (same shape as `public_flags` / `auth_entries_per_method` — a
+    // per-method binding indexed by `i`, never the nested-zip tuple). Each
+    // method's entry is a `vec![(key, value), ...]` whose values are
+    // reconstructed as `serde_json::Value` tokens. Methods with no `ext(...)`
+    // emit an empty vec, so their `MethodSchema.extensions` stays empty and
+    // their wire bytes are unchanged.
+    let extensions_per_method: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| {
+            let pairs: Vec<TokenStream> = m
+                .extensions
+                .iter()
+                .map(|(k, v)| {
+                    let value_tokens = ext_value_tokens(v, deps);
+                    quote! { (#k, #value_tokens) }
+                })
+                .collect();
+            quote! { vec![#(#pairs),*] }
+        })
+        .collect();
+
     // R-1 (joint AP-1): activation-declared posture stamp, applied to every
     // generated RPC method schema. Undeclared posture emits nothing.
     // Framework-injected entries (the auto `schema` method, `#[child]`
@@ -491,6 +551,8 @@ pub fn generate(
                 let method_override_is_skip: &[bool] = &[#(#method_override_is_skip),*];
                 // R-1: per-method explicit-public flags (AUTHZ-CORE-2).
                 let public_flags: &[bool] = &[#(#public_flags),*];
+                // PLX-71: per-method open extension pairs, indexed by `i`.
+                let extensions_per_method: Vec<Vec<(&str, #deps::serde_json::Value)>> = vec![#(#extensions_per_method),*];
                 let activation_request_schema: Option<#deps::schemars::Schema> = #activation_request_schema_expr;
                 let activation_request_props: Option<#deps::serde_json::Map<String, #deps::serde_json::Value>> =
                     activation_request_schema
@@ -612,6 +674,14 @@ pub fn generate(
                         // `true` reaches the wire (serde skips false).
                         if public_flags[i] {
                             schema = schema.with_public(true);
+                        }
+
+                        // PLX-71: apply per-method open extensions. Empty for
+                        // methods with no `ext(...)`, so their wire shape is
+                        // unchanged (plexus-core skips serializing an empty
+                        // extensions map).
+                        for (ext_key, ext_value) in extensions_per_method[i].iter() {
+                            schema = schema.with_extension(*ext_key, ext_value.clone());
                         }
 
                         // R-1: explicit `scope = "..."` requirements →
