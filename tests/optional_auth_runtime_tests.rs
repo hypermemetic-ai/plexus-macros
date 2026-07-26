@@ -13,11 +13,26 @@
 //!
 //! The handler emits a distinctive string for each branch so the assertions
 //! can read the wrapped stream and verify which branch ran.
+//!
+//! # PLX-91 — why these four calls go through `call_arc`
+//!
+//! This is the residual PLX-97 handed the switchover, acted on here. A
+//! turn-native `#[method]` runs its handler inside a `'static` stream that
+//! outlives `Activation::call`'s borrow, so the handler needs an OWNED handle
+//! on the activation. `call(&self, ..)` cannot supply one — that is
+//! `E0521: borrowed data escapes outside of method`, the exact error PLX-91's
+//! first attempt stopped on. PLX-97's answer is
+//! `Activation::call_arc(self: Arc<Self>, ..)`, which `DynamicHub` and the
+//! generated `ChildRouter` both route through. A direct caller does the same:
+//! hold the activation in an `Arc` and call `call_arc`. The auth contract
+//! being asserted is unchanged — auth injection simply moved from a generated
+//! per-arm template into `runtime::entry`'s `AuthRequirementIr` check.
 
 use async_stream::stream;
 use futures::stream::Stream;
 use futures::StreamExt;
 use plexus_core::plexus::{Activation, AuthContext, PlexusError};
+use std::sync::Arc;
 
 struct MixedRouter;
 
@@ -83,9 +98,9 @@ fn make_auth_ctx() -> AuthContext {
 
 #[tokio::test]
 async fn optional_auth_receives_none_when_no_context() {
-    let router = MixedRouter;
-    let stream = router
-        .call(
+    let router = Arc::new(MixedRouter);
+    let stream = Activation::call_arc(
+            router,
             "maybe_authed",
             serde_json::json!({}),
             None,
@@ -103,10 +118,10 @@ async fn optional_auth_receives_none_when_no_context() {
 
 #[tokio::test]
 async fn optional_auth_receives_some_when_context_attached() {
-    let router = MixedRouter;
+    let router = Arc::new(MixedRouter);
     let ctx = make_auth_ctx();
-    let stream = router
-        .call(
+    let stream = Activation::call_arc(
+            router,
             "maybe_authed",
             serde_json::json!({}),
             Some(&ctx),
@@ -124,11 +139,10 @@ async fn optional_auth_receives_some_when_context_attached() {
 
 #[tokio::test]
 async fn force_auth_still_rejects_missing_context() {
-    let router = MixedRouter;
+    let router = Arc::new(MixedRouter);
     // PlexusStream isn't `Debug` (it's a boxed trait object), so we can't
     // use `.expect_err(...)`; pattern-match on the Result instead.
-    match router
-        .call("force_authed", serde_json::json!({}), None, None)
+    match Activation::call_arc(router, "force_authed", serde_json::json!({}), None, None)
         .await
     {
         Err(PlexusError::Unauthenticated(_)) => {}
@@ -145,10 +159,10 @@ async fn force_auth_still_rejects_missing_context() {
 
 #[tokio::test]
 async fn force_auth_accepts_attached_context() {
-    let router = MixedRouter;
+    let router = Arc::new(MixedRouter);
     let ctx = make_auth_ctx();
-    let stream = router
-        .call(
+    let stream = Activation::call_arc(
+            router,
             "force_authed",
             serde_json::json!({}),
             Some(&ctx),

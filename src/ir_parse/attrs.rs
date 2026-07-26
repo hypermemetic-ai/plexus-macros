@@ -82,6 +82,17 @@ fn removed_surface_hint(key: &str) -> Option<&'static str> {
     })
 }
 
+/// How strictly a `#[method(...)]` list is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// PLX-79's posture: an unrecognized key is a span-accurate error.
+    /// This is what `method_ir!` uses.
+    Strict,
+    /// PLX-91's switchover posture: the legacy `#[method(...)]` grammar is
+    /// accepted, because `#[activation]` must read the corpus that exists.
+    Legacy,
+}
+
 /// The subset of `#[method(...)]` the vNext parser consumes.
 #[derive(Debug, Default)]
 pub(crate) struct MethodAttrs {
@@ -102,7 +113,19 @@ impl MethodAttrs {
     /// Find the `#[method(...)]` / `#[plexus_macros::method(...)]` attribute on
     /// an item and parse it. A method with no such attribute (or a bare
     /// `#[method]`) yields defaults.
-    pub(crate) fn parse_from(attrs: &[Attribute]) -> syn::Result<Self> {
+    /// PLX-91: the same parse, with the strictness dial exposed.
+    ///
+    /// `method_ir!` keeps [`Mode::Strict`] — that is PLX-79's acceptance
+    /// criterion #3 and its trybuild fixture. `#[activation]` uses
+    /// [`Mode::Legacy`], because the switchover must read the grammar the
+    /// existing corpus is written in: `public`, `scope = "..."`, `streaming`
+    /// and `request = ()` are legacy `#[method(...)]` keys that PLX-79
+    /// deliberately rejects, and rejecting them from `#[activation]` would
+    /// fail to compile 14 `method(public)` and 12 `scope = …` sites in this
+    /// crate's own suite alone. Their *meaning* is not lost — it is read off
+    /// [`crate::parse::MethodInfo`], which parses the same tokens, and folded
+    /// into the IR by the caller (see `codegen::mod::activation_ir_fn`).
+    pub(crate) fn parse_from_with_mode(attrs: &[Attribute], mode: Mode) -> syn::Result<Self> {
         let Some(attr) = attrs.iter().find(|a| {
             a.path()
                 .segments
@@ -124,11 +147,11 @@ impl MethodAttrs {
             }
         };
 
-        Self::parse_tokens(tokens)
+        Self::parse_tokens_with_mode(tokens, mode)
     }
 
     /// Parse an already-extracted `#[method(...)]` argument token stream.
-    pub(crate) fn parse_tokens(tokens: TokenStream) -> syn::Result<Self> {
+    pub(crate) fn parse_tokens_with_mode(tokens: TokenStream, mode: Mode) -> syn::Result<Self> {
         // ---- Pass 1: strictness + the typed http_method ----
         let mut http_method = None;
         let mut request_span = None;
@@ -142,7 +165,7 @@ impl MethodAttrs {
                     .map(|i| i.to_string())
                     .unwrap_or_else(|| quote::ToTokens::to_token_stream(path).to_string());
 
-                if !ALLOWED_KEYS.contains(&key.as_str()) {
+                if mode == Mode::Strict && !ALLOWED_KEYS.contains(&key.as_str()) {
                     let message = match removed_surface_hint(&key) {
                         Some(hint) => format!("unknown `#[method(...)]` key `{key}`: {hint}"),
                         None => format!(
@@ -173,6 +196,11 @@ impl MethodAttrs {
         let request_context = match base.request_override {
             None => None,
             Some(MethodRequestOverride::Type(ty)) => Some(ty),
+            // PLX-91: on the legacy path `request = ()` keeps its legacy
+            // meaning ("skip activation-level extraction"), which is a
+            // *dispatch* instruction with no IR spelling. The IR records the
+            // absence; the handler still honours the skip.
+            Some(MethodRequestOverride::Skip) if mode == Mode::Legacy => None,
             Some(MethodRequestOverride::Skip) => {
                 // `request = ()` meant "opt this method out of the activation's
                 // request extraction" on the legacy path. RFC 002 §6.9 has no

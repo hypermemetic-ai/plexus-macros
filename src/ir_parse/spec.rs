@@ -101,7 +101,17 @@ impl MethodIrSpec {
     /// becomes `"{namespace}.{name}"` explicitly rather than being left for a
     /// consumer to reconstruct (PLX-73 `q-ir-completeness` item 6).
     pub(crate) fn from_signature(namespace: &str, func: &TraitItemFn) -> syn::Result<Self> {
-        let attrs = MethodAttrs::parse_from(&func.attrs)?;
+        Self::from_signature_with_mode(namespace, func, super::attrs::Mode::Strict)
+    }
+
+    /// [`Self::from_signature`] with PLX-91's strictness dial. See
+    /// [`super::attrs::Mode`].
+    pub(crate) fn from_signature_with_mode(
+        namespace: &str,
+        func: &TraitItemFn,
+        mode: super::attrs::Mode,
+    ) -> syn::Result<Self> {
+        let attrs = MethodAttrs::parse_from_with_mode(&func.attrs, mode)?;
 
         let name = attrs
             .name
@@ -209,6 +219,30 @@ impl ActivationIrSpec {
         request_context: Option<Type>,
         item: &ItemImpl,
     ) -> syn::Result<Self> {
+        Self::from_impl_with_mode(
+            namespace,
+            version,
+            backend_name,
+            respond_method,
+            description,
+            request_context,
+            item,
+            super::attrs::Mode::Strict,
+        )
+    }
+
+    /// [`Self::from_impl`] with PLX-91's strictness dial.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_impl_with_mode(
+        namespace: &str,
+        version: &str,
+        backend_name: Option<String>,
+        respond_method: Option<String>,
+        description: Option<String>,
+        request_context: Option<Type>,
+        item: &ItemImpl,
+        mode: super::attrs::Mode,
+    ) -> syn::Result<Self> {
         let mut methods = Vec::new();
         let mut children = Vec::new();
 
@@ -231,7 +265,11 @@ impl ActivationIrSpec {
                 default: None,
                 semi_token: Some(Default::default()),
             };
-            methods.push(MethodIrSpec::from_signature(namespace, &as_trait_fn)?);
+            methods.push(MethodIrSpec::from_signature_with_mode(
+                namespace,
+                &as_trait_fn,
+                mode,
+            )?);
         }
 
         let doc = extract_doc_description(&item.attrs);

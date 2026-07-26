@@ -63,6 +63,18 @@ pub(crate) fn parse_inputs(
             continue;
         }
 
+        // PLX-91: the legacy bidirectional channel handle is the pre-vNext
+        // spelling of the capability handle — a framework-supplied duplex
+        // channel, never something a caller sends. It is dropped from
+        // `params` for exactly the reason `Client<C>` is. Its request/response
+        // pair has no `MethodIr` slot (`callbacks` is a capability SET, not a
+        // req/resp pair — the same gap PLX-91's requirement 4 records), so the
+        // IR records the method without it rather than inventing a schema for
+        // a channel type that has none.
+        if is_bidir_channel(&pt.ty) {
+            continue;
+        }
+
         // The capability handle declares the callbacks, and is not a parameter.
         if let Some(set) = capability_handle_set(&pt.ty)? {
             if capability_span.is_some() {
@@ -280,6 +292,27 @@ fn capability_handle_set(ty: &Type) -> syn::Result<Option<Type>> {
              `Client<(Permission, FsRead)>` — an inferred set declares nothing",
         )),
     }
+}
+
+/// Is this (a reference to, or an `Arc`/`Box`/`Rc` around) a `BidirChannel<..>`?
+fn is_bidir_channel(ty: &Type) -> bool {
+    let inner = strip_refs(ty);
+    let Type::Path(tp) = inner else { return false };
+    let Some(seg) = tp.path.segments.last() else {
+        return false;
+    };
+    if seg.ident == "BidirChannel" {
+        return true;
+    }
+    if matches!(seg.ident.to_string().as_str(), "Arc" | "Rc" | "Box") {
+        if let PathArguments::AngleBracketed(args) = &seg.arguments {
+            return args.args.iter().any(|a| match a {
+                GenericArgument::Type(t) => is_bidir_channel(t),
+                _ => false,
+            });
+        }
+    }
+    false
 }
 
 /// The `T` of `Option<T>`.
