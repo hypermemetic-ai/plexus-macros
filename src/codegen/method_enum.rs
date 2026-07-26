@@ -185,8 +185,50 @@ pub fn generate(
     // needed, and the `with_credentials(..)` call site are gone with it.
 
 
-    // Generate streaming flags for each method
-    // Streaming is explicitly declared via #[hub_method(streaming)] attribute
+    // Generate streaming flags for each method.
+    //
+    // PLX-107: `MethodSchema.streaming` is DECLARED (`#[method(streaming)]`)
+    // and it stays declared. The candidate one-liner from PLX-91/PLX-103 —
+    // `m.streaming || m.stream_item_type.is_some()` — is NOT applied, and this
+    // comment is the record of why, so it is not "fixed" again by someone
+    // reading the two fields side by side.
+    //
+    // The premise of the proposed fix is that the return type carries the
+    // truth. It does not. In this DX the *transport envelope* is a stream, so
+    // a one-shot method and a many-shot method have the SAME return type:
+    // `impl Stream<Item = T>`. A unary method yields one `Data` item then
+    // `Done`; a streaming method yields many. `stream_item_type.is_some()`
+    // (equivalently `MethodIr::is_streaming`, i.e. `updates.is_some()`) is
+    // therefore true for very nearly every method in the corpus and carries no
+    // routing information at all.
+    //
+    // That matters because this flag is not cosmetic: plexus-transport copies
+    // it into `RestMethodInfo`/`MethodInfo` (http/bridge.rs) and branches on it
+    // in `handle_method_call` (http/handler.rs) to choose SSE over JSON.
+    // Deriving it from the return type would flip, measured against the live
+    // corpus at the time of this build:
+    //
+    //   - plexus-idp:      10 of 10 methods (0 declare `streaming`) — including
+    //                      `register` / `login` / `refresh` / `me`, all of them
+    //                      served today as `POST /rest/idp/<method>` with a JSON
+    //                      body (see plexus-idp/src/oidc.rs's module docs).
+    //   - plexus-registry:  8 of 8 methods (0 declare `streaming`).
+    //   - plexus-substrate: ~136 of 142 methods (6 declare `streaming`).
+    //
+    // i.e. it is a fleet-wide wire-format break of every REST client, not a
+    // bug fix. The declared flag is the only place the one-shot/many-shot
+    // distinction is expressible, so it is load-bearing and is kept.
+    //
+    // What the IR and the schema each mean, stated once:
+    //   - `MethodIr::is_streaming` — "the turn declares an update item type".
+    //     A fact about the type. True almost everywhere.
+    //   - `MethodSchema.streaming` — "hold the connection open and serve SSE".
+    //     A transport decision the author makes. Opt-in.
+    // They are different predicates over the same method, so they are not
+    // required to be equal. The invariant that IS required — a method the
+    // schema calls streaming must actually have an update item type — is
+    // asserted in tests/plx91_switchover_tests.rs, and the routing contract is
+    // pinned at the boundary in plexus-transport/tests/plx107_streaming_routing_tests.rs.
     let streaming_flags: Vec<bool> = methods
         .iter()
         .map(|m| m.streaming)

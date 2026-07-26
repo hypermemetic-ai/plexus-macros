@@ -16,6 +16,15 @@
 //!    rather than a construction. Where they overlap they must agree; where
 //!    they do not overlap the ticket records why, and this test does not
 //!    pretend otherwise.
+//!
+//! PLX-107 settled the one item that was left as a "known gap" here,
+//! `streaming`, and it is now an asserted invariant rather than a pinned
+//! disagreement. The finding was that the two fields are not two answers to one
+//! question: `MethodIr::is_streaming()` asks "does the turn declare an update
+//! item type?" and `MethodSchema.streaming` asks "should the transport serve
+//! SSE instead of JSON?". Equating them would have flipped ~154 live methods'
+//! wire format. See `the_ir_and_the_method_schema_agree_where_they_overlap` and
+//! `method_schema_streaming_is_the_declaration_not_the_return_type` below.
 
 use async_stream::stream;
 use futures::stream::Stream;
@@ -340,22 +349,38 @@ fn the_ir_and_the_method_schema_agree_where_they_overlap() {
             m.name, s.public, m.auth
         );
 
-        // `streaming` is a KNOWN one-way overlap, found by this test and
-        // recorded rather than papered over.
+        // `streaming` — PLX-107 settled this. It is no longer a recorded gap;
+        // it is an asserted invariant, and the shape of the invariant is the
+        // finding.
         //
-        // `MethodIr::is_streaming` is *derived*: a method streams iff its
-        // return type declares an update item (`impl Stream<Item = T>`).
-        // `MethodSchema.streaming` is *declared*: it mirrors the legacy opt-in
-        // `#[method(streaming)]` flag, which defaults to `false` even for a
-        // method that plainly returns a stream — every method in this fixture
-        // is one, and every one of them has `MethodSchema.streaming == false`.
+        // PLX-91 recorded the two fields as disagreeing, and PLX-107 was
+        // dispatched to make the derived value win. Investigating it falsified
+        // the premise. The two fields are not two answers to one question, they
+        // are answers to two different questions:
         //
-        // The IR is the correct one. The schema flag is not changed here
-        // because requirement 5 (behaviour parity, suite unmodified) outranks
-        // tidying a field that has no test coverage and that PLX-92 is
-        // reviewing anyway. What is pinned is the direction that does hold:
-        // a method the schema calls streaming must be one the IR agrees is
-        // streaming. The converse is the recorded gap.
+        //   - `MethodIr::is_streaming()` == `updates.is_some()` — "does the
+        //     turn declare an update item type?" A fact about the return type.
+        //   - `MethodSchema.streaming` — "should the transport hold the
+        //     connection open and serve SSE instead of JSON?" A decision the
+        //     author makes with `#[method(streaming)]`.
+        //
+        // They cannot be made equal, because in this DX the transport envelope
+        // is *always* a stream: a one-shot method and a many-shot method are
+        // both spelled `impl Stream<Item = T>`, the first yielding a single
+        // `Data` then `Done`. So `is_streaming()` is true for nearly every
+        // method ever written here (every method in this fixture included) and
+        // is not a routing signal. Equating them would have flipped ~154 live
+        // methods across plexus-idp, plexus-registry and plexus-substrate from
+        // JSON to SSE — see the record at
+        // `plexus-macros/src/codegen/method_enum.rs` (`streaming_flags`) and
+        // the boundary test in plexus-transport
+        // (`tests/plx107_streaming_routing_tests.rs`).
+        //
+        // What must hold, and is asserted, is the implication: SSE is only ever
+        // chosen for a method that genuinely has an update item type to send.
+        // A schema that claims `streaming` over a return type with no update
+        // item would be a real defect — the transport would open an SSE stream
+        // for a turn that has nothing to stream.
         if s.streaming {
             assert!(
                 m.is_streaming(),
@@ -483,4 +508,51 @@ fn the_switched_macro_exports_a_connectome() {
         });
     std::fs::write(&out, &json).unwrap_or_else(|e| panic!("could not write {out}: {e}"));
     eprintln!("PLX-91: Connectome written to {out}");
+}
+
+// ---------------------------------------------------------------------------
+// PLX-107. The macro end of the routing chain: `MethodSchema.streaming` is the
+// author's declaration, verbatim, and the return type does not vote.
+//
+// Every method in this fixture returns `impl Stream<Item = String>` — `echo`
+// genuinely yields many items — and none of them declares `#[method(streaming)]`.
+// Under the candidate `m.streaming || m.stream_item_type.is_some()` every one of
+// them would come out `streaming: true` and plexus-transport would serve all of
+// them as SSE instead of JSON. That is the fleet-wide break PLX-107 refused; see
+// `src/codegen/method_enum.rs` (`streaming_flags`) for the full record, and
+// `plexus-transport/tests/http_gateway_streaming_tests.rs` for the boundary
+// where it would have been observable.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn method_schema_streaming_is_the_declaration_not_the_return_type() {
+    let schema = Switched.plugin_schema();
+    let ir = Switched::activation_ir();
+
+    for name in ["echo", "whoami", "ping"] {
+        let m = ir.method(name).expect("method is in the IR");
+        let s = schema
+            .methods
+            .iter()
+            .find(|s| s.name == name)
+            .expect("method is in the schema");
+
+        // The return type says "there is an update item type".
+        assert!(
+            m.is_streaming(),
+            "{name}: the fixture returns `impl Stream<Item = String>`, so the IR \
+             must see an update item type"
+        );
+
+        // The schema says "the author did not ask for SSE" — and that is the
+        // value the HTTP gateway routes on. If this flips, ~154 live methods
+        // across plexus-idp, plexus-registry and plexus-substrate change wire
+        // format; that is a fleet decision, not a macro cleanup.
+        assert!(
+            !s.streaming,
+            "{name}: no `#[method(streaming)]` is declared, so MethodSchema.streaming \
+             must stay false — it is a transport declaration, not a fact about the \
+             return type"
+        );
+    }
 }
