@@ -148,32 +148,6 @@ fn resolve_crate_path(explicit: Option<&str>, err_span: Span) -> syn::Result<syn
     }
 }
 
-/// Resolve the path to `plexus-auth-core` for AUTHZ-CRED-MACRO-3's
-/// credentials-registry call site. Unlike `resolve_crate_path`, absence is
-/// **not** an error — consuming crates that don't depend on
-/// `plexus-auth-core` (e.g., plexus-substrate today) simply skip the
-/// credentials wiring, leaving `MethodSchema.credentials` at its empty
-/// default. This preserves behavior for all pre-AUTHZ-CRED-MACRO-3 callers
-/// and lets new callers opt in by adding the dep.
-///
-/// Returns `Some(path)` when `plexus-auth-core` is reachable; `None`
-/// otherwise. The path respects user renaming (e.g.,
-/// `plexus_auth_core = { package = "plexus-auth-core" }`).
-pub(crate) fn resolve_auth_core_path(err_span: Span) -> Option<syn::Path> {
-    match crate_name("plexus-auth-core") {
-        Ok(FoundCrate::Itself) => syn::parse_str("crate").ok(),
-        Ok(FoundCrate::Name(name)) => {
-            let ident = syn::Ident::new(&name, err_span);
-            Some(syn::parse_quote!(::#ident))
-        }
-        // Z2H-2: umbrella fallback — plexus-rpc always bundles auth-core, so
-        // an umbrella-only consumer gets the credentials wiring through the
-        // re-export instead of silently skipping it.
-        Err(_) => umbrella_crate(err_span)
-            .map(|umbrella| syn::parse_quote!(::#umbrella::auth_core)),
-    }
-}
-
 /// PLX-91 — the switchover's first half: every `#[activation]` now carries its
 /// own `ActivationIr`.
 ///
@@ -739,13 +713,6 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         !matches!(effective_auth_posture, crate::parse::AuthPosture::Optional);
     let mixed_auth_warning = mixed_auth_warning(&methods, suppress_mixed_warning, &struct_name);
 
-    // AUTHZ-CRED-MACRO-3: resolve the optional `plexus-auth-core` path used by
-    // the credentials-registry call site in `compute_method_schemas`. None
-    // means the consuming crate doesn't depend on `plexus-auth-core` and so
-    // the macro should emit empty credential metadata (preserving pre-ticket
-    // behavior).
-    let auth_core_path = resolve_auth_core_path(Span::call_site());
-
     // Z2H-2: per-expansion dependency shim. Every third-party name in the
     // emitted code resolves relatively through this module; whether it
     // re-exports `::plexus_rpc::__deps::*` (umbrella consumer) or the extern
@@ -759,7 +726,6 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &methods,
         &schema_child_methods,
         &crate_path,
-        auth_core_path.as_ref(),
         args.request_type.as_ref(),  // REQ-6: activation-level request type (for runtime merge)
         &deps,
         args.auth_posture, // R-1: declared posture (None = silent, pre-R-1 wire)
