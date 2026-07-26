@@ -179,6 +179,14 @@ pub(crate) fn method_expr(paths: &Paths, spec: &MethodIrSpec) -> TokenStream {
         quote! { .with_param(#e) }
     });
 
+    // RFC 002 §6.9 — content, not a parameter. It is emitted as its own
+    // `request_context` field and never appended to `params`, which is the
+    // parser-side half of §6.9.5's "MUST NOT merge into the parameters".
+    let request_context = spec.request_context.as_ref().map(|t| {
+        let s = schema_ref(paths, t);
+        quote! { .with_request_context(#s) }
+    });
+
     let updates = spec.updates.as_ref().map(|t| {
         let s = schema_ref(paths, t);
         quote! { .with_updates(#s) }
@@ -214,6 +222,7 @@ pub(crate) fn method_expr(paths: &Paths, spec: &MethodIrSpec) -> TokenStream {
         #core::ir::MethodIr::new(#name, #dotted)
             #description
             #(#params)*
+            #request_context
             #updates
             #terminal
             #callbacks
@@ -250,14 +259,23 @@ fn child_edge_expr(paths: &Paths, edge: &ChildEdgeSpec) -> TokenStream {
         }
         ChildEdgeSpec::Dynamic {
             namespace,
+            child_ty,
             description,
         } => quote! {
             #core::ir::ChildEdge::Dynamic {
                 namespace: #namespace.to_string(),
-                // A runtime-registered child has no content at build time; the
-                // registry fills this in when the child is registered, and a
-                // differing hash is exactly the refetch signal.
-                hash: ::std::string::String::new(),
+                // RFC 002 §5.1 — a Dynamic edge MUST carry an advertised hash,
+                // "sufficient to fetch and cache it lazily". The *registrations*
+                // are a runtime fact; the *shape* they all have is not — the
+                // signature names it. So the backend advertises the declared
+                // child type's own node hash, and a changed one is exactly the
+                // refetch signal. The subtree itself is deliberately still not
+                // embedded (§5.1), and no consumer recomputes this (§5.2).
+                //
+                // Unlike a Static edge the child's namespace is NOT restamped:
+                // there is no embedded node here to rename, and the hash a
+                // registration reports when fetched is the child type's own.
+                hash: <#child_ty>::#child_ir_fn()?.hash,
                 description: #description.to_string(),
             }
         },
@@ -318,6 +336,14 @@ pub(crate) fn activation_expr(paths: &Paths, spec: &ActivationIrSpec) -> TokenSt
         let e = deprecation_tokens(paths, d);
         quote! { .with_deprecation(#e) }
     });
+    // RFC 002 §6.9.1. Declared on the activation that owns the methods; §6.9.3
+    // forbids ancestor resolution, so nothing here is pushed into a child's
+    // expression — an embedded child's own `activation_ir!` declares its own or
+    // has none.
+    let request_context = spec.request_context.as_ref().map(|t| {
+        let s = schema_ref(paths, t);
+        quote! { .with_request_context(#s) }
+    });
 
     let methods = spec.methods.iter().map(|m| {
         let e = method_expr(paths, m);
@@ -334,6 +360,7 @@ pub(crate) fn activation_expr(paths: &Paths, spec: &ActivationIrSpec) -> TokenSt
             #respond_method
             #description
             #long_description
+            #request_context
             #deprecation
             #(#methods)*
             #(#children)*;

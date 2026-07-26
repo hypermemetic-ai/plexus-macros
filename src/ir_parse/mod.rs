@@ -102,6 +102,11 @@ pub(crate) struct ActivationIrInput {
     backend_name: Option<String>,
     respond_method: Option<String>,
     description: Option<String>,
+    /// RFC 002 §6.9.1 — `request = <Type>`. A *type*, not a string literal:
+    /// the request context is a type reference (§3.6 item 15) exactly like
+    /// `updates` and `terminal`, so it is carried as the author's own tokens
+    /// and resolved to a schema by rustc at emission.
+    request_context: Option<syn::Type>,
     item: ItemImpl,
 }
 
@@ -112,11 +117,29 @@ impl Parse for ActivationIrInput {
         let mut backend_name: Option<String> = None;
         let mut respond_method: Option<String> = None;
         let mut description: Option<String> = None;
+        let mut request_context: Option<syn::Type> = None;
 
         // Leading `key = "value",` pairs, terminated by the impl block.
         while input.peek(syn::Ident) && input.peek2(Token![=]) {
             let key: syn::Ident = input.parse()?;
             input.parse::<Token![=]>()?;
+
+            // `request` is the one argument whose value is a type.
+            if key == "request" {
+                let ty: syn::Type = input.parse()?;
+                input.parse::<Token![,]>()?;
+                if crate::ir_parse::signature::is_unit(&ty) {
+                    return Err(syn::Error::new_spanned(
+                        &ty,
+                        "`request = ()` is not a request-context declaration: RFC 002 \
+                         §6.9.4 spells \"needs nothing\" as ABSENCE, so omit the \
+                         argument entirely",
+                    ));
+                }
+                request_context = Some(ty);
+                continue;
+            }
+
             let value: LitStr = input.parse()?;
             input.parse::<Token![,]>()?;
             let slot = match key.to_string().as_str() {
@@ -130,7 +153,8 @@ impl Parse for ActivationIrInput {
                         &key,
                         format!(
                             "unknown activation_ir! argument `{other}`; expected one of \
-                             namespace, version, backend_name, respond_method, description"
+                             namespace, version, backend_name, respond_method, \
+                             description, request"
                         ),
                     ))
                 }
@@ -151,6 +175,7 @@ impl Parse for ActivationIrInput {
             backend_name,
             respond_method,
             description,
+            request_context,
             item,
         })
     }
@@ -185,6 +210,7 @@ pub(crate) fn activation_ir_expr(input: ActivationIrInput) -> syn::Result<TokenS
         input.backend_name.clone(),
         input.respond_method.clone(),
         input.description.clone(),
+        input.request_context.clone(),
         &input.item,
     )?;
     let paths = emit::Paths::resolve();
