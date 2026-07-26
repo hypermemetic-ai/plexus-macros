@@ -301,7 +301,10 @@ fn is_bidir_channel(ty: &Type) -> bool {
     let Some(seg) = tp.path.segments.last() else {
         return false;
     };
-    if seg.ident == "BidirChannel" {
+    // PLX-104: the legacy path (parse.rs:1498) accepts both spellings; the vNext
+    // parser matched only the bare ident, so a `StandardBidirChannel` ctx param
+    // was treated as an ordinary param and its method failed to compile.
+    if seg.ident == "BidirChannel" || seg.ident == "StandardBidirChannel" {
         return true;
     }
     if matches!(seg.ident.to_string().as_str(), "Arc" | "Rc" | "Box") {
