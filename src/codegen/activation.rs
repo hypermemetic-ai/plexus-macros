@@ -122,14 +122,8 @@ pub fn generate(
                     let cargo_toml = std::path::Path::new(&dir).join("Cargo.toml");
                     std::fs::read_to_string(cargo_toml).ok()
                 })
-                .and_then(|content| {
-                    // Simple parse: find version = "x.y.z"
-                    content.lines()
-                        .find(|line| line.trim().starts_with("version"))
-                        .and_then(|line| {
-                            line.split('"').nth(1).map(|s| s.to_string())
-                        })
-                })
+                .as_deref()
+                .and_then(package_version_from_cargo_toml)
                 .unwrap_or_else(|| "0.0.0".to_string())
         });
 
@@ -1343,4 +1337,156 @@ fn generate_help_arms(methods: &[MethodInfo]) -> Vec<TokenStream> {
             quote! { #name => Some(#desc.to_string()), }
         })
         .collect()
+}
+
+/// PLX-92: resolve the *package* version from a `Cargo.toml`'s text.
+///
+/// The previous implementation took the first line whose trimmed form started
+/// with `version` and read the first quoted token off it. That is wrong for any
+/// manifest whose `[dependencies]` (or `[build-dependencies]`, or a
+/// `[dependencies.foo]` sub-table) precedes `[package]`, or whose `[package]`
+/// section is not first in the file — it happily returned a *dependency's*
+/// version and baked it into the activation UUID.
+///
+/// This scan is section-aware: it tracks the current TOML table header and only
+/// accepts a `version = "..."` key while inside `[package]`. When `[package]`
+/// inherits from the workspace (`version.workspace = true`, which has no string
+/// literal), it falls back to `[workspace.package]`.
+///
+/// Still deliberately a line scanner, not a TOML parser — proc-macro crates pay
+/// for every dependency, and a manifest's `[package] version` is a one-line key
+/// in every manifest rustc itself will accept.
+fn package_version_from_cargo_toml(content: &str) -> Option<String> {
+    let mut package_version: Option<String> = None;
+    let mut workspace_package_version: Option<String> = None;
+    let mut section = String::new();
+
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            // Table header. `[[bin]]` array-of-table headers land here too and
+            // simply set a section name that never matches.
+            if let Some(end) = line.find(']') {
+                section = line[1..end].trim().trim_matches('"').to_string();
+            }
+            continue;
+        }
+        if section != "package" && section != "workspace.package" {
+            continue;
+        }
+        // Split off the key. `version.workspace = true` has key
+        // `version.workspace`, which must NOT match.
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "version" {
+            continue;
+        }
+        // Take the first quoted token from the value side only, so a trailing
+        // `# comment "1.0.0"` cannot win.
+        let value = value.split('#').next().unwrap_or(value);
+        let Some(v) = value.split('"').nth(1) else {
+            continue;
+        };
+        if section == "package" {
+            if package_version.is_none() {
+                package_version = Some(v.to_string());
+            }
+        } else if workspace_package_version.is_none() {
+            workspace_package_version = Some(v.to_string());
+        }
+    }
+
+    package_version.or(workspace_package_version)
+}
+
+#[cfg(test)]
+mod version_scan_tests {
+    use super::package_version_from_cargo_toml;
+
+    /// The PLX-92 acceptance case: `[dependencies]` precedes `[package]`, so the
+    /// first `version =` line in the file belongs to a dependency. The naive
+    /// scan returned "9.9.9"; the section-aware scan must return "1.2.3".
+    #[test]
+    fn dependencies_section_before_package_does_not_win() {
+        let manifest = r#"
+[dependencies]
+serde = { version = "9.9.9", features = ["derive"] }
+
+[dependencies.tokio]
+version = "8.8.8"
+
+[package]
+name = "my-activation"
+version = "1.2.3"
+edition = "2021"
+"#;
+        assert_eq!(
+            package_version_from_cargo_toml(manifest).as_deref(),
+            Some("1.2.3"),
+            "the [package] version must win over any dependency's version"
+        );
+    }
+
+    #[test]
+    fn package_first_still_resolves() {
+        let manifest = r#"
+[package]
+name = "my-activation"
+version = "0.6.0"
+
+[dependencies]
+serde = { version = "1.0.200" }
+"#;
+        assert_eq!(
+            package_version_from_cargo_toml(manifest).as_deref(),
+            Some("0.6.0")
+        );
+    }
+
+    #[test]
+    fn workspace_inherited_version_falls_back_to_workspace_package() {
+        let manifest = r#"
+[dependencies]
+serde = { version = "9.9.9" }
+
+[package]
+name = "my-activation"
+version.workspace = true
+
+[workspace.package]
+version = "2.1.0"
+"#;
+        assert_eq!(
+            package_version_from_cargo_toml(manifest).as_deref(),
+            Some("2.1.0"),
+            "`version.workspace = true` must not match, and the workspace value must be used"
+        );
+    }
+
+    #[test]
+    fn commented_out_version_is_ignored() {
+        let manifest = r#"
+[package]
+name = "my-activation"
+# version = "6.6.6"
+version = "3.0.1"  # not "7.7.7"
+"#;
+        assert_eq!(
+            package_version_from_cargo_toml(manifest).as_deref(),
+            Some("3.0.1")
+        );
+    }
+
+    #[test]
+    fn no_package_version_yields_none() {
+        let manifest = r#"
+[dependencies]
+serde = { version = "1.0" }
+"#;
+        assert_eq!(package_version_from_cargo_toml(manifest), None);
+    }
 }
