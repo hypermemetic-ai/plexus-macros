@@ -1,0 +1,5 @@
+error: unknown `#[method(...)]` key `unknwon`. vNext accepts only: name, description, params, ext, http_method. Unknown keys are errors by design — use `ext(unknwon = ...)` for open extension metadata
+  --> tests/compile/plx79_unknown_method_key.rs:11:18
+   |
+11 |         #[method(unknwon = 1)]
+   |                  ^^^^^^^

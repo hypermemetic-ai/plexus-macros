@@ -71,6 +71,7 @@
 mod codegen;
 mod credential;
 mod handle_enum;
+mod ir_parse;
 mod parse;
 mod request;
 mod stream_event;
@@ -673,4 +674,83 @@ pub fn json_schema_noop_derive(_input: TokenStream) -> TokenStream {
     // Intentionally produces no output.
     // PlexusRequest already generates impl JsonSchema with x-plexus-source extensions.
     TokenStream::new()
+}
+
+// ===========================================================================
+// PLX-79 (M1·B) — the vNext parser, additive
+// ===========================================================================
+//
+// These two entry points are the ONLY registration the vNext parser adds. They
+// do not touch `#[activation]`, `#[method]`, or anything those emit: the
+// existing path is byte-for-byte unchanged, and build F performs the
+// switchover by calling `ir_parse::{method_ir_expr, activation_ir_expr}`
+// directly from `#[activation]` instead of through these macros.
+
+/// Build a `plexus_core::ir::MethodIr` from one `#[method(...)]`-annotated
+/// signature (PLX-79 / M1·B).
+///
+/// Expands to an expression of type
+/// `Result<plexus_core::ir::MethodIr, plexus_core::ir::SchemaRefError>`. It is
+/// a `Result` because `SchemaRef::new` is fallible by design (PLX-75): a type
+/// whose JSON Schema carries no information cannot be silently degraded, and a
+/// generated path must not `.expect()` it away.
+///
+/// ```ignore
+/// let ir = plexus_macros::method_ir! {
+///     namespace = "claudecode",
+///     /// Send a prompt.
+///     #[method(http_method = "POST", ext(acp_role = "prompt"))]
+///     async fn chat(&self, prompt: String, client: Client<(Permission, FsRead)>)
+///         -> impl Stream<Item = Update>;
+/// }.unwrap();
+///
+/// assert_eq!(ir.dotted_id, "claudecode.chat");
+/// assert!(ir.is_streaming());
+/// // `client` is not a parameter — it is the callback declaration.
+/// assert_eq!(ir.params.len(), 1);
+/// assert_eq!(ir.callbacks, Client::<(Permission, FsRead)>::callbacks());
+/// ```
+///
+/// Unknown keys inside `#[method(...)]` are **errors** naming the key; use
+/// `ext(...)` for open metadata.
+#[proc_macro]
+pub fn method_ir(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as ir_parse::MethodIrInput);
+    match ir_parse::method_ir_expr(parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Build a `plexus_core::ir::ActivationIr` from an `#[activation]`-shaped impl
+/// block — every `#[method]` plus a child edge per `#[child]` (PLX-79 / M1·B).
+///
+/// Expands to an expression of type
+/// `Result<plexus_core::ir::ActivationIr, plexus_core::ir::SchemaRefError>`
+/// with every Merkle hash already computed.
+///
+/// ```ignore
+/// let ir = plexus_macros::activation_ir! {
+///     namespace = "claudecode",
+///     version = "1.0.0",
+///     backend_name = "substrate",
+///     impl ClaudeCode {
+///         #[method]
+///         async fn list(&self) -> Result<Vec<String>, Error>;
+///
+///         #[child(list = "list")]
+///         fn session(&self) -> Session;
+///     }
+/// }.unwrap();
+/// ```
+///
+/// A `#[child]` edge embeds the child's own document, obtained from the child
+/// type's `__plexus_activation_ir()` associated function.
+#[proc_macro]
+pub fn activation_ir(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as ir_parse::ActivationIrInput);
+    match ir_parse::activation_ir_expr(parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
 }
