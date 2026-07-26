@@ -189,18 +189,28 @@ pub(crate) fn child_edge(namespace: &str, f: &ImplItemFn) -> syn::Result<ChildEd
     let child_namespace = info.fn_name.to_string();
     let description = info.description.clone();
 
+    let ReturnType::Type(_, ret) = &f.sig.output else {
+        return Err(syn::Error::new(
+            f.sig.span(),
+            "a #[child] method must declare a return type",
+        ));
+    };
+
     match info.kind {
+        // RFC 002 §5.1: "the edge MUST carry the child's namespace and its
+        // **advertised** hash". A dynamic child is registered at runtime, but
+        // its *shape* is not a runtime fact — `fn ns(&self, name: &str) ->
+        // Option<Child>` names the type every registration under `ns` has. So
+        // the advertised hash is `Child`'s own node hash, which is what the
+        // backend is advertising. §5.2 forbids a *consumer* recomputing it; it
+        // does not forbid the declaring backend from declaring it, and emitting
+        // an empty string instead is the non-conformance §5.1 names.
         ChildMethodKind::Dynamic => Ok(ChildEdgeSpec::Dynamic {
             namespace: child_namespace,
+            child_ty: option_inner(ret).unwrap_or_else(|| (**ret).clone()),
             description,
         }),
         ChildMethodKind::Static => {
-            let ReturnType::Type(_, ret) = &f.sig.output else {
-                return Err(syn::Error::new(
-                    f.sig.span(),
-                    "a #[child] method must declare a return type",
-                ));
-            };
             let child_ty = (**ret).clone();
 
             match &info.list_fn {

@@ -268,6 +268,85 @@ fn deprecation_is_carried_over() {
     assert_eq!(d.message, "use `get`");
 }
 
+// ---------------------------------------------------------------------------
+// RFC 002 §6.9 — request context (PLX-90)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_method_request_declaration_is_read_as_a_type_and_is_not_a_parameter() {
+    let s = spec(parse_quote! {
+        #[method(request = HeaderCtx)]
+        async fn f(&self, id: String) -> Result<A, E>;
+    });
+    assert_eq!(
+        type_name_of(s.request_context.as_ref().expect("declared")),
+        "HeaderCtx"
+    );
+    // §6.9.5: the transport facts are not caller-supplied inputs.
+    assert_eq!(
+        s.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        ["id"]
+    );
+}
+
+#[test]
+fn a_method_without_a_request_declaration_declares_none_of_its_own() {
+    let s = spec(parse_quote! {
+        #[method]
+        async fn f(&self) -> Result<A, E>;
+    });
+    // §6.9.3: `None` here is what makes resolution fall back to the
+    // activation's; the parser does not resolve on the method's behalf.
+    assert!(s.request_context.is_none());
+}
+
+#[test]
+fn request_equals_unit_fails_loud_and_names_the_rfc_gap() {
+    let message = err(parse_quote! {
+        #[method(request = ())]
+        async fn f(&self) -> Result<A, E>;
+    });
+    assert!(message.contains("§6.9"), "must cite the clause: {message}");
+    assert!(
+        message.contains("REPLACES") || message.contains("no way to spell"),
+        "must explain why it cannot be expressed: {message}"
+    );
+}
+
+#[test]
+fn an_activation_carries_its_own_request_declaration_and_does_not_push_it_down() {
+    let a = ActivationIrSpec::from_impl(
+        "root",
+        "1.0.0",
+        None,
+        None,
+        None,
+        Some(parse_quote!(ActivationCtx)),
+        &parse_quote! {
+            impl Root {
+                #[method]
+                async fn inherits(&self) -> Result<A, E> { todo!() }
+
+                #[method(request = MethodCtx)]
+                async fn overrides(&self) -> Result<A, E> { todo!() }
+            }
+        },
+    )
+    .expect("impl block should parse");
+
+    assert_eq!(
+        type_name_of(a.request_context.as_ref().expect("declared")),
+        "ActivationCtx"
+    );
+    // §6.9.2/§6.9.3 live in the IR's resolution, not in the parser: the
+    // inheriting method stores nothing, the overriding one stores its own.
+    assert!(a.methods[0].request_context.is_none());
+    assert_eq!(
+        type_name_of(a.methods[1].request_context.as_ref().unwrap()),
+        "MethodCtx"
+    );
+}
+
 #[test]
 fn is_unit_recognizes_the_unit_forms() {
     assert!(is_unit(&parse_quote!(())));
@@ -280,7 +359,7 @@ fn is_unit_recognizes_the_unit_forms() {
 // ---------------------------------------------------------------------------
 
 fn activation(item: ItemImpl) -> ActivationIrSpec {
-    ActivationIrSpec::from_impl("root", "1.2.3", None, None, None, &item)
+    ActivationIrSpec::from_impl("root", "1.2.3", None, None, None, None, &item)
         .expect("impl block should parse")
 }
 
@@ -334,5 +413,15 @@ fn an_impl_block_yields_its_methods_and_child_edges() {
         }
         other => panic!("expected an indexed edge, got {other:?}"),
     }
-    assert!(matches!(&a.children[2], ChildEdgeSpec::Dynamic { namespace, .. } if namespace == "dynamics"));
+    match &a.children[2] {
+        ChildEdgeSpec::Dynamic {
+            namespace, child_ty, ..
+        } => {
+            assert_eq!(namespace, "dynamics");
+            // RFC 002 §5.1 — the edge's mandatory advertised hash comes from
+            // the child type the signature names, unwrapped from its `Option`.
+            assert_eq!(super::signature::type_name_of(child_ty), "DynChild");
+        }
+        other => panic!("expected a dynamic edge, got {other:?}"),
+    }
 }

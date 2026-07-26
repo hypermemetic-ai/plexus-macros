@@ -34,10 +34,22 @@ use syn::spanned::Spanned;
 use syn::{Attribute, Expr, ExprLit, Lit, Meta, MetaNameValue, Token};
 
 use super::spec::HttpMethodIrSpec;
-use crate::parse::HubMethodAttrs;
+use crate::parse::{HubMethodAttrs, MethodRequestOverride};
 
 /// The vNext-recognized `#[method(...)]` keys. Everything else is an error.
-const ALLOWED_KEYS: &[&str] = &["name", "description", "params", "ext", "http_method"];
+const ALLOWED_KEYS: &[&str] = &[
+    "name",
+    "description",
+    "params",
+    "ext",
+    "http_method",
+    // RFC 002 §6.9 — the per-method request-context override. Reinstated by
+    // PLX-90: `request` was removed from vNext when it meant "the activation's
+    // request struct is spliced into the parameter list", and it is back with
+    // the *opposite* meaning — a declaration of the transport facts the method
+    // depends on, which §6.9.5 forbids merging into the parameters.
+    "request",
+];
 
 /// Keys whose surface vNext removed or relocated, with where to go instead.
 fn removed_surface_hint(key: &str) -> Option<&'static str> {
@@ -61,9 +73,6 @@ fn removed_surface_hint(key: &str) -> Option<&'static str> {
             "`returns(...)` variant filtering is gone: the turn envelope declares \
              an update item type and a terminal type directly from the signature"
         }
-        "request" => {
-            "`request = ...` is gone: parameters are declared in the signature"
-        }
         "override_call" => "`override_call` is gone: return `impl Stream<Item = T>` instead",
         "credential" | "credentials" => {
             "the credentials surface is gone (zero consumers, PLX-73); carry \
@@ -81,6 +90,11 @@ pub(crate) struct MethodAttrs {
     pub(crate) param_docs: HashMap<String, String>,
     /// `None` means "not declared"; the IR's own default (`POST`) applies.
     pub(crate) http_method: Option<HttpMethodIrSpec>,
+    /// RFC 002 §6.9.2 — the method's own request-context declaration, as
+    /// tokens. `Some` REPLACES the owning activation's declaration for this
+    /// method; `None` means the method declares none of its own and §6.9.3
+    /// resolution falls back to the activation's.
+    pub(crate) request_context: Option<syn::Type>,
     pub(crate) extensions: Vec<(String, serde_json::Value)>,
 }
 
@@ -117,6 +131,7 @@ impl MethodAttrs {
     pub(crate) fn parse_tokens(tokens: TokenStream) -> syn::Result<Self> {
         // ---- Pass 1: strictness + the typed http_method ----
         let mut http_method = None;
+        let mut request_span = None;
         if !tokens.is_empty() {
             let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
             let metas = syn::parse::Parser::parse2(parser, tokens.clone())?;
@@ -143,17 +158,49 @@ impl MethodAttrs {
                 if key == "http_method" {
                     http_method = Some(parse_http_method(meta)?);
                 }
+                if key == "request" {
+                    request_span = Some(path.span());
+                }
             }
         }
 
         // ---- Pass 2: reuse the existing parser for everything shared ----
         let base: HubMethodAttrs = syn::parse2(tokens)?;
 
+        // RFC 002 §6.9.2 — the method-level declaration, read out of the
+        // *existing* parser's `request_override` rather than re-parsed here, so
+        // there is one implementation of `request = <Type>` in the crate.
+        let request_context = match base.request_override {
+            None => None,
+            Some(MethodRequestOverride::Type(ty)) => Some(ty),
+            Some(MethodRequestOverride::Skip) => {
+                // `request = ()` meant "opt this method out of the activation's
+                // request extraction" on the legacy path. RFC 002 §6.9 has no
+                // wire form for it: §6.9.3 makes method-level absence *mean*
+                // "inherit the activation's", so a method on a
+                // context-declaring activation cannot say "I need nothing".
+                // Inventing one here would be a parallel mechanism, which
+                // PLX-90 forbids — so this fails loud and names the gap.
+                return Err(syn::Error::new(
+                    request_span.unwrap_or_else(proc_macro2::Span::call_site),
+                    "`request = ()` has no meaning under CONNECTOME RFC 002 §6.9. \
+                     A method's declaration REPLACES its activation's (§6.9.2) and \
+                     method-level absence MEANS \"use the activation's\" (§6.9.3), so \
+                     the IR has no way to spell \"this method needs no transport \
+                     facts\" on an activation that declares some. Declare the narrower \
+                     type explicitly (`request = MinimalCtx`), or drop the \
+                     activation-level `request = ...` and declare it per method. \
+                     (Reported upstream as an RFC 002 §6.9 finding.)",
+                ));
+            }
+        };
+
         Ok(Self {
             name: base.name,
             description: base.description,
             param_docs: base.param_docs,
             http_method,
+            request_context,
             extensions: base.extensions,
         })
     }

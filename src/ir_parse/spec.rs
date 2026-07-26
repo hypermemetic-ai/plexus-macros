@@ -67,6 +67,15 @@ pub(crate) struct MethodIrSpec {
     pub(crate) dotted_id: String,
     pub(crate) description: String,
     pub(crate) params: Vec<ParamIrSpec>,
+    /// RFC 002 §6.9.2 — the method's own request-context type, as tokens.
+    ///
+    /// `Some` REPLACES the owning activation's declaration for this method:
+    /// there is no merge and none can be expressed. `None` means the method
+    /// declares none of its own, and §6.9.3 resolution falls back to the
+    /// activation's — which is exactly the shape `MethodIr::request_context`
+    /// carries, so the parser stores no resolved value and performs no
+    /// resolution itself.
+    pub(crate) request_context: Option<Type>,
     /// Item type of the update stream, or `None` for a turn that emits none.
     pub(crate) updates: Option<Type>,
     /// Type of the terminal value, or `None` when the turn resolves to nothing
@@ -119,6 +128,7 @@ impl MethodIrSpec {
             dotted_id,
             description,
             params,
+            request_context: attrs.request_context.clone(),
             updates,
             terminal,
             capability_set,
@@ -146,8 +156,13 @@ pub(crate) enum ChildEdgeSpec {
     },
     /// `#[child] fn ns(&self, name: &str) -> Option<ChildTy>` — runtime
     /// registered, deliberately not embedded.
+    ///
+    /// The subtree is not embedded, but the *type* of every registration under
+    /// this namespace is named by the signature, so RFC 002 §5.1's mandatory
+    /// advertised hash is available: it is `ChildTy`'s own node hash.
     Dynamic {
         namespace: String,
+        child_ty: Type,
         description: String,
     },
     /// `#[child(list = "...")] fn ns(&self) -> ChildTy` — an indexed family.
@@ -171,6 +186,12 @@ pub(crate) struct ActivationIrSpec {
     pub(crate) respond_method: Option<String>,
     pub(crate) description: String,
     pub(crate) long_description: Option<String>,
+    /// RFC 002 §6.9.1 — the activation-level request context, as tokens.
+    ///
+    /// It applies to the methods *this* activation owns and to nothing else:
+    /// §6.9.3 forbids walking to ancestors, so the parser never propagates it
+    /// into an embedded child's spec.
+    pub(crate) request_context: Option<Type>,
     pub(crate) methods: Vec<MethodIrSpec>,
     pub(crate) children: Vec<ChildEdgeSpec>,
     pub(crate) deprecation: Option<ParsedDeprecation>,
@@ -185,6 +206,7 @@ impl ActivationIrSpec {
         backend_name: Option<String>,
         respond_method: Option<String>,
         description: Option<String>,
+        request_context: Option<Type>,
         item: &ItemImpl,
     ) -> syn::Result<Self> {
         let mut methods = Vec::new();
@@ -229,6 +251,7 @@ impl ActivationIrSpec {
             respond_method,
             description,
             long_description,
+            request_context,
             methods,
             children,
             deprecation: parse_deprecation_attrs(&item.attrs, item.impl_token.span)?,
