@@ -51,6 +51,20 @@ impl Paths {
             serde_json: derive_serde_json_path(span),
         }
     }
+
+    /// PLX-91: the same resolution, but with `plexus-core` pinned to the path
+    /// `#[activation]` already resolved — which honours an explicit
+    /// `crate_path = "..."` and, unlike [`derive_core_path`], spells
+    /// `FoundCrate::Itself` as `crate` so plexus-core's own in-tree
+    /// activations compile.
+    pub(crate) fn with_core(core: syn::Path) -> Self {
+        let span = Span::call_site();
+        Self {
+            core,
+            schemars: schemars_path(span),
+            serde_json: derive_serde_json_path(span),
+        }
+    }
 }
 
 /// Same additive contract as [`derive_core_path`]: respect a rename, fall back

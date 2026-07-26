@@ -45,13 +45,22 @@ pub fn generate(
     // `generate_all`. All third-party names (jsonrpsee, serde_json, uuid,
     // async_trait, futures, tokio) are referenced relatively through it.
     deps: &syn::Ident,
+    // PLX-91: the `ActivationIr` accessors, emitted into the inherent impl.
+    activation_ir_fns: &TokenStream,
+    // PLX-91: the handler table, emitted into the inherent impl.
+    handler_table_fn: &TokenStream,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
+    let owned_wrapper_name = format_ident!("__PlexusOwnedChild{}", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
     let rpc_server_name = format_ident!("{}RpcServer", struct_name);
     let method_names: Vec<&str> = methods.iter().map(|m| m.method_name.as_str()).collect();
 
-    let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type, deps);
+    // PLX-91 (the switchover): the only dispatch arms that survive are the
+    // bidirectional ones. See `codegen::handlers` for why that construct alone
+    // could not move onto the turn runtime, and why keeping it on its existing
+    // path is the opposite of a silent semantic change.
+    let dispatch_arms = generate_bidir_arms(methods, namespace, crate_path, request_type, deps);
     let help_arms = generate_help_arms(methods);
     let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && m.activation_params.is_empty());
     let rpc_trait_methods = generate_rpc_trait_methods(methods, deps);
@@ -331,8 +340,13 @@ pub fn generate(
                 // Static child methods have shape `fn NAME(&self) -> Child`
                 // which we always call synchronously. (Making static child
                 // methods async would just force an unnecessary `.await`.)
+                // PLX-91: the child is handed over OWNED, wrapped so that
+                // `router_call` can reach `Activation::call_arc`. See
+                // `owned_router_wrapper` for why the wrapper has to exist.
                 quote! {
-                    Some(Box::new(self.#fn_name()) as Box<dyn #crate_path::plexus::ChildRouter>)
+                    Some(::std::boxed::Box::new(#owned_wrapper_name(
+                        ::std::sync::Arc::new(self.#fn_name())
+                    )) as Box<dyn #crate_path::plexus::ChildRouter>)
                 }
             })
             .collect();
@@ -348,7 +362,8 @@ pub fn generate(
                 _ => self
                     .#fn_name(_name)
                     #await_tok
-                    .map(|c| Box::new(c) as Box<dyn #crate_path::plexus::ChildRouter>),
+                    .map(|c| ::std::boxed::Box::new(#owned_wrapper_name(::std::sync::Arc::new(c)))
+                        as Box<dyn #crate_path::plexus::ChildRouter>),
             }
         } else {
             quote! { _ => None, }
@@ -366,7 +381,8 @@ pub fn generate(
                 self
                     .#fn_name(_name)
                     #await_tok
-                    .map(|c| Box::new(c) as Box<dyn #crate_path::plexus::ChildRouter>)
+                    .map(|c| ::std::boxed::Box::new(#owned_wrapper_name(::std::sync::Arc::new(c)))
+                        as Box<dyn #crate_path::plexus::ChildRouter>)
             }
         } else {
             quote! {
@@ -386,7 +402,9 @@ pub fn generate(
         quote! {
             match _name {
                 #(
-                    #child_names => Some(Box::new(self.#child_fields.clone())),
+                    #child_names => Some(::std::boxed::Box::new(#owned_wrapper_name(
+                        ::std::sync::Arc::new(self.#child_fields.clone())
+                    )) as Box<dyn #crate_path::plexus::ChildRouter>),
                 )*
                 _ => None,
             }
@@ -612,7 +630,67 @@ pub fn generate(
         quote! {}
     };
 
+    // PLX-91: children are handed to `route_to_child` as `Box<dyn ChildRouter>`
+    // and dispatched through `ChildRouter::router_call(&self, ..)` — a
+    // *borrowed* seam, in plexus-core, which is read-only for this build. A
+    // turn-native child needs an OWNED handle (PLX-97), so the box has to
+    // contain something that already holds one. This wrapper is that thing: a
+    // local generic newtype over `Arc<C>` whose `router_call` reaches
+    // `Activation::call_arc`. It is local because coherence requires it —
+    // `impl ChildRouter for Arc<C>` is an orphan impl (`Arc` is not
+    // `#[fundamental]`), so a newtype is the only legal spelling. Every other
+    // `ChildRouter` method forwards, so listing, searching, capabilities and
+    // grandchild descent behave exactly as before.
+    let owned_child_wrapper = quote! {
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub struct #owned_wrapper_name<C>(pub ::std::sync::Arc<C>);
+
+        #[#deps::async_trait::async_trait]
+        impl<C> #crate_path::plexus::ChildRouter for #owned_wrapper_name<C>
+        where
+            C: #crate_path::plexus::Activation
+                + #crate_path::plexus::ChildRouter
+                + ::core::marker::Sized,
+        {
+            fn router_namespace(&self) -> &str {
+                #crate_path::plexus::ChildRouter::router_namespace(&*self.0)
+            }
+
+            async fn router_call(
+                &self,
+                method: &str,
+                params: #deps::serde_json::Value,
+                auth: Option<&#crate_path::plexus::AuthContext>,
+                raw_ctx: Option<&#crate_path::request::RawRequestContext>,
+            ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
+                <C as #crate_path::plexus::Activation>::call_arc(
+                    ::std::sync::Arc::clone(&self.0), method, params, auth, raw_ctx,
+                ).await
+            }
+
+            async fn get_child(&self, _name: &str) -> Option<Box<dyn #crate_path::plexus::ChildRouter>> {
+                #crate_path::plexus::ChildRouter::get_child(&*self.0, _name).await
+            }
+
+            #[allow(deprecated)]
+            fn capabilities(&self) -> #crate_path::plexus::ChildCapabilities {
+                #crate_path::plexus::ChildRouter::capabilities(&*self.0)
+            }
+
+            async fn list_children(&self) -> Option<#deps::futures::stream::BoxStream<'_, ::std::string::String>> {
+                #crate_path::plexus::ChildRouter::list_children(&*self.0).await
+            }
+
+            async fn search_children(&self, query: &str) -> Option<#deps::futures::stream::BoxStream<'_, ::std::string::String>> {
+                #crate_path::plexus::ChildRouter::search_children(&*self.0, query).await
+            }
+        }
+    };
+
     quote! {
+        #owned_child_wrapper
+
         impl #impl_generics #self_ty #where_clause {
             pub const NAMESPACE: &'static str = #namespace;
             /// Stable plugin instance ID for handle routing
@@ -623,7 +701,30 @@ pub fn generate(
                 Self::PLUGIN_ID
             }
 
+            /// PLX-91: hand this activation to a parent as an **owned** child
+            /// router.
+            ///
+            /// `ChildRouter::router_call` takes `&self`, but a turn-native
+            /// method needs an owned handle — the turn's stream outlives the
+            /// borrow (PLX-97). `Box::new(self)` therefore no longer suffices
+            /// for a macro-generated activation; this is the one-call
+            /// replacement, and the macro's own generated `get_child` uses it
+            /// for every `#[child]` edge. A hand-written `ChildRouter` should
+            /// return `Some(Child.into_child_router())` where it used to
+            /// return `Some(Box::new(Child))`.
+            #[allow(dead_code)]
+            pub fn into_child_router(self) -> ::std::boxed::Box<dyn #crate_path::plexus::ChildRouter>
+            where
+                Self: ::core::marker::Sized,
+            {
+                ::std::boxed::Box::new(#owned_wrapper_name(::std::sync::Arc::new(self)))
+            }
+
             #plugin_children_synth
+
+            #activation_ir_fns
+
+            #handler_table_fn
         }
 
         #rpc_block
@@ -651,6 +752,14 @@ pub fn generate(
                 }
             }
 
+            /// PLX-91: the borrowed entry point.
+            ///
+            /// `.schema`, child routing and the surviving bidirectional arms
+            /// are served here, because none of them needs an owned handle on
+            /// the activation. A turn-native `#[method]` does — the turn's
+            /// stream outlives this borrow (PLX-97) — so it is served by
+            /// [`Activation::call_arc`], which `DynamicHub` and the generated
+            /// `ChildRouter` both route through.
             async fn call(
                 &self,
                 method: &str,
@@ -658,7 +767,6 @@ pub fn generate(
                 auth: Option<&#crate_path::plexus::AuthContext>,
                 raw_ctx: Option<&#crate_path::request::RawRequestContext>,
             ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
-                // Try local methods first
                 match method {
                     #(#dispatch_arms)*
                     "schema" => {
@@ -676,18 +784,72 @@ pub fn generate(
                         ))
                     }
                     _ => {
+                        if Self::__plexus_handler_table().contains(method) {
+                            return Err(#crate_path::plexus::PlexusError::ExecutionError(
+                                format!(
+                                    "PLX-91: `{}.{}` is a turn-native method and must be \
+                                     dispatched through `Activation::call_arc(Arc<Self>, ..)`. \
+                                     `call(&self, ..)` lends a borrow the turn's stream \
+                                     outlives, so no owned handle exists to run the handler \
+                                     with. `DynamicHub` and the generated `ChildRouter` \
+                                     already route through `call_arc`.",
+                                    #namespace, method,
+                                )
+                            ));
+                        }
                         // PROT schema unification (PLX-13): the `{method}.schema`
                         // strip-suffix shortcut (and the HF-AUDIT-4 child-role guard
                         // that fenced it) is deleted. `<name>.schema` is no longer a
                         // per-method result path — it resolves to a child plugin's own
-                        // `.schema` via child routing, or is method-not-found. The
-                        // `.method_schema` content-type no longer exists.
-                        //
-                        // For hubs: try routing to child plugin via ChildRouter trait
-                        // For leaves: return MethodNotFound
+                        // `.schema` via child routing, or is method-not-found.
                         #call_fallback
                     }
                 }
+            }
+
+            /// PLX-91 / PLX-97: **the** switched dispatch path.
+            ///
+            /// Three lines of actual work: look the method up in the
+            /// `ActivationIr`, build the handler table, hand both plus the
+            /// owned `Arc<Self>` to `runtime::entry_with_state`. Auth
+            /// injection, capability pre-flight, the update/terminal split and
+            /// the exactly-one-terminal guarantee all happen inside `entry` —
+            /// there is no generated template for any of them.
+            async fn call_arc(
+                self: ::std::sync::Arc<Self>,
+                method: &str,
+                params: #deps::serde_json::Value,
+                auth: Option<&#crate_path::plexus::AuthContext>,
+                raw_ctx: Option<&#crate_path::request::RawRequestContext>,
+            ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
+                let __handlers = Self::__plexus_handler_table();
+                if __handlers.contains(method) {
+                    let __ir = Self::__plexus_activation_ir_cached()
+                        .map_err(#crate_path::plexus::PlexusError::ExecutionError)?;
+                    let __dotted = __ir
+                        .method(method)
+                        .map(|m| m.dotted_id.clone())
+                        .unwrap_or_else(|| format!("{}.{}", #namespace, method));
+                    let __request = #crate_path::runtime::TurnRequest {
+                        method: method.to_string(),
+                        params,
+                        auth: auth.cloned(),
+                        raw_ctx: raw_ctx.cloned(),
+                        peer: #crate_path::runtime::PeerCapabilities::all(),
+                    };
+                    let __handle = #crate_path::runtime::entry_with_state(
+                        __ir, &__handlers, self, __request,
+                    )?;
+                    return Ok(#crate_path::runtime::turn_stream_to_plexus_stream(
+                        __dotted,
+                        ::std::vec![#namespace.to_string()],
+                        __handle,
+                        ::core::option::Option::None,
+                    ));
+                }
+                <Self as #crate_path::plexus::Activation>::call(
+                    &*self, method, params, auth, raw_ctx,
+                ).await
             }
 
             fn into_rpc_methods(self) -> #deps::jsonrpsee::core::server::Methods {
@@ -854,7 +1016,17 @@ fn generate_rpc_impl_methods(
         .collect()
 }
 
-fn generate_dispatch_arms(
+/// PLX-91: the residue of `generate_dispatch_arms`.
+///
+/// Before the switchover this function produced one arm per `#[method]`, each
+/// re-emitting auth injection, request extraction, param decode and
+/// wrap/terminal plumbing. All four now live once, in
+/// `plexus_core::runtime::entry`, and the arm list is empty for every method
+/// the handler table serves. What is left is the `BidirType::{Standard,
+/// Custom}` pair, which `codegen::handlers`' module docs explain cannot move
+/// without inventing a capability type per request/response pair — and which
+/// ACP depends on, so it is kept working rather than deleted.
+fn generate_bidir_arms(
     methods: &[MethodInfo],
     namespace: &str,
     crate_path: &syn::Path,
@@ -865,6 +1037,7 @@ fn generate_dispatch_arms(
 
     methods
         .iter()
+        .filter(|m| !crate::codegen::handlers::is_switched(m))
         .map(|m| {
             let method_name = &m.method_name;
             let fn_name = &m.fn_name;
@@ -970,7 +1143,7 @@ fn generate_dispatch_arms(
             // Build parameter list for method call
             let activation_param_names: Vec<&syn::Ident> = m.activation_params.iter().map(|ap| &ap.param_name).collect();
             let resolver_names: Vec<&syn::Ident> = m.auth_resolvers.iter().map(|r| &r.param_name).collect();
-            let method_params = if m.requires_auth && m.auth_resolvers.is_empty() {
+            let _method_params = if m.requires_auth && m.auth_resolvers.is_empty() {
                 // Raw auth context pass-through (legacy)
                 quote! { auth_ctx, #(#param_names),* }
             } else if !m.activation_params.is_empty() && !m.auth_resolvers.is_empty() {
@@ -988,24 +1161,9 @@ fn generate_dispatch_arms(
 
             // Generate code based on bidirectional type
             match &m.bidirectional {
-                BidirType::None => {
-                    // No bidirectional - simple wrap_stream
-                    quote! {
-                        #method_name => {
-                            #auth_injection
-                            #activation_extraction
-                            #(#activation_param_bindings)*
-                            #(#resolver_bindings)*
-                            #param_extraction
-                            let stream = self.#fn_name(#method_params).await;
-                            Ok(#crate_path::plexus::wrap_stream(
-                                stream,
-                                #content_type,
-                                vec![#namespace.into()]
-                            ))
-                        }
-                    }
-                }
+                // Unreachable: filtered out above. The switchover serves every
+                // non-bidirectional method from the handler table.
+                BidirType::None => quote! {},
                 BidirType::Standard => {
                     // Build param list for bidir - ctx comes first, then auth if needed, then regular params
                     let bidir_params = if m.requires_auth {

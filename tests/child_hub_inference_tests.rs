@@ -264,7 +264,12 @@ impl plexus_core::plexus::ChildRouter for LegacyHub {
         name: &str,
     ) -> Option<Box<dyn plexus_core::plexus::ChildRouter>> {
         if name == "mercury" {
-            Some(Box::new(Mercury) as Box<dyn plexus_core::plexus::ChildRouter>)
+            // PLX-91: a hand-written router hands the child over OWNED, so the
+            // child's turn-native methods can be dispatched through
+            // `Activation::call_arc`. `Box::new(Mercury)` used to be enough;
+            // since the switchover a macro activation supplies
+            // `into_child_router()` for exactly this handoff.
+            Some(Mercury.into_child_router())
         } else {
             None
         }
