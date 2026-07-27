@@ -12,7 +12,9 @@ use syn::{
     FnArg, GenericArgument, ImplItemFn, PatType, PathArguments, ReturnType, Type, TypeParamBound,
 };
 
-use super::spec::{AuthRequirementSpec, ChildEdgeSpec, ParamIrSpec};
+use super::spec::{
+    AuthRequirementSpec, ChildDeliverySpec, ChildEdgeSpec, ChildShapeSpec, ParamIrSpec,
+};
 use crate::parse::{AuthParamShape, ChildMethodInfo, ChildMethodKind};
 
 /// Parameter attributes that mean "not a caller-supplied parameter": the value
@@ -289,7 +291,27 @@ pub(crate) fn unary_terminal_type(output: &ReturnType) -> Option<Type> {
 /// Reuses [`ChildMethodInfo::from_fn`] for signature validation and the
 /// `list`/`search` arguments, so there is one implementation of the `#[child]`
 /// grammar.
-pub(crate) fn child_edge(namespace: &str, f: &ImplItemFn) -> syn::Result<ChildEdgeSpec> {
+///
+/// # PLX-160 — the two axes, read independently
+///
+/// The declaration has **always** carried two orthogonal facts, and this
+/// function now reads each exactly once:
+///
+/// | | `fn ns(&self) -> C` | `fn ns(&self, name: &str) -> Option<C>` |
+/// |---|---|---|
+/// | bare `#[child]` | single, embedded | single, lazy |
+/// | `#[child(list = "…")]` | indexed, embedded | **indexed, lazy** |
+///
+/// The bottom-right cell is the one this build adds. Before it, the match ran
+/// on [`ChildMethodKind`] **first** and consulted `info.list_fn` only inside the
+/// `Static` arm, so a `list =` on a dynamic child was parsed and then thrown
+/// away with no diagnostic — `list_method`, `id_field` and `path_template` all
+/// lost, on `solar.body`, `claudecode.session` and `cone.of`.
+pub(crate) fn child_edge(
+    namespace: &str,
+    f: &ImplItemFn,
+    sibling_fns: &std::collections::BTreeSet<String>,
+) -> syn::Result<ChildEdgeSpec> {
     let info = ChildMethodInfo::from_fn(f)?;
     let child_namespace = info.fn_name.to_string();
     let description = info.description.clone();
@@ -301,49 +323,71 @@ pub(crate) fn child_edge(namespace: &str, f: &ImplItemFn) -> syn::Result<ChildEd
         ));
     };
 
-    match info.kind {
-        // RFC 002 §5.1: "the edge MUST carry the child's namespace and its
-        // **advertised** hash". A dynamic child is registered at runtime, but
-        // its *shape* is not a runtime fact — `fn ns(&self, name: &str) ->
-        // Option<Child>` names the type every registration under `ns` has. So
-        // the advertised hash is `Child`'s own node hash, which is what the
-        // backend is advertising. §5.2 forbids a *consumer* recomputing it; it
-        // does not forbid the declaring backend from declaring it, and emitting
-        // an empty string instead is the non-conformance §5.1 names.
-        ChildMethodKind::Dynamic => Ok(ChildEdgeSpec::Dynamic {
-            namespace: child_namespace,
-            child_ty: option_inner(ret).unwrap_or_else(|| (**ret).clone()),
-            description,
-        }),
-        ChildMethodKind::Static => {
-            let child_ty = (**ret).clone();
+    // ---- AXIS 2, DELIVERY: the method's arity, and nothing else. ----------
+    //
+    // RFC 002 §5.1: "the edge MUST carry the child's namespace and its
+    // **advertised** hash". A dynamic child is registered at runtime, but its
+    // *shape* is not a runtime fact — `fn ns(&self, name: &str) ->
+    // Option<Child>` names the type every registration under `ns` has. So the
+    // advertised hash is `Child`'s own node hash, which is what the backend is
+    // advertising. §5.2 forbids a *consumer* recomputing it; it does not forbid
+    // the declaring backend from declaring it, and emitting an empty string
+    // instead is the non-conformance §5.1 names.
+    let (delivery, child_ty) = match info.kind {
+        ChildMethodKind::Static => (ChildDeliverySpec::Embedded, (**ret).clone()),
+        ChildMethodKind::Dynamic => (
+            ChildDeliverySpec::Lazy,
+            option_inner(ret).unwrap_or_else(|| (**ret).clone()),
+        ),
+    };
 
-            match &info.list_fn {
-                None => Ok(ChildEdgeSpec::Static {
-                    namespace: child_namespace,
-                    child_ty,
-                }),
-                Some(list_fn) => Ok(ChildEdgeSpec::Indexed {
-                    list_method: format!("{namespace}.{list_fn}"),
-                    search_method: info
-                        .search_fn
-                        .as_ref()
-                        .map(|s| format!("{namespace}.{s}")),
-                    // PLX-73 `q-ir-completeness` item 17: the old client
-                    // *guessed* this field with a `"name"` fallback. Declaring
-                    // the guess is already an improvement (it is now on the
-                    // wire); letting the author override it needs a new
-                    // `#[child(id_field = ..)]` argument, which lives in the
-                    // build that owns `parse.rs`.
-                    id_field: "name".to_string(),
-                    path_template: format!("{child_namespace}/{{id}}"),
-                    namespace: child_namespace,
-                    child_ty,
-                    description,
-                }),
-            }
-        }
-    }
+    // PLX-160 c3 — NOTE, and it corrects the ticket's premise. `list` and
+    // `search` naming a method the impl block does not define is ALREADY a
+    // compile error, raised by the `ChildRouter` emitter, and it fires for a
+    // dynamic child too. This build did not need to add that check — but it is
+    // what made it load-bearing on the WIRE: before this build the name was
+    // validated and then thrown away, so the diagnostic guarded a routing call
+    // and nothing else. It now guards RFC 002 §5.1's mandatory enumeration
+    // method, which a consumer is told it may call. Pinned by
+    // `tests/compile/plx160_list_names_nothing.rs`.
+
+    // ---- AXIS 1, SHAPE: the `list` / `search` arguments, and nothing else. -
+    let shape = match (&info.list_fn, &info.search_fn) {
+        (Some(list_fn), search_fn) => ChildShapeSpec::Indexed {
+            list_method: format!("{namespace}.{list_fn}"),
+            search_method: search_fn.as_ref().map(|s| format!("{namespace}.{s}")),
+            // PLX-73 `q-ir-completeness` item 17: the old client *guessed* this
+            // field with a `"name"` fallback. Declaring the guess is already an
+            // improvement (it is now on the wire); letting the author override
+            // it needs a new `#[child(id_field = ..)]` argument, which lives in
+            // the build that owns `parse.rs`.
+            id_field: "name".to_string(),
+            path_template: format!("{child_namespace}/{{id}}"),
+        },
+        (None, None) => ChildShapeSpec::Single,
+        // `search` WITHOUT `list` is not an error and is not dropped: CHILD-4
+        // made the two opt-ins independent, and this declaration is honoured in
+        // full on the ROUTING surface (`ChildRouter::search_children` works,
+        // `list_children` stays `None`, capabilities are `SEARCH`).
+        //
+        // What it cannot do is ride an IR edge: RFC 002 §5.1 makes the
+        // enumeration method MANDATORY for an indexed edge and the search method
+        // the only optional one of its five facts, so a searchable-but-not-
+        // enumerable family has no §5.1 form. The edge is therefore Single and
+        // the search method is absent from the DOCUMENT while present in the
+        // BACKEND — a §5.1 gap, not a macro bug, and one this build reports
+        // rather than papers over. `search_only_is_honoured_by_the_router_and_
+        // unrepresentable_in_the_document` pins it so it stays loud.
+        (None, _) => ChildShapeSpec::Single,
+    };
+
+    Ok(ChildEdgeSpec {
+        namespace: child_namespace,
+        shape,
+        delivery,
+        child_ty,
+        description,
+    })
 }
 
 // ===========================================================================

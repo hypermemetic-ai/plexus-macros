@@ -308,9 +308,11 @@ fn a_root_carries_the_root_facts_and_an_embedded_child_carries_none() {
     // is what distinguishes a root from an embedded node." The children are
     // built by the *same* `activation_ir!` macro, so each is a root in its own
     // right until it is embedded; embedding must strip it.
-    let ChildEdge::Static(child) = ir.child("alpha").expect("static edge") else {
-        panic!("expected a Static edge");
-    };
+    let child = ir
+        .child("alpha")
+        .expect("static edge")
+        .child()
+        .expect("an embedded subtree");
     assert!(child.ir_version.is_none(), "§3.3: no ir_version on a child");
     assert!(
         child.hash_algorithm.is_none(),

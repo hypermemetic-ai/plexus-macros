@@ -33,3 +33,20 @@ fn a_recognized_key_in_the_wrong_form_is_a_compile_error() {
     let t = TestCases::new();
     t.compile_fail("tests/compile/plx147_wrong_form_activation_key.rs");
 }
+
+// ===========================================================================
+// PLX-160 — a `#[child]` argument the emitter cannot honour
+// ===========================================================================
+
+/// `list = "…"` naming a method the impl block does not define.
+///
+/// This became load-bearing with PLX-160: before it, `list =` on a *dynamic*
+/// child was discarded before reaching the IR, so a typo had no diagnostic and
+/// no effect. Now it is written to the wire as RFC 002 §5.1's mandatory
+/// enumeration method, and an unresolvable one advertises a method the backend
+/// does not have — the fabrication §5.2 forbids.
+#[test]
+fn a_list_method_the_impl_block_does_not_define_is_a_compile_error() {
+    let t = TestCases::new();
+    t.compile_fail("tests/compile/plx160_list_names_nothing.rs");
+}

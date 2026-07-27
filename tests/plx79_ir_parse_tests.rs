@@ -15,7 +15,9 @@
 use plexus_core::capability::{
     Capability, CapabilitySet, Client, FsRead, FsWrite, Permission, Terminal,
 };
-use plexus_core::ir::{ActivationIr, AuthRequirementIr, ChildEdge, HttpMethodIr, SchemaRef};
+use plexus_core::ir::{
+    ActivationIr, AuthRequirementIr, ChildShape, HttpMethodIr, SchemaRef,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +58,7 @@ fn all_schema_refs(ir: &ActivationIr) -> Vec<&SchemaRef> {
         }
     }
     for c in &ir.children {
-        if let ChildEdge::Static(child) = c {
+        if let Some(child) = c.child() {
             out.extend(all_schema_refs(child));
         }
     }
@@ -450,39 +452,41 @@ fn activation_assembles_methods_and_child_edges() {
     assert!(!ir.hash.is_empty());
     assert!(ir.methods.iter().all(|m| !m.hash.is_empty()));
 
-    match ir.child("embedded").expect("static edge") {
-        ChildEdge::Static(child) => {
-            assert_eq!(child.namespace, "embedded");
-            assert_eq!(child.method("eval").unwrap().dotted_id, "jsexec.eval");
-            assert!(!child.hash.is_empty());
-            // A `Static` child is a node, not a document.
-            assert!(child.ir_hash.is_none());
-        }
-        other => panic!("expected Static, got {other:?}"),
+    {
+        let edge = ir.child("embedded").expect("static edge");
+        assert!(!edge.is_indexed() && !edge.is_lazy());
+        let child = edge.child().expect("an embedded subtree");
+        assert_eq!(child.namespace, "embedded");
+        assert_eq!(child.method("eval").unwrap().dotted_id, "jsexec.eval");
+        assert!(!child.hash.is_empty());
+        // An embedded child is a node, not a document.
+        assert!(child.ir_hash.is_none());
     }
 
-    match ir.child("session").expect("indexed edge") {
-        ChildEdge::Indexed {
+    {
+        let edge = ir.child("session").expect("indexed edge");
+        let ChildShape::Indexed {
             list_method,
             search_method,
             id_field,
             path_template,
-            template,
-            ..
-        } => {
-            assert_eq!(list_method, "claudecode.list");
-            assert!(search_method.is_none());
-            assert_eq!(id_field, "name");
-            assert_eq!(path_template, "session/{id}");
-            assert_eq!(template.namespace, "session");
-            assert!(template.method("chat").unwrap().is_streaming());
-        }
-        other => panic!("expected Indexed, got {other:?}"),
+        } = &edge.shape
+        else {
+            panic!("expected an indexed shape, got {:?}", edge.shape)
+        };
+        assert_eq!(list_method, "claudecode.list");
+        assert!(search_method.is_none());
+        assert_eq!(id_field, "name");
+        assert_eq!(path_template, "session/{id}");
+        let template = edge.child().expect("an embedded template");
+        assert_eq!(template.namespace, "session");
+        assert!(template.method("chat").unwrap().is_streaming());
     }
 
-    match ir.child("plugins").expect("dynamic edge") {
-        ChildEdge::Dynamic { namespace, .. } => assert_eq!(namespace, "plugins"),
-        other => panic!("expected Dynamic, got {other:?}"),
+    {
+        let edge = ir.child("plugins").expect("dynamic edge");
+        assert_eq!(edge.namespace, "plugins");
+        assert!(edge.is_lazy() && !edge.is_indexed());
     }
 }
 

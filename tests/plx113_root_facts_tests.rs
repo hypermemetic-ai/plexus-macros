@@ -118,11 +118,8 @@ impl Bare {
 fn static_child(ir: &ActivationIr) -> &ActivationIr {
     ir.children
         .iter()
-        .find_map(|e| match e {
-            ChildEdge::Static(c) => Some(c),
-            _ => None,
-        })
-        .expect("the fixture has a Static child edge")
+        .find_map(|e| if e.is_indexed() { None } else { e.child() })
+        .expect("the fixture has a single embedded child edge")
 }
 
 // ===========================================================================
