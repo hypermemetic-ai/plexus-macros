@@ -129,7 +129,7 @@ fn handler_entry(
             quote! {
                 let #name = #expr(&__auth_ctx).await.map_err(|e| {
                     #crate_path::runtime::TurnError::new(
-                        "plexus.execution_error",
+                        #crate_path::runtime::error::codes::EXECUTION_ERROR,
                         e.to_string(),
                     )
                 })?;
@@ -362,7 +362,7 @@ fn activation_extraction(
             let __req = <#req_ty as #crate_path::request::PlexusRequest>::extract(__raw_ctx)
                 .map_err(|e| {
                     #crate_path::runtime::TurnError::new(
-                        "plexus.execution_error",
+                        #crate_path::runtime::error::codes::EXECUTION_ERROR,
                         e.to_string(),
                     )
                 })?;
