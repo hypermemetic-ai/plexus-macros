@@ -436,6 +436,31 @@ pub struct HubMethodsAttrs {
     pub namespace: String,
     /// Explicit version string, or None to use CARGO_PKG_VERSION at compile time
     pub version: Option<String>,
+    /// PLX-113 / RFC 002 §3.3 — the document's **backend identity**.
+    ///
+    /// A *root fact*: it names the document, not the node. Declaring it is what
+    /// removes the separate identity probe §3.3 exists to remove, and its
+    /// absence is the §3.3 SHOULD advisory every macro-produced Connectome
+    /// carried before this attribute existed.
+    ///
+    /// Same spelling as `activation_ir!`'s `backend_name = "..."` — there is
+    /// deliberately no second vocabulary. It stays at the root by
+    /// construction: `ActivationIr::recompute_hashes` strips root facts from
+    /// every embedded child, so an activation that declares this and is then
+    /// embedded as a `#[child]` carries none of it in that position.
+    pub backend_name: Option<String>,
+    /// PLX-113 / RFC 002 §3.3 + §7.6 — the **reply-channel** method name.
+    ///
+    /// The name a client calls to answer a server-to-client request declared in
+    /// a method's callback set. §7.6: a consumer that cannot serve a declared
+    /// callback SHOULD be able to determine that *before invoking* rather than
+    /// discovering it mid-turn, and that is only possible if the reply channel
+    /// is a declared fact of the document instead of a hard-coded `respond`
+    /// convention on the client side.
+    ///
+    /// §3.3 promotes this from SHOULD to **MUST** exactly when some method in
+    /// the document declares a callback. Same spelling as `activation_ir!`.
+    pub respond_method: Option<String>,
     /// Short description (max 15 words)
     pub description: Option<String>,
     /// Long description (optional, for detailed documentation)
@@ -495,6 +520,27 @@ pub struct HubMethodsAttrs {
     pub auth_posture: Option<AuthPosture>,
 }
 
+/// PLX-113 — read a §3.3 root fact, refusing the empty spelling.
+///
+/// RFC 002 §3.5 makes "present but empty" not a value of an optional field, and
+/// the checker reports `backend_name is present but empty` / `respond_method is
+/// present but empty` as **MUST** violations. A declaration is either made or
+/// omitted; `= ""` is neither, so it is a compile error naming the clause.
+fn non_empty_root_fact(lit: &syn::LitStr, key: &str) -> syn::Result<String> {
+    let v = lit.value();
+    if v.is_empty() {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!(
+                "`{key} = \"\"` is not a declaration: RFC 002 §3.5 spells an absent \
+                 optional as ABSENCE, and a present-but-empty root fact is a MUST \
+                 violation. Give it a value or omit the argument entirely"
+            ),
+        ));
+    }
+    Ok(v)
+}
+
 /// RED-6: declared auth enforcement posture for an activation.
 /// See `HubMethodsAttrs::auth_posture` for semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -510,6 +556,8 @@ impl Parse for HubMethodsAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut namespace = String::new();
         let mut version: Option<String> = None;
+        let mut backend_name: Option<String> = None;
+        let mut respond_method: Option<String> = None;
         let mut description = None;
         let mut long_description = None;
         let mut crate_path: Option<String> = None;
@@ -550,6 +598,19 @@ impl Parse for HubMethodsAttrs {
                                 namespace = s.value();
                             } else if path.is_ident("version") {
                                 version = Some(s.value());
+                            } else if path.is_ident("backend_name") {
+                                // RFC 002 §3.5 — "an empty string is not a value
+                                // of an optional field": a decoder must treat a
+                                // present-but-empty optional as absent and an
+                                // encoder MUST NOT produce one. Emitting
+                                // `backend_name: ""` would trade the §3.3 SHOULD
+                                // advisory for a §3.5 MUST violation, which is
+                                // strictly worse, so the empty spelling is
+                                // rejected at the source rather than silently
+                                // normalized to absence.
+                                backend_name = Some(non_empty_root_fact(&s, "backend_name")?);
+                            } else if path.is_ident("respond_method") {
+                                respond_method = Some(non_empty_root_fact(&s, "respond_method")?);
                             } else if path.is_ident("description") {
                                 let desc = s.value();
                                 // Validate word count
@@ -641,6 +702,8 @@ impl Parse for HubMethodsAttrs {
         Ok(HubMethodsAttrs {
             namespace,
             version,
+            backend_name,
+            respond_method,
             description,
             long_description,
             crate_path,
