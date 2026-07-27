@@ -117,6 +117,7 @@ fn handler_entry(
     let method_name = &m.method_name;
 
     let auth_injection = auth_injection(m, crate_path);
+    let capability_client_binding = capability_client_binding(m, crate_path);
     let activation_extraction = activation_extraction(m, crate_path, request_type);
     let activation_param_bindings = activation_param_bindings(m, request_type);
     let resolver_bindings: Vec<TokenStream> = m
@@ -149,6 +150,7 @@ fn handler_entry(
                     let __turn = __input.turn;
                     let __params = __input.params;
                     #auth_injection
+                    #capability_client_binding
                     #activation_extraction
                     #(#activation_param_bindings)*
                     #(#resolver_bindings)*
@@ -410,6 +412,17 @@ fn call_args(m: &MethodInfo, param_names: &[&syn::Ident]) -> TokenStream {
     let resolver_names: Vec<&syn::Ident> =
         m.auth_resolvers.iter().map(|r| &r.param_name).collect();
 
+    // PLX-146: the capability handle goes back at the index the author wrote
+    // it, interleaved with the wire params rather than appended. It is bound by
+    // `capability_client_binding` above, so by this point it is just another
+    // ident in scope.
+    let mut param_names: Vec<&syn::Ident> = param_names.to_vec();
+    if let Some(cc) = &m.capability_client {
+        let at = cc.position.min(param_names.len());
+        param_names.insert(at, &cc.param_name);
+    }
+    let param_names = &param_names;
+
     if m.requires_auth && m.auth_resolvers.is_empty() {
         quote! { __auth_ctx, #(#param_names),* }
     } else if !m.activation_params.is_empty() && !m.auth_resolvers.is_empty() {
@@ -420,6 +433,35 @@ fn call_args(m: &MethodInfo, param_names: &[&syn::Ident]) -> TokenStream {
         quote! { #(#resolver_names,)* #(#param_names),* }
     } else {
         quote! { #(#param_names),* }
+    }
+}
+
+/// PLX-146: mint the method's capability handle off the live turn.
+///
+/// This is the second half of the blocker. `parse.rs` stopping the handle from
+/// being schema'd only gets as far as "the generated code no longer mentions
+/// it" — the method still *takes* one, so dispatch has to produce it.
+///
+/// `Turn<C>::client()` is the only minter in `plexus-core`, deliberately:
+/// `TurnContext` cannot mint a client at all, so a handler cannot call a
+/// capability its method never declared. That guarantee is preserved here
+/// rather than bypassed, because `C` is read straight out of the signature and
+/// **the same tokens** are what `ir_parse` emits as `MethodIr::callbacks`
+/// (`ir_parse/emit.rs`, `with_callbacks`). One signature, one `C`, two
+/// artifacts that cannot disagree — which is exactly the PLX-102 property, just
+/// held by the macro instead of by `DeclaredHandler`.
+fn capability_client_binding(m: &MethodInfo, crate_path: &syn::Path) -> TokenStream {
+    let Some(cc) = &m.capability_client else {
+        return quote! {};
+    };
+    let name = &cc.param_name;
+    let set = &cc.set_ty;
+    quote! {
+        let #name: #crate_path::capability::Client<#set> =
+            #crate_path::runtime::Turn::<#set>::__declared_by_macro(
+                ::std::clone::Clone::clone(&__turn)
+            )
+            .client::<#set>();
     }
 }
 

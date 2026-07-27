@@ -355,7 +355,7 @@ pub(crate) fn child_edge(namespace: &str, f: &ImplItemFn) -> syn::Result<ChildEd
 /// A `Client` written without its capability set is an error rather than an
 /// empty set: the whole point of the handle is that its type is the
 /// declaration, and an inferred one declares nothing.
-fn capability_handle_set(ty: &Type) -> syn::Result<Option<Type>> {
+pub(crate) fn capability_handle_set(ty: &Type) -> syn::Result<Option<Type>> {
     let inner = strip_refs(ty);
     let Type::Path(tp) = inner else {
         return Ok(None);

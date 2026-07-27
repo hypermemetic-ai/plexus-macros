@@ -1400,6 +1400,19 @@ pub struct MethodInfo {
     pub method_name: String,
     pub description: String,
     pub params: Vec<ParamInfo>,
+    /// PLX-146: the method's capability-client handle, if it takes one.
+    ///
+    /// `Some` when the signature has a `client: Client<C>` parameter. It is a
+    /// *handle*, not a wire parameter — it is never pushed onto
+    /// [`Self::params`], so it reaches neither the JSON-schema surface nor the
+    /// method hash preimage, exactly as `ir_parse` already treats it.
+    ///
+    /// Before this existed, `parse.rs` had no branch for it and fell through to
+    /// the wire-parameter tail, which made a generated method taking a client
+    /// fail to compile with `Client<C>: Serialize is not satisfied` — while
+    /// `ir_parse/signature.rs` stripped it correctly, so reading the IR parser
+    /// alone said the feature worked.
+    pub capability_client: Option<CapabilityClientInfo>,
     /// Return type - reserved for future protocol schema generation
     #[allow(dead_code)]
     pub return_type: Type,
@@ -1474,6 +1487,25 @@ pub struct MethodInfo {
     pub extensions: Vec<(String, serde_json::Value)>,
 }
 
+/// PLX-146: a method's `client: Client<C>` capability handle.
+#[derive(Debug, Clone)]
+pub struct CapabilityClientInfo {
+    /// The binding the author wrote, so the generated call passes the handle
+    /// under the name the method body expects.
+    pub param_name: syn::Ident,
+    /// The capability set `C`, verbatim. These are the **same tokens**
+    /// `ir_parse` turns into `MethodIr::callbacks`, which is what keeps the
+    /// minted handle and the declared callbacks from disagreeing.
+    pub set_ty: syn::Type,
+    /// How many wire parameters preceded the handle in the signature.
+    ///
+    /// `call_args` is positional, so the handle has to go back exactly where
+    /// the author put it: `(text, client)` and `(client, text)` are different
+    /// calls, and appending would silently compile the wrong one whenever the
+    /// two types happened to unify.
+    pub position: usize,
+}
+
 impl MethodInfo {
     /// Extract method info from an impl function with optional hub_method attrs
     pub fn from_fn(method: &ImplItemFn, hub_method_attrs: Option<&HubMethodAttrs>) -> syn::Result<Self> {
@@ -1522,6 +1554,8 @@ impl MethodInfo {
         let mut auth_optional = false;
         let mut auth_resolvers: Vec<AuthResolver> = Vec::new();
         let mut activation_params: Vec<ActivationParamInfo> = Vec::new();
+        // PLX-146: the capability handle, stripped rather than schema'd.
+        let mut capability_client: Option<CapabilityClientInfo> = None;
 
         // Extract parameters after &self
         let mut params = Vec::new();
@@ -1580,6 +1614,35 @@ impl MethodInfo {
                             // Don't include ctx in params (it's provided by framework)
                             continue;
                         }
+                    }
+
+                    // PLX-146: the capability handle is a handle, not a wire
+                    // parameter.
+                    //
+                    // Gated on the *type*, not on the binding name — unlike the
+                    // `auth` and `ctx` branches above, which are name-gated for
+                    // historical reasons. This deliberately reuses
+                    // `ir_parse::signature::capability_handle_set`, the predicate
+                    // the IR parser already applies to the same signature, so the
+                    // two parsers cannot drift about what counts as a handle and
+                    // the "must name its capability set" diagnostics are emitted
+                    // once, in one place.
+                    if let Some(set_ty) =
+                        crate::ir_parse::signature::capability_handle_set(&pat_type.ty)?
+                    {
+                        if capability_client.is_some() {
+                            return Err(syn::Error::new(
+                                pat_type.ty.span(),
+                                "a method may take at most one capability handle; merge the \
+                                 capability sets into one `Client<(..)>`",
+                            ));
+                        }
+                        capability_client = Some(CapabilityClientInfo {
+                            param_name: name,
+                            set_ty,
+                            position: params.len(),
+                        });
+                        continue;
                     }
 
                     // Param description precedence:
@@ -1682,6 +1745,7 @@ impl MethodInfo {
             method_name,
             description,
             params,
+            capability_client,
             return_type,
             stream_item_type,
             dispatch,
