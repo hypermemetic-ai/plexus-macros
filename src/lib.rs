@@ -81,6 +81,11 @@ mod ir_parse;
 mod parse;
 mod request;
 
+/// PLX-93 / M1-T3 — the sealed-seam assertion, run against the real
+/// `#[activation]` expansion. Test-only.
+#[cfg(test)]
+mod plx93_seam_tests;
+
 
 use codegen::generate_all;
 use parse::HubMethodsAttrs;

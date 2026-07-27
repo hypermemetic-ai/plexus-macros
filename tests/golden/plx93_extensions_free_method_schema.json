@@ -1,0 +1,16 @@
+{
+  "name": "ping",
+  "description": "Say pong.",
+  "hash": "f41dc66cbc06af8c",
+  "returns": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "string",
+    "type": "string"
+  },
+  "streaming": false,
+  "bidirectional": false,
+  "http_method": "POST",
+  "role": {
+    "kind": "rpc"
+  }
+}
