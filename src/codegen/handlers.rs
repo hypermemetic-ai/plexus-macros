@@ -196,18 +196,34 @@ fn handler_entry(
 /// crate takes (`ir_parse/signature.rs`: "an inferred set declares nothing").
 /// `E = TurnError` itself needs no impl at all.
 ///
-/// # What this does NOT deliver: RFC 002 §6.6 `Refused`
+/// # RFC 002 §6.6 `Refused` — closed by PLX-112
 ///
-/// §6.6 says a considered "no" is `Refused` and MUST NOT be conflated with
-/// `Failed`. This arm cannot produce `Refused`, because `TurnError::into_stop_reason`
-/// hardcodes `StopReason::failed` and `plexus-core` is read-only for this
-/// ticket. Note carefully that this is **not** the §6.6 conflation: nothing
-/// here maps a refusal onto `Failed`. It makes `Err` *mean* `Failed`, and
-/// leaves a considered "no" with no spelling — which is exactly the situation
-/// the streaming arm has always been in (no generated handler in this crate has
-/// ever been able to emit `TurnOutcome::Refused`, before or after PLX-110).
-/// Closing it is a `plexus-core` API question, filed as a finding rather than
-/// invented here per this ticket's "Risks and non-changes".
+/// PLX-110 left this arm unable to say `Refused` at all: the only channel out
+/// of the error position was a `TurnError`, and `TurnError::into_stop_reason`
+/// is `StopKind::Failed` by construction. That was never the §6.6 *conflation*
+/// (nothing mapped a refusal onto `Failed`) — a considered "no" simply had no
+/// spelling.
+///
+/// PLX-112 gives it one. The `Err` arm now goes through
+/// `plexus_core::runtime::IntoTurnStop`, whose blanket impl covers every
+/// `E: Into<TurnError>` and yields `TurnStop::Failed` — so **PLX-110's bound and
+/// behaviour are unchanged and `Failed` remains the default**. An author who
+/// means `Refused` (or `Limited`) implements `IntoTurnStop` for their error type
+/// instead of `From<_> for TurnError`, and the two are mutually exclusive by
+/// coherence (E0119) rather than by a silent precedence rule.
+///
+/// **The macro still guesses nothing.** It names no kind, inspects no type and
+/// reads no attribute; it emits one fully-qualified trait call and the author's
+/// own impl decides. `TurnStop::into_handler_result` then routes `Failed` to the
+/// closure's `Err` half and the non-error kinds to `TurnOutcome::Refused` /
+/// `TurnOutcome::Limited` on the `Ok` half — which is what keeps RFC 002 §6.7.1
+/// ("a terminal whose kind is not Failed MUST NOT carry a structured error")
+/// true by construction, since only the `Err` half is ever rendered through
+/// `TurnError::into_stop_reason`.
+///
+/// `Cancelled` is deliberately **not** reachable this way: §6.8 makes
+/// cancellation cooperative and the signal is the runtime's to deliver, so an
+/// `Err` may not claim it. See `TurnStop`'s own docs.
 fn handler_body(
     m: &MethodInfo,
     crate_path: &syn::Path,
@@ -234,9 +250,15 @@ fn handler_body(
         )
     };
 
-    // `E -> TurnError`, spelled fully so no `Into` in scope can shadow it.
-    let into_turn_error = quote! {
-        ::core::convert::Into::<#crate_path::runtime::TurnError>::into(__e)
+    // PLX-112: `E -> TurnStop -> Result<TurnOutcome, TurnError>`, spelled as a
+    // fully-qualified trait call so nothing in scope can shadow it and no
+    // inherent method can be picked up by accident. The author's `IntoTurnStop`
+    // impl — or the blanket one over `E: Into<TurnError>`, which is PLX-110's
+    // `Failed` default — decides the kind. The macro decides nothing.
+    let err_arm = quote! {
+        #crate_path::runtime::TurnStop::into_handler_result(
+            #crate_path::runtime::IntoTurnStop::into_turn_stop(__e)
+        )
     };
 
     match m.dispatch {
@@ -253,7 +275,7 @@ fn handler_body(
             let __stream = match __me.#fn_name(#call_args).await {
                 ::core::result::Result::Ok(__s) => __s,
                 ::core::result::Result::Err(__e) => {
-                    return ::core::result::Result::Err(#into_turn_error);
+                    return #err_arm;
                 }
             };
 
@@ -266,9 +288,7 @@ fn handler_body(
                 ::core::result::Result::Ok(__v) => {
                     #crate_path::runtime::TurnOutcome::serialize(&__v)
                 }
-                ::core::result::Result::Err(__e) => {
-                    ::core::result::Result::Err(#into_turn_error)
-                }
+                ::core::result::Result::Err(__e) => #err_arm,
             }
         },
 
@@ -282,9 +302,7 @@ fn handler_body(
                 ::core::result::Result::Ok(_) => ::core::result::Result::Ok(
                     #crate_path::runtime::TurnOutcome::complete()
                 ),
-                ::core::result::Result::Err(__e) => {
-                    ::core::result::Result::Err(#into_turn_error)
-                }
+                ::core::result::Result::Err(__e) => #err_arm,
             }
         },
     }

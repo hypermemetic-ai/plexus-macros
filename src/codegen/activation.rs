@@ -988,15 +988,39 @@ fn generate_rpc_impl_methods(
             // the Ok path.
             let wrapped_stream = {
                 use crate::ir_parse::signature::DispatchShape;
+                // PLX-112: this site goes through `IntoTurnStop` too, for the
+                // same reason PLX-110 had to touch it at all — a refusal type
+                // that only implements `IntoTurnStop` does not satisfy
+                // `Into<TurnError>`, so fixing only `handlers.rs` would have
+                // made the whole activation fail to compile. The macro still
+                // guesses nothing here: it delegates to the same trait.
+                //
+                // This surface has no terminal and therefore no `StopReason`,
+                // so it cannot express the kind at all — a `Refused` arrives as
+                // one Data item carrying the `StopDetail`, exactly as a
+                // `Failed` arrives as one Data item carrying the `TurnError`.
+                // That is the *same* pre-existing lossiness PLX-110 recorded
+                // for the error arm, not a new one, and it is why the turn
+                // projection is the surface the RFC constrains.
                 let once_err = quote! {
                     ::core::result::Result::Err(__e) => {
-                        let __te: #crate_path::runtime::TurnError =
-                            ::core::convert::Into::into(__e);
-                        #crate_path::plexus::wrap_stream(
-                            #deps::futures::stream::once(async move { __te }),
-                            #content_type,
-                            vec![#namespace.into()]
-                        )
+                        match #crate_path::runtime::IntoTurnStop::into_turn_stop(__e) {
+                            #crate_path::runtime::TurnStop::Failed(__te) => {
+                                #crate_path::plexus::wrap_stream(
+                                    #deps::futures::stream::once(async move { __te }),
+                                    #content_type,
+                                    vec![#namespace.into()]
+                                )
+                            }
+                            #crate_path::runtime::TurnStop::Refused(__d)
+                            | #crate_path::runtime::TurnStop::Limited(__d) => {
+                                #crate_path::plexus::wrap_stream(
+                                    #deps::futures::stream::once(async move { __d }),
+                                    #content_type,
+                                    vec![#namespace.into()]
+                                )
+                            }
+                        }
                     }
                 };
                 match m.dispatch {
