@@ -62,7 +62,7 @@ pub fn generate(
     // path is the opposite of a silent semantic change.
     let dispatch_arms = generate_bidir_arms(methods, namespace, crate_path, request_type, deps);
     let help_arms = generate_help_arms(methods);
-    let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && m.activation_params.is_empty());
+    let has_public_rpc_methods = methods.iter().any(|m| on_legacy_rpc_surface(m));
     let rpc_trait_methods = generate_rpc_trait_methods(methods, deps);
     let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path, deps);
 
@@ -719,6 +719,31 @@ pub fn generate(
             #activation_ir_fns
 
             #handler_table_fn
+
+            /// PLX-146: this activation's live turns, so a callback it issues
+            /// can actually be answered.
+            ///
+            /// `call_arc` used to pass `live: None` to
+            /// `turn_stream_to_plexus_stream`, which dropped the turn's
+            /// `TurnControl` on the floor. The callback was still projected
+            /// onto the wire as a `PlexusStreamItem::Request`, so from the
+            /// outside it looked like the mechanism worked — but nothing held a
+            /// control keyed by turn id, so no answer could ever be routed back
+            /// and the handler's `client.*_async(..).await` never resolved.
+            /// A generated activation could declare a callback and could never
+            /// answer one.
+            ///
+            /// The registry is keyed by `TurnId`, which is a v4 UUID, so the
+            /// `static` being per-monomorphization rather than per-instance
+            /// cannot collide across activations. Entries are removed by the
+            /// projection's terminal arm, so a resolved turn does not leak.
+            #[doc(hidden)]
+            #[allow(dead_code)]
+            pub fn __plexus_live_turns() -> &'static #crate_path::runtime::LiveTurns {
+                static __LIVE: ::std::sync::OnceLock<#crate_path::runtime::LiveTurns>
+                    = ::std::sync::OnceLock::new();
+                __LIVE.get_or_init(#crate_path::runtime::LiveTurns::new)
+            }
         }
 
         #rpc_block
@@ -834,11 +859,17 @@ pub fn generate(
                     let __handle = #crate_path::runtime::entry_with_state(
                         __ir, &__handlers, self, __request,
                     )?;
+                    // PLX-146: register BEFORE the stream is handed back. The
+                    // callback event can be observed by the peer as soon as the
+                    // stream is polled, so a control registered afterwards
+                    // would race a fast responder.
+                    let __live = Self::__plexus_live_turns();
+                    __live.register(&__handle);
                     return Ok(#crate_path::runtime::turn_stream_to_plexus_stream(
                         __dotted,
                         ::std::vec![#namespace.to_string()],
                         __handle,
-                        ::core::option::Option::None,
+                        ::core::option::Option::Some(::std::clone::Clone::clone(__live)),
                     ));
                 }
                 <Self as #crate_path::plexus::Activation>::call(
@@ -859,13 +890,34 @@ pub fn generate(
     }
 }
 
+/// Whether a method appears on the legacy jsonrpsee surface.
+///
+/// This predicate had **three** copies — the `has_public_rpc_methods` guard,
+/// the trait's method declarations, and the impl's method bodies — which is
+/// exactly one copy per place PLX-146 had to change it, and the reason the
+/// first attempt compiled the impl but not the trait (`E0046: not all trait
+/// items implemented`). It is one function now, so the three cannot drift.
+///
+/// Excluded, all for the same reason — the legacy surface has no turn behind
+/// it, so it cannot supply what the method needs, and `Activation::call`'s `_`
+/// arm routes the caller to `call_arc` by name:
+///
+/// - `requires_auth`: no `AuthContext` here.
+/// - `activation_params`: no request struct to extract from here.
+/// - `capability_client` (PLX-146): no `TurnContext` to mint a `Client<C>`
+///   from. An `unwired()` handle would compile and then fail at runtime on the
+///   first callback with `CallbackError::NotWired`; routing is honest instead.
+fn on_legacy_rpc_surface(m: &MethodInfo) -> bool {
+    !m.requires_auth && m.activation_params.is_empty() && m.capability_client.is_none()
+}
+
 fn generate_rpc_trait_methods(methods: &[MethodInfo], deps: &syn::Ident) -> Vec<TokenStream> {
     methods
         .iter()
         // Auth-requiring methods and methods with activation_params are dispatched through
         // Activation::call() which handles auth injection and request extraction.
         // The jsonrpsee RPC trait cannot carry auth context or raw_ctx.
-        .filter(|m| !m.requires_auth && m.activation_params.is_empty())
+        .filter(|m| on_legacy_rpc_surface(m))
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -902,8 +954,7 @@ fn generate_rpc_impl_methods(
 
     methods
         .iter()
-        // Skip auth-requiring methods and activation_param methods — they route through Activation::call()
-        .filter(|m| !m.requires_auth && m.activation_params.is_empty())
+        .filter(|m| on_legacy_rpc_surface(m))
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
