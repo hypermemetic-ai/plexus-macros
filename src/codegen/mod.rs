@@ -946,8 +946,16 @@ fn children_arg_deprecation_warning(
 /// to an auth'd activation and forgot the annotation.
 ///
 /// Suppression mechanisms:
-/// - Activation declares `auth_posture = "mixed"` (intentional)
+/// - Activation declares `auth = "mixed"` (intentional)
 /// - Each non-auth method carries `#[plexus_macros::method(public)]`
+///
+/// PLX-147: this note used to say `auth_posture = "mixed"`, which is the name of
+/// the *field* on `HubMethodsAttrs` and not the name of the *attribute key*. The
+/// parser reads `auth`, and until PLX-147 an unknown `#[activation(...)]` key
+/// was dropped without a word — so every author who followed this diagnostic
+/// wrote a declaration that did nothing, and the warning kept firing. Five sites
+/// (plexus-idp `identity`, plexus-trak `identity`/`facet`/`discuss`/`docs`)
+/// carried the dead spelling. The key is `auth`.
 ///
 /// Uses the same dummy-deprecated-const pattern as the IR-5 warnings.
 fn mixed_auth_warning(
@@ -977,7 +985,7 @@ fn mixed_auth_warning(
     let note = format!(
         "plexus-macros (RED-2): activation `{}` mixes auth and non-auth \
          methods. The following methods do NOT have `#[from_auth(...)]`: {}. \
-         If this is intentional, add `auth_posture = \"mixed\"` to the \
+         If this is intentional, add `auth = \"mixed\"` to the \
          activation attribute, or `#[plexus_macros::method(public)]` to each \
          intentionally-public method. Otherwise, the missing methods will \
          dispatch unauthenticated.",

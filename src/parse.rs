@@ -541,6 +541,122 @@ fn non_empty_root_fact(lit: &syn::LitStr, key: &str) -> syn::Result<String> {
     Ok(v)
 }
 
+/// PLX-147 — every argument `#[activation(...)]` recognizes, in the order the
+/// error message lists them.
+///
+/// PLX-93 closed the unknown-key trap for `#[method(...)]`
+/// (`ir_parse::attrs::ALLOWED_KEYS`) and it was never closed one level up:
+/// `HubMethodsAttrs::parse` matched the keys it knew and dropped the rest
+/// without a word, so `#[activation(bakcend_name = "oops")]` compiled clean and
+/// declared nothing. This list is the allowlist that makes that class a compile
+/// error. It is deliberately NOT `LEGACY_ONLY_KEYS` — that allowlist governs
+/// `#[method(...)]` keys and is a different parser.
+pub(crate) const ACTIVATION_KEYS: &[&str] = &[
+    "auth",
+    "backend_name",
+    "children",
+    "crate_path",
+    "description",
+    "hub",
+    "long_description",
+    "namespace",
+    "namespace_fn",
+    "plugin_id",
+    "request",
+    "required",
+    "resolve_handle",
+    "respond_method",
+    "version",
+];
+
+/// PLX-147 — keys that are near-misses for a real one, with where to go.
+///
+/// `auth_posture` is here because it was not a typo anyone invented: the
+/// **macro's own RED-2 diagnostic** told authors to "add `auth_posture =
+/// \"mixed\"` to the activation attribute" (see
+/// `codegen::mod::mixed_auth_warning`) while the parser has always read `auth`.
+/// The field on this struct is *named* `auth_posture`, the attribute key is
+/// `auth`, and the gap between them silently disarmed five real declarations
+/// across plexus-idp and plexus-trak. The diagnostic is corrected alongside
+/// this; the misspelling gets a named error rather than a silent alias, so
+/// there stays exactly one spelling for an authorization declaration.
+fn activation_key_hint(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "auth_posture" | "auth_mode" | "posture" => {
+            "the key is `auth`, not `auth_posture` — e.g. `auth = \"mixed\"`. \
+             Accepted values: \"required\", \"optional\", \"mixed\", \"none\". \
+             This spelling was suggested by an incorrect RED-2 diagnostic and \
+             never declared anything"
+        }
+        "backend" | "backend_id" => "the RFC 002 §3.3 root fact is `backend_name = \"...\"`",
+        "respond" | "reply_method" => {
+            "the RFC 002 §3.3/§7.6 root fact is `respond_method = \"...\"`"
+        }
+        "name" | "ns" => "the activation's namespace key is `namespace = \"...\"`",
+        "desc" | "doc" => {
+            "the key is `description = \"...\"` (max 15 words); longer prose goes \
+             in `long_description = \"...\"`"
+        }
+        "child" => {
+            "the key is `children(a, b)` / `children = [a, b]`, deprecated in \
+             favour of `#[plexus_macros::child]` accessor methods"
+        }
+        _ => return None,
+    })
+}
+
+/// PLX-147 — the unknown-key error, shaped like the one `#[method(...)]` gives.
+fn unknown_activation_key(span: proc_macro2::Span, key: &str) -> syn::Error {
+    let message = match activation_key_hint(key) {
+        Some(hint) => format!("unknown `#[activation(...)]` key `{key}`: {hint}"),
+        None => format!(
+            "unknown `#[activation(...)]` key `{key}`. Accepted: {}. Unknown keys \
+             are errors by design — before PLX-147 this argument was silently \
+             dropped, so a typo produced an activation that declared nothing \
+             while its source read as though it did",
+            ACTIVATION_KEYS.join(", "),
+        ),
+    };
+    syn::Error::new(span, message)
+}
+
+/// PLX-147 — a recognized key used in a form this parser does not read.
+///
+/// Before PLX-147 a known key in the wrong shape fell through the same crack an
+/// unknown key did: `auth = mixed` (no quotes) or `hub = true` matched no arm
+/// and was dropped just as silently. Naming the key AND the form it needs closes
+/// the second half of the class.
+fn wrong_form_activation_key(span: proc_macro2::Span, key: &str, wanted: &str) -> syn::Error {
+    syn::Error::new(
+        span,
+        format!(
+            "`#[activation(...)]` key `{key}` must be written as {wanted}. It was \
+             silently ignored before PLX-147"
+        ),
+    )
+}
+
+/// PLX-147 — read the `= [a, b]` spelling of `children` / `required`.
+///
+/// The `Meta::List` spelling (`children(a, b)`) is the one the parser has always
+/// implemented; the `= [...]` spelling is the one every doc comment, deprecation
+/// message and ticket uses (`lib.rs`, `codegen::mod`'s REQ-10 error, IR-5's
+/// warning text, `tests/compile/ir5_children_arg_compiles.rs`). They were never
+/// the same thing: the array form matched no arm, so `children = [inner]` left
+/// `children` EMPTY and `children_span` unset — which also meant the IR-5
+/// deprecation warning for `children` could never fire for the very spelling
+/// that warning advertises. Both spellings are now read.
+fn ident_list_from_array(value: &Expr) -> Option<Vec<syn::Ident>> {
+    let Expr::Array(arr) = value else { return None };
+    arr.elems
+        .iter()
+        .map(|e| match e {
+            Expr::Path(ExprPath { path, .. }) => path.get_ident().cloned(),
+            _ => None,
+        })
+        .collect()
+}
+
 /// RED-6: declared auth enforcement posture for an activation.
 /// See `HubMethodsAttrs::auth_posture` for semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -579,6 +695,23 @@ impl Parse for HubMethodsAttrs {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
 
             for meta in metas {
+                // PLX-147: reject an unrecognized key BEFORE any arm can drop
+                // it. `#[method(...)]` has done this since PLX-93; one level up
+                // the same trap stayed open and disarmed five real `auth`
+                // declarations. Non-ident paths (`a::b = "x"`) are keyed by
+                // their token text so the message can still name them.
+                let key_span = meta.path().span();
+                let key = meta
+                    .path()
+                    .get_ident()
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| {
+                        quote::ToTokens::to_token_stream(meta.path()).to_string()
+                    });
+                if !ACTIVATION_KEYS.contains(&key.as_str()) {
+                    return Err(unknown_activation_key(key_span, &key));
+                }
+
                 match meta {
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
                         // Handle `request = SomeType` — value is a path/type expression,
@@ -593,7 +726,39 @@ impl Parse for HubMethodsAttrs {
                             continue;
                         }
 
-                        if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
+                        // PLX-147: `children = [a, b]` / `required = [a, b]` —
+                        // the spelling every doc comment and deprecation
+                        // message uses, which until now matched no arm at all.
+                        if path.is_ident("children") || path.is_ident("required") {
+                            let Some(idents) = ident_list_from_array(&value) else {
+                                return Err(wrong_form_activation_key(
+                                    key_span,
+                                    &key,
+                                    "a list of plain field idents, either \
+                                     `KEY(a, b)` or `KEY = [a, b]`",
+                                ));
+                            };
+                            if path.is_ident("children") {
+                                children = idents;
+                                children_span = Some(path.span());
+                            } else {
+                                required_fields = idents;
+                                required_fields_span = Some(path.span());
+                            }
+                            continue;
+                        }
+
+                        // PLX-147: every remaining accepted NameValue key takes
+                        // a string literal. Anything else (`auth = mixed`,
+                        // `version = 1`) was dropped silently before.
+                        let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value else {
+                            return Err(wrong_form_activation_key(
+                                key_span,
+                                &key,
+                                "a string literal, e.g. `auth = \"mixed\"`",
+                            ));
+                        };
+                        {
                             if path.is_ident("namespace") {
                                 namespace = s.value();
                             } else if path.is_ident("version") {
@@ -659,6 +824,17 @@ impl Parse for HubMethodsAttrs {
                                         ),
                                     )),
                                 };
+                            } else {
+                                // PLX-147: `hub` and `resolve_handle` are the
+                                // only remaining accepted keys, and both are
+                                // bare flags. `hub = "true"` used to be
+                                // accepted-and-dropped, which is exactly the
+                                // shape this ticket exists to close.
+                                return Err(wrong_form_activation_key(
+                                    key_span,
+                                    &key,
+                                    "a bare flag with no value, e.g. `hub`",
+                                ));
                             }
                         }
                     }
@@ -669,6 +845,16 @@ impl Parse for HubMethodsAttrs {
                         } else if path.is_ident("hub") {
                             hub = true;
                             hub_span = Some(path.span());
+                        } else {
+                            // PLX-147: an accepted key written as a bare flag
+                            // when it needs a value — `#[activation(namespace)]`
+                            // used to compile and then fail the emptiness check
+                            // below with a message about a missing argument.
+                            return Err(wrong_form_activation_key(
+                                key_span,
+                                &key,
+                                "a key with a value, e.g. `namespace = \"my_ns\"`",
+                            ));
                         }
                     }
                     Meta::List(list) => {
@@ -686,6 +872,14 @@ impl Parse for HubMethodsAttrs {
                             let idents = syn::parse::Parser::parse2(parser, list.tokens.clone())?;
                             required_fields = idents.into_iter().collect();
                             required_fields_span = Some(list.path.span());
+                        } else {
+                            // PLX-147: an accepted key in call form when it is
+                            // not a list key — `description("...")` and friends.
+                            return Err(wrong_form_activation_key(
+                                key_span,
+                                &key,
+                                "a key with a value, e.g. `description = \"...\"`",
+                            ));
                         }
                     }
                 }

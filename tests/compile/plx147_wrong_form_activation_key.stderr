@@ -1,0 +1,19 @@
+error: `#[activation(...)]` key `auth` must be written as a string literal, e.g. `auth = "mixed"`. It was silently ignored before PLX-147
+  --> tests/compile/plx147_wrong_form_activation_key.rs:19:5
+   |
+19 |     auth = mixed
+   |     ^^^^
+
+warning: unused import: `async_stream::stream`
+ --> tests/compile/plx147_wrong_form_activation_key.rs:9:5
+  |
+9 | use async_stream::stream;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `futures::stream::Stream`
+  --> tests/compile/plx147_wrong_form_activation_key.rs:10:5
+   |
+10 | use futures::stream::Stream;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
