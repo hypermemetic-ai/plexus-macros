@@ -1,0 +1,21 @@
+error: unknown `#[acp_agent(...)]` key `auth_methods`: `InitializeResponse.authMethods` is not declared here. Implement `authenticate` and provide `fn acp_auth_methods() -> Vec<AuthMethod>` in a separate inherent impl; the generated `initialize` calls it only when `authenticate` is implemented, so auth methods cannot be advertised without the method that services them
+  --> tests/compile/plx136_auth_methods_key.rs:10:28
+   |
+10 | #[plexus_macros::acp_agent(auth_methods = "api-key")]
+   |                            ^^^^^^^^^^^^
+
+warning: unused imports: `CancelNotification`, `NewSessionRequest`, `NewSessionResponse`, `PromptRequest`, `PromptResponse`, and `StopReason`
+ --> tests/compile/plx136_auth_methods_key.rs:3:5
+  |
+3 |     CancelNotification, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+  |     ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+4 |     StopReason,
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `plexus_acp::v1::Result`
+ --> tests/compile/plx136_auth_methods_key.rs:6:5
+  |
+6 | use plexus_acp::v1::Result;
+  |     ^^^^^^^^^^^^^^^^^^^^^^

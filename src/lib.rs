@@ -50,6 +50,7 @@
 //! | Macro | Purpose |
 //! |---|---|
 //! | `#[plexus_macros::activation]` | Turn an `impl` block into a Plexus RPC activation. |
+//! | `#[plexus_macros::acp_agent]` | Turn an `impl` block into an ACP v1 agent, with `AgentCapabilities` derived from what it implements. |
 //! | `#[plexus_macros::method]` | Mark a method as an RPC endpoint. |
 //! | `#[plexus_macros::child]` | Register a child activation for `ChildRouter` dispatch. |
 //! | `#[plexus_macros::removed_in]` | Companion to `#[deprecated]` carrying the removal version. |
@@ -75,6 +76,7 @@
 //! environment variable populated from `Cargo.toml`'s dependency pin
 //! (see `plexus-rpc/build.rs`).
 
+mod acp_agent;
 mod codegen;
 mod handle_enum;
 mod ir_parse;
@@ -510,6 +512,80 @@ pub fn activation(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
     activation(attr, item)
+}
+
+/// PLX-136 (ACP·B) — impose `plexus_acp::v1::Agent`, and derive the
+/// capabilities from what you implemented.
+///
+/// Put it on an **inherent** `impl` block whose items are ACP v1 methods. The
+/// macro moves those bodies aside and emits
+/// `impl plexus_acp::v1::Agent for T` in their place, so:
+///
+/// - a misspelled item is `E0407`, with the expected signature printed;
+/// - a missing required item is `E0046`, with the whole surface enumerated;
+/// - `initialize` is **generated**, and writing one yourself is a compile
+///   error — it is the only thing that could return a hand-written
+///   `AgentCapabilities`.
+///
+/// # Advertising and implementing are one act
+///
+/// `AgentCapabilities` is derived from the idents in the block, through
+/// `plexus_acp::v1::derive_agent_capabilities`. There is no attribute key
+/// that declares a capability and no method body that could return one, so
+/// `loadSession: true` without a `load_session` impl is not a state this
+/// macro can produce — and a `load_session` impl that is never advertised is
+/// not one either.
+///
+/// PLX-135 established that this is three sites, not one:
+///
+/// | site | what it advertises | how it is discharged |
+/// |---|---|---|
+/// | `InitializeResponse.agentCapabilities` | seven optional items | derived; the generated `initialize` is the only writer |
+/// | `NewSessionResponse.modes` / `.configOptions` | `set_session_mode`, `set_session_config_option` | checked both ways in the generated `new_session` wrapper |
+/// | `InitializeResponse.authMethods` | `authenticate` | `Self::acp_auth_methods()` is called **iff** `authenticate` is implemented; an empty list is an error |
+///
+/// # Keys
+///
+/// `acp_path`, `name`, `version` — and nothing else. `name` and `version`
+/// populate `agentInfo` (identity, not capability) and must be given
+/// together. Every capability-shaped key is a compile error naming the impl
+/// to write instead.
+///
+/// # Example
+///
+/// ```ignore
+/// use plexus_acp::v1::schema::*;
+/// use plexus_acp::v1::Result;
+///
+/// pub struct MyAgent;
+///
+/// #[plexus_macros::acp_agent(name = "my-agent", version = "0.1.0")]
+/// impl MyAgent {
+///     async fn new_session(&self, _r: NewSessionRequest) -> Result<NewSessionResponse> {
+///         Ok(NewSessionResponse::new("s-1"))
+///     }
+///     async fn prompt(&self, _r: PromptRequest) -> Result<PromptResponse> {
+///         Ok(PromptResponse::new(StopReason::EndTurn))
+///     }
+///     async fn cancel(&self, _n: CancelNotification) -> Result<()> {
+///         Ok(())
+///     }
+///     // Implementing this — and only implementing it — advertises
+///     // `agentCapabilities.loadSession`.
+///     async fn load_session(&self, _r: LoadSessionRequest) -> Result<LoadSessionResponse> {
+///         Ok(LoadSessionResponse::new())
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn acp_agent(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as acp_agent::AcpAgentAttrs);
+    let input_impl = parse_macro_input!(item as ItemImpl);
+
+    match acp_agent::generate(&args, input_impl) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
 }
 
 /// Derive macro for type-safe handle creation and parsing.

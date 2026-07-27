@@ -1,0 +1,10 @@
+error[E0599]: no function or associated item named `acp_auth_methods` found for struct `Agent0` in the current scope
+  --> tests/compile/plx136_authenticate_without_auth_methods.rs:17:1
+   |
+15 | pub struct Agent0;
+   | ----------------- function or associated item `acp_auth_methods` not found for this struct
+16 |
+17 | #[plexus_macros::acp_agent]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `Agent0`
+   |
+   = note: this error originates in the attribute macro `plexus_macros::acp_agent` (in Nightly builds, run with -Z macro-backtrace for more info)
