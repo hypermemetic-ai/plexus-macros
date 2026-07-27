@@ -450,10 +450,37 @@ fn generate_schema_fn(
 ///   because §7.6 requires a consumer to be able to tell *before invoking*
 ///   whether it can serve one. Same spelling as `activation_ir!`.
 ///
+/// - `auth = "required" | "optional" | "mixed" | "none"` (optional) — RED-6
+///   declared authorization posture, stamped into every generated
+///   `MethodSchema.auth_posture`. **The key is `auth`.** It is not
+///   `auth_posture`; that is the name of the parsed field, and writing it as a
+///   key is a compile error (PLX-147).
+/// - `resolve_handle`, `hub` — bare flags, no value.
+/// - `children(a, b)` / `children = [a, b]` — deprecated child field list; use
+///   `#[plexus_macros::child]` accessor methods instead.
+/// - `required(a, b)` / `required = [a, b]` — REQ-10 activation-level lock list.
+/// - `request = SomeType` — activation-level request type.
+///
 /// Both root facts belong to the *document*, not the node: `recompute_hashes`
 /// strips them from every embedded child (§3.3), and §4.6 keeps them out of the
 /// activation preimage, so declaring them changes no activation or method hash.
 /// Neither may be the empty string (§3.5).
+///
+/// # Unknown arguments are compile errors (PLX-147)
+///
+/// An argument that is not on the list above is an error naming the key and
+/// listing the accepted set — the same posture `#[method(...)]` has had since
+/// PLX-93. So is a recognized key written in a form the parser does not read
+/// (`auth = mixed` without quotes, `hub = true`).
+///
+/// This was not free strictness. The parser previously matched the keys it knew
+/// and dropped the rest in silence, so `#[activation(bakcend_name = "oops")]`
+/// compiled clean and declared nothing. A fleet census found five live
+/// casualties of exactly that: `plexus-idp`'s `identity` hub and four
+/// `plexus-trak` hubs all wrote `auth_posture = "mixed"`, so none of them had
+/// any declared authorization posture while every one of them read as though it
+/// did. The spelling came from this crate's own RED-2 diagnostic, which
+/// advertised the wrong key.
 ///
 /// # Example
 ///

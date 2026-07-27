@@ -4,7 +4,7 @@ use crate::parse::{
     ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo, ParsedDeprecation,
 };
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use uuid::Uuid;
 
 pub fn generate(
@@ -587,10 +587,35 @@ pub fn generate(
     // has no meaningful finite summary list; dynamic children are discoverable
     // via `ChildRouter::list_children` at runtime.
     //
-    // The `hash` field of `ChildSummary` is populated with the empty string —
-    // the macro has no compile-time hash source for the child plugin's schema.
-    // Callers that need a populated hash hand-write `plugin_children` (which
-    // suppresses synthesis) and compute the hash from the child's schema.
+    // PLX-150: the `hash` field of `ChildSummary` carries the child's REAL
+    // hash — the same value `<child>.schema` self-reports when a consumer
+    // fetches it.
+    //
+    // It used to be `String::new()`. That is the identical defect PLX-90 found
+    // and fixed on the IR path (`ir_parse` emitted `hash: String::new()` for
+    // every Dynamic edge, which connectome-hs's checker rejected as a §5.1 MUST
+    // violation); the legacy path was never re-checked, so it survived here.
+    //
+    // The consequence was measured, not theorised. PLX-143 compared every edge
+    // a live substrate serves against the child's self-report: 22 of 23 agreed,
+    // and the one that did not was `orcha` advertising `pm` as
+    // `{"namespace":"pm","hash":""}` while `orcha.pm.schema` self-reported
+    // `50bfa7415dec30dd`. Rust serializes the empty string and Haskell decodes
+    // strictly, so `""` arrives as a *value*, not a decode error — synapse
+    // looked up on the advertised hash and inserted on the fetched one, and
+    // `orcha.pm` was permanently uncacheable, silently, forever. `solar`
+    // hand-writes `plugin_children` precisely to dodge this; `orcha` does not.
+    //
+    // The source is the child's own `Activation::plugin_schema`, called through
+    // the accessor the author already wrote. That mirrors the IR path's fix
+    // (`<#child_ty>::__plexus_activation_ir()?.hash`) with the one difference
+    // the legacy trait forces: `plugin_schema` takes `&self`, so this needs the
+    // instance rather than only the type. Static `#[child]` accessors are
+    // already required to return something the generated `ChildRouter` can box
+    // as `Activation + ChildRouter`, so no new bound is introduced.
+    //
+    // Callers that still want to control the value hand-write `plugin_children`,
+    // which suppresses synthesis exactly as before.
     let plugin_children_synth = if synthesize_plugin_children {
         let static_children: Vec<&ChildMethodInfo> = child_methods
             .iter()
@@ -601,11 +626,43 @@ pub fn generate(
             .map(|c| {
                 let name = c.fn_name.to_string();
                 let desc = &c.description;
+                let fn_name = &c.fn_name;
+
+                // `plugin_children` is a SYNC fn on the legacy `Activation`
+                // surface, so an `async` static accessor cannot be called to
+                // obtain the child's schema. Rather than fall back to the empty
+                // string — which is the bug — say so. Fleet-wide there are
+                // ZERO async static `#[child]` methods (every one of the 11
+                // production static children in plexus-substrate and hyperforge
+                // is a plain `fn`), so this rejects nothing that exists.
+                if c.is_async {
+                    let msg = format!(
+                        "PLX-150: static `#[child]` method `{name}` is `async`, so the \
+                         synthesized `plugin_children()` (a sync fn) cannot read the \
+                         child's schema to advertise its hash. RFC 002 §5.1 makes that \
+                         hash a MUST and an empty string is not one. Either make `{name}` \
+                         a plain `fn`, or hand-write `plugin_children()` on this impl \
+                         (which suppresses synthesis) and supply the hash yourself."
+                    );
+                    return quote_spanned! {fn_name.span()=>
+                        ::core::compile_error!(#msg)
+                    };
+                }
+
                 quote! {
                     #crate_path::plexus::ChildSummary {
                         namespace: ::std::string::String::from(#name),
                         description: ::std::string::String::from(#desc),
-                        hash: ::std::string::String::new(),
+                        // The child's own composite hash. `#[allow(deprecated)]`
+                        // covers the child's `plugin_children()` call inside its
+                        // own `plugin_schema`, the same suppression IR-16
+                        // already applies to the hub's call below.
+                        hash: {
+                            #[allow(deprecated)]
+                            let __plexus_child_schema =
+                                #crate_path::plexus::Activation::plugin_schema(&self.#fn_name());
+                            __plexus_child_schema.hash
+                        },
                     }
                 }
             })
