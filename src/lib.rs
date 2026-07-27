@@ -441,6 +441,19 @@ fn generate_schema_fn(
 /// - `version = "..."` (optional, default: "1.0.0") - Version string
 /// - `description = "..."` (optional) - Activation description
 /// - `crate_path = "..."` (optional, default: "crate") - Path to substrate crate
+/// - `backend_name = "..."` (optional) - RFC 002 §3.3 **root fact**: the
+///   document's backend identity. Declaring it is what lets a client skip the
+///   separate identity probe. Same spelling as `activation_ir!`.
+/// - `respond_method = "..."` (optional) - RFC 002 §3.3/§7.6 **root fact**: the
+///   name of the method a client calls to answer a callback this document
+///   declares. §3.3 makes it MUST as soon as any method declares a callback,
+///   because §7.6 requires a consumer to be able to tell *before invoking*
+///   whether it can serve one. Same spelling as `activation_ir!`.
+///
+/// Both root facts belong to the *document*, not the node: `recompute_hashes`
+/// strips them from every embedded child (§3.3), and §4.6 keeps them out of the
+/// activation preimage, so declaring them changes no activation or method hash.
+/// Neither may be the empty string (§3.5).
 ///
 /// # Example
 ///

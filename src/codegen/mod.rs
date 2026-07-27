@@ -184,8 +184,16 @@ fn activation_ir_fn(
     let mut spec = ActivationIrSpec::from_impl_with_mode(
         &args.namespace,
         version.unwrap_or("0.0.0"),
-        None,
-        None,
+        // PLX-113 — the §3.3 root facts, previously hard-`None` here, which is
+        // why every macro-produced Connectome carried the §3.3 and §7.6
+        // advisories while `activation_ir!` did not. They are *declarations*,
+        // so they are passed through verbatim; whether this node ends up being
+        // a root or an embedded child is not decided here. `recompute_hashes`
+        // strips them from every non-root position (§3.3), and §4.6 keeps them
+        // out of the activation preimage entirely, so passing them cannot move
+        // a node or method hash.
+        args.backend_name.clone(),
+        args.respond_method.clone(),
         Some(resolved_description.to_string()),
         args.request_type.clone(),
         pristine_impl,
