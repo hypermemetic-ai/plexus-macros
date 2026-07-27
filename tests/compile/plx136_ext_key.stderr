@@ -1,0 +1,21 @@
+error: unknown `#[acp_agent(...)]` key `ext`: `ext(...)` is not a mapping mechanism for ACP. The vocabulary is closed and the trait is the mapping; ACP's own extension channel is the reserved underscore-prefixed method namespace and the `_meta` fields on the wire types, neither of which is declared here
+  --> tests/compile/plx136_ext_key.rs:14:28
+   |
+14 | #[plexus_macros::acp_agent(ext = "acp_role")]
+   |                            ^^^
+
+warning: unused imports: `CancelNotification`, `NewSessionRequest`, `NewSessionResponse`, `PromptRequest`, `PromptResponse`, and `StopReason`
+ --> tests/compile/plx136_ext_key.rs:7:5
+  |
+7 |     CancelNotification, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+  |     ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+8 |     StopReason,
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `plexus_acp::v1::Result`
+  --> tests/compile/plx136_ext_key.rs:10:5
+   |
+10 | use plexus_acp::v1::Result;
+   |     ^^^^^^^^^^^^^^^^^^^^^^

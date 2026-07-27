@@ -1,0 +1,21 @@
+error: unknown `#[acp_agent(...)]` key `load_session`: capabilities are not declared — implement the method. The optional `plexus_acp::v1::Agent` items are `authenticate`, `logout`, `load_session`, `resume_session`, `list_sessions`, `delete_session`, `close_session`, `set_session_mode` and `set_session_config_option`, and implementing one is the only way to advertise it
+  --> tests/compile/plx136_load_session_key.rs:10:28
+   |
+10 | #[plexus_macros::acp_agent(load_session = "true")]
+   |                            ^^^^^^^^^^^^
+
+warning: unused imports: `CancelNotification`, `NewSessionRequest`, `NewSessionResponse`, `PromptRequest`, `PromptResponse`, and `StopReason`
+ --> tests/compile/plx136_load_session_key.rs:3:5
+  |
+3 |     CancelNotification, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+  |     ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+4 |     StopReason,
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `plexus_acp::v1::Result`
+ --> tests/compile/plx136_load_session_key.rs:6:5
+  |
+6 | use plexus_acp::v1::Result;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
