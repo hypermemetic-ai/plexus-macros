@@ -152,6 +152,18 @@ pub(crate) struct ReturnShape {
 /// | `-> impl Stream<Item = T>` | `T` | `None` |
 /// | `-> Result<impl Stream<Item = T>, E>` | `T` | `None` |
 ///
+/// # `E` is discarded, and PLX-110 decided to keep it that way
+///
+/// The `Result` rows drop `E` on the floor, and `MethodIr` has no slot for it —
+/// there is no `errors` key in RFC 002 §3.6 item 13's method field list. PLX-110
+/// considered adding one and declined: under that ticket's decision the wire
+/// never carries `E`, it carries a `plexus_core::runtime::TurnError` whose shape
+/// RFC 002 §3.6 item 22 already specifies and which is uniform for every method,
+/// so a client generator already knows the failure type. Declaring `E` would
+/// declare a *server-side* type no consumer can observe. Giving `details` a
+/// declared schema is a genuinely new axis and therefore an RFC amendment; it is
+/// filed as a candidate rather than smuggled in as a field.
+///
 /// The streaming rows are where PLX-75's no-unit-`SchemaRef` property is
 /// preserved: a streaming method has no *distinct* terminal type, so `terminal`
 /// is `None`. Nothing here ever produces a `SchemaRef` for `()` — a unit type
@@ -188,6 +200,87 @@ pub(crate) fn classify_return(output: &ReturnType) -> ReturnShape {
     ReturnShape {
         updates: None,
         terminal: non_unit((**ty).clone()),
+    }
+}
+
+/// PLX-110: the return shape, as **dispatch** must see it.
+///
+/// [`classify_return`] answers a question about the *IR*: which of `updates` /
+/// `terminal` does this signature declare? This enum answers the question the
+/// *codegen* has to answer: which body shape can actually drive this return
+/// value? They are different questions over the same tokens, and the whole
+/// subject of PLX-110 is that they were allowed to disagree — `ir_parse`
+/// accepted `Result` from the day it was written (see the doc table above,
+/// which has claimed the `Result<impl Stream<Item = T>, E>` row since PLX-79)
+/// while `codegen/handlers.rs` emitted one `while let Some(..) = stream.next()`
+/// body for every method and therefore refused it.
+///
+/// Both questions are now answered from the same predicates in this file, so
+/// the disagreement cannot silently reappear: a shape `classify_return` maps to
+/// `terminal` is exactly the shape [`DispatchShape::UnaryValue`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DispatchShape {
+    /// `-> impl Stream<Item = T>` (or a `Pin<Box<dyn Stream<..>>>`). The
+    /// pre-PLX-110 arm, and the ONLY arm whose emitted tokens PLX-110 leaves
+    /// byte-for-byte alone.
+    Stream,
+    /// `-> Result<impl Stream<Item = T>, E>`. `signature.rs`'s doc table has
+    /// always claimed to classify this; PLX-110's probe showed dispatch
+    /// rejected it with the same `Result<..>: Stream is not satisfied` error a
+    /// unary method got. It streams, after the `Result` is unwrapped.
+    ResultStream,
+    /// `-> Result<T, E>` with a non-unit `T`. Zero updates, one terminal
+    /// carrying the serialized `T`.
+    UnaryValue,
+    /// `-> Result<(), E>`. Zero updates, one terminal with **no** value —
+    /// RFC 002 §6.4 forbids substituting a unit type for "declares nothing",
+    /// so this must not become a terminal carrying `null`.
+    UnaryUnit,
+    /// Anything else, including a bare `-> T` and a method with no return type
+    /// at all. Emitted exactly as before; PLX-110 does not widen this.
+    Other,
+}
+
+/// Classify a return type for **dispatch**, not for the IR.
+pub(crate) fn dispatch_shape(output: &ReturnType) -> DispatchShape {
+    let ReturnType::Type(_, ty) = output else {
+        return DispatchShape::Other;
+    };
+
+    if stream_item(ty).is_some() {
+        return DispatchShape::Stream;
+    }
+
+    if let Some(ok_ty) = result_ok(ty) {
+        if stream_item(&ok_ty).is_some() {
+            return DispatchShape::ResultStream;
+        }
+        if is_unit(&ok_ty) {
+            return DispatchShape::UnaryUnit;
+        }
+        return DispatchShape::UnaryValue;
+    }
+
+    DispatchShape::Other
+}
+
+/// The `T` of a `-> Result<T, E>` whose `T` is a real value (not a stream, not
+/// unit) — the terminal type a unary method declares.
+///
+/// PLX-110: this is the *only* new consumer of `result_ok` outside
+/// [`classify_return`], and it exists so `MethodSchema` can keep advertising a
+/// return schema for the new shape (PLX-103 keeps `MethodSchema` alive). It is
+/// deliberately `None` for every shape that existed before PLX-110, which is
+/// what makes every pre-existing method's schema and hash byte-identical.
+pub(crate) fn unary_terminal_type(output: &ReturnType) -> Option<Type> {
+    match dispatch_shape(output) {
+        DispatchShape::UnaryValue => {
+            let ReturnType::Type(_, ty) = output else {
+                return None;
+            };
+            result_ok(ty)
+        }
+        _ => None,
     }
 }
 
@@ -335,7 +428,13 @@ fn option_inner(ty: &Type) -> Option<Type> {
 }
 
 /// The `T` of `Result<T, E>`.
-fn result_ok(ty: &Type) -> Option<Type> {
+///
+/// PLX-110 made this `pub(crate)`: `parse.rs` needs it to peel the `Result` off
+/// a `Result<impl Stream<Item = T>, E>` before looking for the stream item, and
+/// there must be exactly one implementation of "what is the Ok type" in the
+/// crate. `E` is discarded here and nowhere recorded — see the report's
+/// error-type decision, and `classify_return`'s doc table.
+pub(crate) fn result_ok(ty: &Type) -> Option<Type> {
     let Type::Path(tp) = ty else { return None };
     let seg = tp.path.segments.last()?;
     if seg.ident != "Result" {

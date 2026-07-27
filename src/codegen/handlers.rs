@@ -115,7 +115,6 @@ fn handler_entry(
     deps: &syn::Ident,
 ) -> TokenStream {
     let method_name = &m.method_name;
-    let fn_name = &m.fn_name;
 
     let auth_injection = auth_injection(m, crate_path);
     let activation_extraction = activation_extraction(m, crate_path, request_type);
@@ -140,6 +139,7 @@ fn handler_entry(
 
     let (param_extraction, param_names) = param_extraction(m, crate_path, deps);
     let call_args = call_args(m, &param_names);
+    let body = handler_body(m, crate_path, deps, &call_args);
 
     quote! {
         (
@@ -154,25 +154,139 @@ fn handler_entry(
                     #(#resolver_bindings)*
                     #param_extraction
 
-                    let __stream = __me.#fn_name(#call_args).await;
-
-                    // The update/terminal split, made by the runtime rather
-                    // than by a `wrap_stream` template: every stream item is
-                    // an update, and the turn's single terminal is produced by
-                    // `entry`'s loop once this future resolves.
-                    {
-                        use #deps::futures::StreamExt;
-                        let mut __stream = ::std::boxed::Box::pin(__stream);
-                        while let Some(__item) = __stream.next().await {
-                            __turn.emit_typed(&__item).await?;
-                        }
-                    }
-                    ::core::result::Result::Ok(
-                        #crate_path::runtime::TurnOutcome::complete()
-                    )
+                    #body
                 }
             ),
         )
+    }
+}
+
+/// PLX-110: the one place dispatch branches on the return shape.
+///
+/// Before this build there was no branch: `handler_entry` emitted a single body
+/// that pinned the return value and drove it as a `Stream`, so a
+/// `Result`-returning method failed to compile with
+/// `Result<..>: futures::Stream is not satisfied`. The IR parser had accepted
+/// `Result` since PLX-79 and mapped it to a terminal — reading `ir_parse/`
+/// alone told you unary methods worked, and they did not. This function is what
+/// makes the two agree.
+///
+/// # The error decision (PLX-110), recorded here because this is where it binds
+///
+/// **`E` must satisfy `E: Into<plexus_core::runtime::TurnError>`**, and an
+/// `Err` terminates the turn with `StopKind::Failed`.
+///
+/// The alternatives were `E: Serialize` (put it in a structured `TurnError`)
+/// and `E: Display` (stringify it). `Display` is refused outright by RFC 002
+/// §6.7: "**Failed** MUST carry a structured error. An implementation MUST NOT
+/// flatten a structured error to a string at this boundary" — and stringifying
+/// is precisely the `PlexusError::ExecutionError(String)` counterfactual that
+/// `plexus-core/src/runtime/error.rs` says the envelope exists to delete.
+/// `Serialize` is refused because it leaves the macro to *invent* the two
+/// fields §3.6 item 22 makes mandatory — the error code and the message —
+/// which no author could then override, and because it silently admits
+/// `E = String` (`String: Serialize`), reintroducing the flattened error under
+/// a bound that looks structured.
+///
+/// `Into<TurnError>` is the narrowest bound under which the macro guesses
+/// **nothing**: the author's own `From` impl chooses the code, the message, the
+/// retryability, and — via `TurnError::structured` — the typed `details`
+/// payload that survives the round trip. It costs one small `impl From<MyError>
+/// for TurnError` per error type, which is the same posture the rest of this
+/// crate takes (`ir_parse/signature.rs`: "an inferred set declares nothing").
+/// `E = TurnError` itself needs no impl at all.
+///
+/// # What this does NOT deliver: RFC 002 §6.6 `Refused`
+///
+/// §6.6 says a considered "no" is `Refused` and MUST NOT be conflated with
+/// `Failed`. This arm cannot produce `Refused`, because `TurnError::into_stop_reason`
+/// hardcodes `StopReason::failed` and `plexus-core` is read-only for this
+/// ticket. Note carefully that this is **not** the §6.6 conflation: nothing
+/// here maps a refusal onto `Failed`. It makes `Err` *mean* `Failed`, and
+/// leaves a considered "no" with no spelling — which is exactly the situation
+/// the streaming arm has always been in (no generated handler in this crate has
+/// ever been able to emit `TurnOutcome::Refused`, before or after PLX-110).
+/// Closing it is a `plexus-core` API question, filed as a finding rather than
+/// invented here per this ticket's "Risks and non-changes".
+fn handler_body(
+    m: &MethodInfo,
+    crate_path: &syn::Path,
+    deps: &syn::Ident,
+    call_args: &TokenStream,
+) -> TokenStream {
+    use crate::ir_parse::signature::DispatchShape;
+
+    let fn_name = &m.fn_name;
+
+    // The update/terminal split, made by the runtime rather than by a
+    // `wrap_stream` template: every stream item is an update, and the turn's
+    // single terminal is produced by `entry`'s loop once this future resolves.
+    let drive_stream = quote! {
+        {
+            use #deps::futures::StreamExt;
+            let mut __stream = ::std::boxed::Box::pin(__stream);
+            while let Some(__item) = __stream.next().await {
+                __turn.emit_typed(&__item).await?;
+            }
+        }
+        ::core::result::Result::Ok(
+            #crate_path::runtime::TurnOutcome::complete()
+        )
+    };
+
+    // `E -> TurnError`, spelled fully so no `Into` in scope can shadow it.
+    let into_turn_error = quote! {
+        ::core::convert::Into::<#crate_path::runtime::TurnError>::into(__e)
+    };
+
+    match m.dispatch {
+        // Byte-for-byte the pre-PLX-110 body. `Other` shares it deliberately:
+        // a bare `-> T` did not dispatch before this build either, and PLX-110
+        // is not authorised to widen what compiles beyond the `Result` shapes.
+        DispatchShape::Stream | DispatchShape::Other => quote! {
+            let __stream = __me.#fn_name(#call_args).await;
+
+            #drive_stream
+        },
+
+        DispatchShape::ResultStream => quote! {
+            let __stream = match __me.#fn_name(#call_args).await {
+                ::core::result::Result::Ok(__s) => __s,
+                ::core::result::Result::Err(__e) => {
+                    return ::core::result::Result::Err(#into_turn_error);
+                }
+            };
+
+            #drive_stream
+        },
+
+        // Zero updates, one terminal carrying the serialized `T`.
+        DispatchShape::UnaryValue => quote! {
+            match __me.#fn_name(#call_args).await {
+                ::core::result::Result::Ok(__v) => {
+                    #crate_path::runtime::TurnOutcome::serialize(&__v)
+                }
+                ::core::result::Result::Err(__e) => {
+                    ::core::result::Result::Err(#into_turn_error)
+                }
+            }
+        },
+
+        // Zero updates, one terminal with NO value. RFC 002 §6.4: an
+        // implementation MUST NOT substitute a unit type for "declares
+        // nothing", so this must not serialize `()` into a `null` terminal —
+        // `classify_return` already drops the unit on the IR side, and this
+        // keeps the runtime projection agreeing with it.
+        DispatchShape::UnaryUnit => quote! {
+            match __me.#fn_name(#call_args).await {
+                ::core::result::Result::Ok(_) => ::core::result::Result::Ok(
+                    #crate_path::runtime::TurnOutcome::complete()
+                ),
+                ::core::result::Result::Err(__e) => {
+                    ::core::result::Result::Err(#into_turn_error)
+                }
+            }
+        },
     }
 }
 
