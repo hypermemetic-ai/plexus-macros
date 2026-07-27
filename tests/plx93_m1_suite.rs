@@ -416,10 +416,11 @@ fn m1_t1_a_macro_produced_document_with_every_edge_kind_round_trips() {
     let mut dynamic_edges = 0;
     let mut indexed_edges = 0;
     for edge in &ir.children {
-        match edge {
-            ChildEdge::Static { .. } => static_edges += 1,
-            ChildEdge::Dynamic { .. } => dynamic_edges += 1,
-            ChildEdge::Indexed { .. } => indexed_edges += 1,
+        // PLX-160 — counted on the two axes rather than on a variant name.
+        match (edge.is_indexed(), edge.is_lazy()) {
+            (false, false) => static_edges += 1,
+            (false, true) => dynamic_edges += 1,
+            (true, _) => indexed_edges += 1,
         }
     }
     assert_eq!(

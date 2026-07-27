@@ -25,7 +25,8 @@ use syn::Type;
 
 use super::signature::type_name_of;
 use super::spec::{
-    ActivationIrSpec, AuthRequirementSpec, ChildEdgeSpec, HttpMethodIrSpec, MethodIrSpec,
+    ActivationIrSpec, AuthRequirementSpec, ChildDeliverySpec, ChildEdgeSpec, ChildShapeSpec,
+    HttpMethodIrSpec, MethodIrSpec,
     ParamIrSpec,
 };
 use crate::codegen::{derive_core_path, derive_serde_json_path};
@@ -247,83 +248,82 @@ pub(crate) fn method_expr(paths: &Paths, spec: &MethodIrSpec) -> TokenStream {
     }
 }
 
+/// Emit one `plexus_core::ir::ChildEdge` from a two-axis [`ChildEdgeSpec`].
+///
+/// PLX-160: the two axes are emitted by two independent expressions and then
+/// composed, which is what makes all four cells reachable without a cell being
+/// spelled out anywhere. Adding an axis adds a third expression; it does not
+/// double a variant count.
 fn child_edge_expr(paths: &Paths, edge: &ChildEdgeSpec) -> TokenStream {
     let core = &paths.core;
     let child_ir_fn = syn::Ident::new(CHILD_IR_FN, Span::call_site());
+    let ChildEdgeSpec {
+        namespace,
+        shape,
+        delivery,
+        child_ty,
+        description,
+    } = edge;
 
-    match edge {
-        ChildEdgeSpec::Static {
-            namespace,
-            child_ty,
-        } => {
-            // The embedded subtree keeps its own namespace segment from its own
-            // document; the parent's edge name is the `#[child]` fn ident, so
-            // stamp it to keep `ChildEdge::namespace()` truthful.
-            quote! {
-                #core::ir::ChildEdge::Static({
-                    let mut __child = <#child_ty>::#child_ir_fn()?;
-                    __child.namespace = #namespace.to_string();
-                    // `ir_hash` is a *document* digest. An embedded subtree is a
-                    // node, not a document, so it must not carry one — the
-                    // parent's `recompute_hashes` owns the fold from here.
-                    __child.ir_hash = ::core::option::Option::None;
-                    __child
-                })
-            }
-        }
-        ChildEdgeSpec::Dynamic {
-            namespace,
-            child_ty,
-            description,
-        } => quote! {
-            #core::ir::ChildEdge::Dynamic {
-                namespace: #namespace.to_string(),
-                // RFC 002 §5.1 — a Dynamic edge MUST carry an advertised hash,
-                // "sufficient to fetch and cache it lazily". The *registrations*
-                // are a runtime fact; the *shape* they all have is not — the
-                // signature names it. So the backend advertises the declared
-                // child type's own node hash, and a changed one is exactly the
-                // refetch signal. The subtree itself is deliberately still not
-                // embedded (§5.1), and no consumer recomputes this (§5.2).
-                //
-                // Unlike a Static edge the child's namespace is NOT restamped:
-                // there is no embedded node here to rename, and the hash a
-                // registration reports when fetched is the child type's own.
-                hash: <#child_ty>::#child_ir_fn()?.hash,
-                description: #description.to_string(),
-            }
+    // ---- AXIS 2 — DELIVERY. --------------------------------------------
+    let delivery_expr = match delivery {
+        // The embedded subtree keeps its own namespace segment from its own
+        // document; the parent's edge name is the `#[child]` fn ident, so stamp
+        // it to keep `ChildEdge::namespace()` truthful.
+        //
+        // `ir_hash` is a *document* digest. An embedded subtree is a node, not a
+        // document, so it must not carry one — the parent's `recompute_hashes`
+        // owns the fold from here.
+        ChildDeliverySpec::Embedded => quote! {
+            #core::ir::ChildEdge::embedded({
+                let mut __child = <#child_ty>::#child_ir_fn()?;
+                __child.namespace = #namespace.to_string();
+                __child.ir_hash = ::core::option::Option::None;
+                __child
+            })
         },
-        ChildEdgeSpec::Indexed {
-            namespace,
+        // RFC 002 §5.1 — a lazy edge MUST carry an advertised hash, "sufficient
+        // to fetch and cache it lazily". The *registrations* are a runtime fact;
+        // the *shape* they all have is not — the signature names it. So the
+        // backend advertises the declared child type's own node hash, and a
+        // changed one is exactly the refetch signal. The subtree itself is
+        // deliberately still not embedded (§5.1), and no consumer recomputes
+        // this (§5.2).
+        //
+        // Unlike an embedded edge the child's namespace is NOT restamped: there
+        // is no embedded node here to rename, and the hash a registration
+        // reports when fetched is the child type's own.
+        ChildDeliverySpec::Lazy => quote! {
+            #core::ir::ChildEdge::lazy(
+                #namespace,
+                <#child_ty>::#child_ir_fn()?.hash,
+            )
+        },
+    };
+
+    // ---- AXIS 1 — SHAPE. -----------------------------------------------
+    let shaped = match shape {
+        ChildShapeSpec::Single => delivery_expr,
+        ChildShapeSpec::Indexed {
             list_method,
             search_method,
             id_field,
             path_template,
-            child_ty,
-            description,
         } => {
             let search = match search_method {
                 Some(s) => quote! { ::core::option::Option::Some(#s.to_string()) },
                 None => quote! { ::core::option::Option::None },
             };
+            // `.indexed(..)` does not read the delivery axis, which is the whole
+            // point: this arm is identical for an embedded template and for an
+            // advertised one.
             quote! {
-                #core::ir::ChildEdge::Indexed {
-                    namespace: #namespace.to_string(),
-                    list_method: #list_method.to_string(),
-                    search_method: #search,
-                    id_field: #id_field.to_string(),
-                    path_template: #path_template.to_string(),
-                    template: ::std::boxed::Box::new({
-                        let mut __child = <#child_ty>::#child_ir_fn()?;
-                        __child.namespace = #namespace.to_string();
-                        __child.ir_hash = ::core::option::Option::None;
-                        __child
-                    }),
-                    description: #description.to_string(),
-                }
+                #delivery_expr.indexed(#list_method, #search, #id_field, #path_template)
             }
         }
-    }
+    };
+
+    quote! { #shaped.with_description(#description) }
 }
 
 /// The `ActivationIr` statement sequence, ending in `Ok(ir)`. Valid only inside

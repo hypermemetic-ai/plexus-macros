@@ -150,41 +150,68 @@ impl MethodIrSpec {
     }
 }
 
-/// Token-level mirror of `plexus_core::ir::ChildEdge`.
+/// Token-level mirror of `plexus_core::ir::ChildShape` — **axis 1**.
 ///
-/// A child's subtree is an `ActivationIr` the parser cannot see: it belongs to
-/// another type, in another impl block, possibly another crate. So a `Static` /
-/// `Indexed` edge carries the child **type's tokens**, and emission asks that
-/// type for its own IR through the crate-internal
-/// `__plexus_activation_ir()` convention (see [`emit`](super::emit)).
+/// In the `#[child]` grammar this axis is exactly *"is `list = "…"` present?"*.
 #[derive(Debug, Clone)]
-pub(crate) enum ChildEdgeSpec {
-    /// `#[child] fn ns(&self) -> ChildTy` — the whole subtree is embedded.
-    Static {
-        namespace: String,
-        child_ty: Type,
-    },
-    /// `#[child] fn ns(&self, name: &str) -> Option<ChildTy>` — runtime
-    /// registered, deliberately not embedded.
-    ///
-    /// The subtree is not embedded, but the *type* of every registration under
-    /// this namespace is named by the signature, so RFC 002 §5.1's mandatory
-    /// advertised hash is available: it is `ChildTy`'s own node hash.
-    Dynamic {
-        namespace: String,
-        child_ty: Type,
-        description: String,
-    },
-    /// `#[child(list = "...")] fn ns(&self) -> ChildTy` — an indexed family.
+pub(crate) enum ChildShapeSpec {
+    /// One named child.
+    Single,
+    /// An enumerable family — `#[child(list = "…")]`.
     Indexed {
-        namespace: String,
         list_method: String,
         search_method: Option<String>,
         id_field: String,
         path_template: String,
-        child_ty: Type,
-        description: String,
     },
+}
+
+/// Token-level mirror of `plexus_core::ir::ChildDelivery` — **axis 2**.
+///
+/// In the `#[child]` grammar this axis is exactly the method's *arity*:
+/// `fn ns(&self) -> C` means the parent holds the child and can embed it;
+/// `fn ns(&self, name: &str) -> Option<C>` means the child is resolved at
+/// runtime and only its shape is known statically, so the edge advertises that
+/// shape's hash instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildDeliverySpec {
+    /// Embed the child type's whole subtree.
+    Embedded,
+    /// Advertise the child type's node hash and embed nothing.
+    Lazy,
+}
+
+/// Token-level mirror of `plexus_core::ir::ChildEdge`.
+///
+/// A child's subtree is an `ActivationIr` the parser cannot see: it belongs to
+/// another type, in another impl block, possibly another crate. So the spec
+/// carries the child **type's tokens**, and emission asks that type for its own
+/// IR through the crate-internal `__plexus_activation_ir()` convention (see
+/// [`emit`](super::emit)) — for its whole subtree under
+/// [`Embedded`](ChildDeliverySpec::Embedded), for its `.hash` alone under
+/// [`Lazy`](ChildDeliverySpec::Lazy).
+///
+/// # PLX-160 — why this is a struct of two axes
+///
+/// The `#[child]` grammar has **always** carried two independent facts: arity
+/// (delivery) and `list =` (shape). The three-variant spec this replaces could
+/// only express three of their four combinations, and resolved the conflict by
+/// matching on arity FIRST and consulting `list_fn` only inside the static arm.
+/// So `#[child(list = "…")] fn ns(&self, id: &str) -> Option<C>` — an enumerable
+/// family whose instances are resolved at runtime — silently discarded
+/// `list_method`, `id_field` and `path_template`. Three activations in
+/// `plexus-substrate` are declared exactly that way.
+///
+/// With the axes separate, both facts are consumed on every path, and a fact the
+/// emitter cannot honour is a `syn::Error` naming it rather than a field that
+/// goes missing.
+#[derive(Debug, Clone)]
+pub(crate) struct ChildEdgeSpec {
+    pub(crate) namespace: String,
+    pub(crate) shape: ChildShapeSpec,
+    pub(crate) delivery: ChildDeliverySpec,
+    pub(crate) child_ty: Type,
+    pub(crate) description: String,
 }
 
 /// Token-level mirror of `plexus_core::ir::ActivationIr`.
@@ -246,11 +273,32 @@ impl ActivationIrSpec {
         let mut methods = Vec::new();
         let mut children = Vec::new();
 
+        // PLX-160 c3 — every `fn` this impl block defines, so a `#[child(list =
+        // "…")]` / `#[child(search = "…")]` argument can be checked against
+        // something rather than trusted.
+        //
+        // This check is newly LOAD-BEARING. Before this build a `list =` on a
+        // dynamic child was discarded before it reached the IR, so a typo in it
+        // was invisible in every direction. Now the name is written into the
+        // served document as `list_method` — RFC 002 §5.1's mandatory
+        // enumeration method — and a name that resolves to nothing is a
+        // document that LIES about a method a consumer is told it may call.
+        // §5.2's whole posture is that fabricated structure is the failure this
+        // representation exists to prevent.
+        let sibling_fns: std::collections::BTreeSet<String> = item
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+
         for it in &item.items {
             let syn::ImplItem::Fn(f) = it else { continue };
 
             if crate::parse::has_child_attr(f) {
-                children.push(signature::child_edge(namespace, f)?);
+                children.push(signature::child_edge(namespace, f, &sibling_fns)?);
                 continue;
             }
             if !crate::parse::has_method_attr(f) {

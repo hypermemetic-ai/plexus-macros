@@ -9,7 +9,9 @@ use quote::quote;
 use syn::{parse_quote, ItemImpl, TraitItemFn};
 
 use super::signature::{is_unit, type_name_of};
-use super::spec::{ActivationIrSpec, AuthRequirementSpec, ChildEdgeSpec, HttpMethodIrSpec};
+use super::spec::{
+    ActivationIrSpec, AuthRequirementSpec, ChildDeliverySpec, ChildShapeSpec, HttpMethodIrSpec,
+};
 use super::MethodIrSpec;
 
 fn spec(func: TraitItemFn) -> MethodIrSpec {
@@ -405,33 +407,35 @@ fn an_impl_block_yields_its_methods_and_child_edges() {
     );
     assert_eq!(a.children.len(), 3);
 
-    assert!(matches!(&a.children[0], ChildEdgeSpec::Static { namespace, .. } if namespace == "statics"));
-    match &a.children[1] {
-        ChildEdgeSpec::Indexed {
-            namespace,
+    // PLX-160 — each child is now asserted on BOTH axes, separately.
+    assert_eq!(a.children[0].namespace, "statics");
+    assert!(matches!(a.children[0].shape, ChildShapeSpec::Single));
+    assert_eq!(a.children[0].delivery, ChildDeliverySpec::Embedded);
+
+    assert_eq!(a.children[1].namespace, "indexed");
+    assert_eq!(a.children[1].delivery, ChildDeliverySpec::Embedded);
+    match &a.children[1].shape {
+        ChildShapeSpec::Indexed {
             list_method,
             path_template,
             id_field,
             search_method,
-            ..
         } => {
-            assert_eq!(namespace, "indexed");
             assert_eq!(list_method, "root.alpha");
             assert_eq!(path_template, "indexed/{id}");
             assert_eq!(id_field, "name");
             assert!(search_method.is_none());
         }
-        other => panic!("expected an indexed edge, got {other:?}"),
+        other => panic!("expected an indexed shape, got {other:?}"),
     }
-    match &a.children[2] {
-        ChildEdgeSpec::Dynamic {
-            namespace, child_ty, ..
-        } => {
-            assert_eq!(namespace, "dynamics");
-            // RFC 002 §5.1 — the edge's mandatory advertised hash comes from
-            // the child type the signature names, unwrapped from its `Option`.
-            assert_eq!(super::signature::type_name_of(child_ty), "DynChild");
-        }
-        other => panic!("expected a dynamic edge, got {other:?}"),
-    }
+
+    assert_eq!(a.children[2].namespace, "dynamics");
+    assert!(matches!(a.children[2].shape, ChildShapeSpec::Single));
+    assert_eq!(a.children[2].delivery, ChildDeliverySpec::Lazy);
+    // RFC 002 §5.1 — the edge's mandatory advertised hash comes from the child
+    // type the signature names, unwrapped from its `Option`.
+    assert_eq!(
+        super::signature::type_name_of(&a.children[2].child_ty),
+        "DynChild"
+    );
 }
