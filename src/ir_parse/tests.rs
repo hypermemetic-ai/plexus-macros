@@ -233,6 +233,16 @@ fn removed_surface_keys_point_at_their_replacement() {
         ("streaming", "return type"),
         ("scope = \"a.b\"", "MethodIr::auth"),
         ("public", "MethodIr::auth"),
+        // PLX-93 / M1-T7. `removed_surface_hint` has carried these two since
+        // PLX-79 and nothing asserted them, which is how the credentials
+        // surface — the ONE thing on PLX-73's M1-T7 list that was actually
+        // deleted — ended up with no test at all. The derive's disappearance
+        // is pinned separately by
+        // `tests/compile/plx93_removed_derives_are_gone.rs`.
+        ("credentials", "credentials surface is gone"),
+        ("credential", "credentials surface is gone"),
+        ("returns(A)", "turn envelope"),
+        ("override_call", "impl Stream"),
     ] {
         let attr: proc_macro2::TokenStream = key.parse().unwrap();
         let func: TraitItemFn = syn::parse2(quote! {

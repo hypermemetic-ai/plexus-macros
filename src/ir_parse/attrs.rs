@@ -51,6 +51,29 @@ const ALLOWED_KEYS: &[&str] = &[
     "request",
 ];
 
+/// The keys the LEGACY `#[method(...)]` grammar still carries, on top of
+/// [`ALLOWED_KEYS`]. Read off `impl Parse for HubMethodAttrs` in
+/// [`crate::parse`], which is the one parser that consumes them.
+///
+/// PLX-93 / M1-T6. Before this list existed, [`Mode::Legacy`] had no allowlist
+/// at all, so `#[method(unknwon = 1)]` on a real `#[activation]` compiled
+/// silently — PLX-73's trap closure ("unknown attr keys become errors; no
+/// stringly re-parse fallbacks") was installed on `method_ir!` and nowhere on
+/// the path every live service actually uses. That is not a difference of
+/// strictness between the two modes; it is the trap being absent from the
+/// production path. Legacy mode still ACCEPTS these keys — that is the whole
+/// point of the mode, and PLX-91 records why (14 `method(public)` and 12
+/// `scope = …` sites in this crate's suite alone) — but a key that is neither
+/// vNext nor legacy is a typo, and a typo is now an error in both modes.
+const LEGACY_ONLY_KEYS: &[&str] = &[
+    "public",
+    "scope",
+    "streaming",
+    "bidirectional",
+    "returns",
+    "override_call",
+];
+
 /// Keys whose surface vNext removed or relocated, with where to go instead.
 fn removed_surface_hint(key: &str) -> Option<&'static str> {
     Some(match key {
@@ -165,14 +188,40 @@ impl MethodAttrs {
                     .map(|i| i.to_string())
                     .unwrap_or_else(|| quote::ToTokens::to_token_stream(path).to_string());
 
-                if mode == Mode::Strict && !ALLOWED_KEYS.contains(&key.as_str()) {
-                    let message = match removed_surface_hint(&key) {
-                        Some(hint) => format!("unknown `#[method(...)]` key `{key}`: {hint}"),
-                        None => format!(
+                let recognized = ALLOWED_KEYS.contains(&key.as_str())
+                    || (mode == Mode::Legacy && LEGACY_ONLY_KEYS.contains(&key.as_str()));
+
+                if !recognized {
+                    // PLX-93 / M1-T6: the trap closure now fires in both modes.
+                    // Strict mode keeps PLX-79's message — including the
+                    // removed-surface hints, which are the whole reason a
+                    // vNext author typing `scope = …` gets told where it went.
+                    // Legacy mode cannot use those hints (the surface is not
+                    // removed there; it is accepted above), so it names the
+                    // grammar it actually reads.
+                    let message = match (mode, removed_surface_hint(&key)) {
+                        (Mode::Strict, Some(hint)) => {
+                            format!("unknown `#[method(...)]` key `{key}`: {hint}")
+                        }
+                        (Mode::Strict, None) => format!(
                             "unknown `#[method(...)]` key `{key}`. vNext accepts only: {}. \
                              Unknown keys are errors by design — use `ext({key} = ...)` for \
                              open extension metadata",
                             ALLOWED_KEYS.join(", "),
+                        ),
+                        (Mode::Legacy, _) => format!(
+                            "unknown `#[method(...)]` key `{key}`. `#[activation]` accepts: {}. \
+                             Unknown keys are errors by design — use `ext({key} = ...)` for \
+                             open extension metadata",
+                            {
+                                let mut all: Vec<&str> = ALLOWED_KEYS
+                                    .iter()
+                                    .chain(LEGACY_ONLY_KEYS.iter())
+                                    .copied()
+                                    .collect();
+                                all.sort_unstable();
+                                all.join(", ")
+                            },
                         ),
                     };
                     return Err(syn::Error::new(path.span(), message));
