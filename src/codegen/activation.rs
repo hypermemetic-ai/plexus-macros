@@ -965,6 +965,86 @@ fn generate_rpc_impl_methods(
             // All methods use wrap_stream for consistent streaming pattern
             let content_type = format!("{}.{}", namespace, method_name_str);
 
+            // PLX-110: the SECOND site that has to branch on the return shape.
+            //
+            // The ticket names `codegen/handlers.rs`, and that is where the
+            // turn-native dispatch lives — but the probe's four compile errors
+            // pointed at `plexus-core/src/plexus/streaming.rs:55` as well as at
+            // the handler table, because this legacy jsonrpsee subscription
+            // impl feeds the method's return value straight into
+            // `wrap_stream<T: Serialize>(impl Stream<Item = T>, ..)`. A unary
+            // method that only fixed `handlers.rs` would still not compile.
+            //
+            // What a unary method looks like on THIS surface: a subscription
+            // has no terminal channel — it has Data items and a Done — so the
+            // `Ok` value arrives as one Data item and then Done, and the `Err`
+            // arrives as one Data item carrying the serialized `TurnError`
+            // envelope. That is lossier than the turn projection (a consumer
+            // must read the envelope to see it failed), and it is a residual
+            // recorded rather than hidden: this surface predates the turn model
+            // and PLX-91 kept it deliberately. Both arms unify at
+            // `PlexusStream`, and `wrap_stream` still does the serialization,
+            // so `Credential<T>` capture (AUTHZ-CRED-CORE-2) keeps working on
+            // the Ok path.
+            let wrapped_stream = {
+                use crate::ir_parse::signature::DispatchShape;
+                let once_err = quote! {
+                    ::core::result::Result::Err(__e) => {
+                        let __te: #crate_path::runtime::TurnError =
+                            ::core::convert::Into::into(__e);
+                        #crate_path::plexus::wrap_stream(
+                            #deps::futures::stream::once(async move { __te }),
+                            #content_type,
+                            vec![#namespace.into()]
+                        )
+                    }
+                };
+                match m.dispatch {
+                    // Byte-for-byte the pre-PLX-110 emission.
+                    DispatchShape::Stream | DispatchShape::Other => quote! {
+                        let stream = #method_call;
+                        let wrapped = #crate_path::plexus::wrap_stream(
+                            stream,
+                            #content_type,
+                            vec![#namespace.into()]
+                        );
+                    },
+                    DispatchShape::ResultStream => quote! {
+                        let wrapped = match #method_call {
+                            ::core::result::Result::Ok(__s) => #crate_path::plexus::wrap_stream(
+                                __s,
+                                #content_type,
+                                vec![#namespace.into()]
+                            ),
+                            #once_err
+                        };
+                    },
+                    DispatchShape::UnaryValue => quote! {
+                        let wrapped = match #method_call {
+                            ::core::result::Result::Ok(__v) => #crate_path::plexus::wrap_stream(
+                                #deps::futures::stream::once(async move { __v }),
+                                #content_type,
+                                vec![#namespace.into()]
+                            ),
+                            #once_err
+                        };
+                    },
+                    // `Result<(), E>`: no value to send, so the subscription is
+                    // just Done — the closest this surface gets to "a terminal
+                    // with no value" (RFC 002 §6.4).
+                    DispatchShape::UnaryUnit => quote! {
+                        let wrapped = match #method_call {
+                            ::core::result::Result::Ok(_) => #crate_path::plexus::wrap_stream(
+                                #deps::futures::stream::empty::<#deps::serde_json::Value>(),
+                                #content_type,
+                                vec![#namespace.into()]
+                            ),
+                            #once_err
+                        };
+                    },
+                }
+            };
+
             quote! {
                 async fn #method_name(
                     &self,
@@ -975,12 +1055,7 @@ fn generate_rpc_impl_methods(
 
                     let sink = pending.accept().await?;
                     #bidir_setup
-                    let stream = #method_call;
-                    let wrapped = #crate_path::plexus::wrap_stream(
-                        stream,
-                        #content_type,
-                        vec![#namespace.into()]
-                    );
+                    #wrapped_stream
 
                     #deps::tokio::spawn(async move {
                         let mut stream = wrapped;

@@ -1341,6 +1341,20 @@ pub struct MethodInfo {
     #[allow(dead_code)]
     pub return_type: Type,
     pub stream_item_type: Option<Type>,
+    /// PLX-110: which body shape dispatch must emit for this method.
+    ///
+    /// Computed by `ir_parse::signature::dispatch_shape` — the same predicates
+    /// `classify_return` uses to decide `updates` vs `terminal` — so the IR and
+    /// the dispatch codegen can no longer disagree about what a signature
+    /// means. Before PLX-110 there was no such field because there was no
+    /// choice: every method got the stream body, and a `Result`-returning
+    /// method simply failed to compile.
+    pub dispatch: crate::ir_parse::signature::DispatchShape,
+    /// PLX-110: the `T` of a `-> Result<T, E>` unary method, when `T` is a real
+    /// value. `None` for every shape that existed before PLX-110, which is what
+    /// keeps existing methods' `MethodSchema.returns` and method hashes
+    /// byte-identical.
+    pub terminal_type: Option<Type>,
     /// Specific enum variants this method can return (empty = all variants)
     pub returns_variants: Vec<String>,
     /// True if method streams multiple events (from #[hub_method(streaming)])
@@ -1541,7 +1555,29 @@ impl MethodInfo {
             ReturnType::Type(_, ty) => (**ty).clone(),
         };
 
-        let stream_item_type = extract_stream_item_type(&return_type);
+        // PLX-110: one authority for "what shape is this return type", shared
+        // with the IR parser (`ir_parse::signature`). Reading `&method.sig.output`
+        // rather than `return_type` keeps the `ReturnType::Default` case
+        // expressible even though the check above rejects it today.
+        let dispatch = crate::ir_parse::signature::dispatch_shape(&method.sig.output);
+        let terminal_type = crate::ir_parse::signature::unary_terminal_type(&method.sig.output);
+
+        // PLX-110: peel the `Result` before looking for the stream item, but
+        // ONLY for the `Result<impl Stream<Item = T>, E>` shape. Widening
+        // `extract_stream_item_type` itself (e.g. to accept `Pin<Box<dyn
+        // Stream<Item = T>>>` the way `ir_parse::signature::stream_item` does)
+        // would newly populate `stream_item_type` for methods that exist today,
+        // moving their `MethodSchema.returns` AND their method hash — a
+        // wire-visible change this ticket is not authorised to make. No
+        // `ResultStream` method exists anywhere today, because until this build
+        // none of them compiled, so this branch changes nothing that is live.
+        let stream_item_type = match dispatch {
+            crate::ir_parse::signature::DispatchShape::ResultStream => {
+                crate::ir_parse::signature::result_ok(&return_type)
+                    .and_then(|ok| extract_stream_item_type(&ok))
+            }
+            _ => extract_stream_item_type(&return_type),
+        };
 
         // Check for PlexusStream return type - must use streaming pattern instead
         if is_result_plexus_stream(&return_type) {
@@ -1585,6 +1621,8 @@ impl MethodInfo {
             params,
             return_type,
             stream_item_type,
+            dispatch,
+            terminal_type,
             returns_variants,
             streaming,
             bidirectional,

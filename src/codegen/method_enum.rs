@@ -160,7 +160,16 @@ pub fn generate(
     let return_schema_entries: Vec<TokenStream> = methods
         .iter()
         .map(|m| {
-            if let Some(item_ty) = &m.stream_item_type {
+            // PLX-110: a unary `-> Result<T, E>` method has no stream item, so
+            // without this fallback its `MethodSchema.returns` would be `None`
+            // and the new shape would silently advertise no return schema at
+            // all. This is additive in the strict sense: `terminal_type` is
+            // `None` for every shape that could compile before PLX-110, so no
+            // existing method's schema moves. It does NOT touch
+            // `MethodSchema.streaming` — the flag PLX-107 pinned as the
+            // author's transport decision, and the one thing plexus-transport
+            // reads to choose SSE over JSON.
+            if let Some(item_ty) = m.stream_item_type.as_ref().or(m.terminal_type.as_ref()) {
                 if m.returns_variants.is_empty() {
                     // No filtering - return full schema
                     quote! { (Some(#deps::schemars::schema_for!(#item_ty)), Vec::<&str>::new()) }
@@ -840,8 +849,17 @@ fn compute_method_hash(method: &MethodInfo) -> String {
         }
     }
 
-    // Hash return type if present
-    if let Some(item_ty) = &method.stream_item_type {
+    // Hash return type if present.
+    //
+    // PLX-110: `terminal_type` is the unary shape's return type and is `None`
+    // for every method that compiled before this build, so no existing method
+    // hash moves. A unary method that declared no return type in its hash would
+    // hash identically to a same-named method returning something else.
+    if let Some(item_ty) = method
+        .stream_item_type
+        .as_ref()
+        .or(method.terminal_type.as_ref())
+    {
         let ty_str = quote!(#item_ty).to_string();
         ty_str.hash(&mut hasher);
     }
