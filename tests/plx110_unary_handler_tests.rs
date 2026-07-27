@@ -36,7 +36,12 @@
 //! RFC 002 §6.6 (`Refused` is not `Failed`) is NOT satisfied by a mapping here,
 //! and is not violated by one either: this arm makes `Err` *mean* `Failed` and
 //! leaves a considered "no" with no spelling at all — the same position the
-//! streaming arm has always been in. See `a_refusal_has_no_spelling_yet` below.
+//! streaming arm has always been in.
+//!
+//! **PLX-112 closed that gap** and inverted the landmine PLX-110 left: see
+//! `a_refusal_now_has_a_spelling` below, and `plx112_refused_tests.rs` for the
+//! end-to-end dispatch proof. The decision recorded above is unchanged —
+//! `E: Into<TurnError>` still means `Failed`, and it is still the default.
 
 use async_stream::stream;
 use futures::stream::Stream;
@@ -247,25 +252,55 @@ async fn the_err_path_terminates_failed_per_the_recorded_e_into_turnerror_decisi
     );
 }
 
+/// PLX-112 INVERTS PLX-110's `a_refusal_has_no_spelling_yet`.
+///
+/// PLX-110 left a landmine here: an assertion that a considered "no" had no way
+/// to be said, which would fail loudly if someone closed the gap in
+/// `plexus-core` without teaching the macro the new spelling. PLX-112 closed it,
+/// so the landmine is replaced by its inverse rather than deleted.
+///
+/// Both halves are asserted, because the *shape* of the fix is the interesting
+/// fact and it is not the one PLX-110 guessed at:
+///
+/// 1. `TurnError` did NOT gain a kind. `into_stop_reason` is still `Failed` by
+///    construction — RFC 002 §6.7.1 says a non-`Failed` terminal MUST NOT carry
+///    a structured error, so a "refused error" is a contradiction. This half is
+///    verbatim PLX-110's original assertion and it still holds.
+/// 2. The spelling is `plexus_core::runtime::IntoTurnStop`, one level up from
+///    `Into<TurnError>`, and it lands as `StopKind::Refused` carrying open
+///    `StopDetail` and no error at all.
+///
+/// The end-to-end dispatch proof lives in `plx112_refused_tests.rs`.
 #[test]
-fn a_refusal_has_no_spelling_yet() {
-    // RFC 002 §6.6 says a considered "no" is `Refused` and MUST NOT be
-    // conflated with `Failed`. PLX-110 does not conflate them — it never maps a
-    // refusal onto `Failed`, it makes `Err` *mean* `Failed`. What it leaves
-    // open is that a `#[method]` has no way to say `Refused` at all, because
-    // `TurnError::into_stop_reason` hardcodes `StopReason::failed` and
-    // `plexus-core` was read-only for this ticket.
-    //
-    // This is a PRE-EXISTING gap, not one PLX-110 introduced, and this
-    // assertion is what will fail loudly if someone closes it in core without
-    // teaching the macro the new spelling.
+fn a_refusal_now_has_a_spelling() {
+    // Half 1 — PLX-110's assertion, unchanged. `TurnError` still means `Failed`.
     let stop = TurnError::new("app.denied", "the user said no").into_stop_reason();
     assert_eq!(
         stop.kind(),
         plexus_core::ir::StopKind::Failed,
-        "if TurnError can now produce a non-Failed kind, PLX-110's unary Err \
-         arm needs revisiting — see the finding in the ticket report"
+        "TurnError must stay Failed-only: RFC 002 §6.7.1 forbids a non-Failed \
+         terminal carrying a structured error, so the refusal spelling is a \
+         separate channel, not a kind field on the envelope"
     );
+
+    // Half 2 — and a considered "no" now HAS a spelling.
+    struct Denied;
+    impl plexus_core::runtime::IntoTurnStop for Denied {
+        fn into_turn_stop(self) -> plexus_core::runtime::TurnStop {
+            plexus_core::runtime::TurnStop::Refused(
+                plexus_core::ir::StopDetail::new("app.denied").with_message("the user said no"),
+            )
+        }
+    }
+
+    let (stop, value) = plexus_core::runtime::IntoTurnStop::into_turn_stop(Denied)
+        .into_handler_result()
+        .expect("a refusal is not an error")
+        .into_terminal();
+    assert_eq!(stop.kind(), plexus_core::ir::StopKind::Refused);
+    assert!(stop.error().is_none(), "RFC 002 §6.7.1");
+    assert_eq!(stop.detail().unwrap().code, "app.denied");
+    assert!(value.is_none());
 }
 
 // ---------------------------------------------------------------------------
