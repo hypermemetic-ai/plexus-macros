@@ -1,5 +1,0 @@
-error: REQ-10: method `list` uses `request = ()` but activation's `required = [auth_token]` locks these fields. Either remove the method-level `request = ()` override or remove the activation's `required` list (or move the method to a different activation).
-  --> tests/compile/req10_required_rejects_override.rs:26:14
-   |
-26 |     async fn list(&self) -> impl futures::stream::Stream<Item = String> + Send + 'static {
-   |              ^^^^

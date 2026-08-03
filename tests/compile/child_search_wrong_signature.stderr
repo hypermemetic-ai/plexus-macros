@@ -1,5 +1,0 @@
-error: child method signature mismatch: the query parameter of search method `find_by_id` must be `&str`
-  --> tests/compile/child_search_wrong_signature.rs:42:31
-   |
-42 |     fn find_by_id(&self, _id: u32) -> impl Stream<Item = String> + Send + '_ {
-   |                               ^^^

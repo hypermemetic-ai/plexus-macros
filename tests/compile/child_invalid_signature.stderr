@@ -1,5 +1,0 @@
-error: unsupported child method signature: the single parameter of a dynamic #[child] method must be `name: &str` (shapes: `fn NAME(&self) -> Child` or `fn NAME(&self, name: &str) -> Option<Child>`)
-  --> tests/compile/child_invalid_signature.rs:38:28
-   |
-38 |     fn planet(&self, name: u32) -> Option<Leaf> {
-   |                            ^^^

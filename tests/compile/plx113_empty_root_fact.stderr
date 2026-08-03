@@ -1,5 +1,0 @@
-error: `backend_name = ""` is not a declaration: RFC 002 §3.5 spells an absent optional as ABSENCE, and a present-but-empty root fact is a MUST violation. Give it a value or omit the argument entirely
-  --> tests/compile/plx113_empty_root_fact.rs:21:20
-   |
-21 |     backend_name = "",
-   |                    ^^

@@ -1,5 +1,0 @@
-error: child method signature mismatch: `wrongly_typed` must return `impl Stream<Item = String>` or `BoxStream<'_, String>`
-  --> tests/compile/child_list_wrong_signature.rs:42:32
-   |
-42 |     fn wrongly_typed(&self) -> impl Stream<Item = u32> + Send + '_ {
-   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

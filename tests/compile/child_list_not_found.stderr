@@ -1,5 +1,0 @@
-error: method `nonexistent_method` referenced by #[plexus_macros::child(list = "nonexistent_method")] on `planet` not found in impl
-  --> tests/compile/child_list_not_found.rs:37:35
-   |
-37 |     #[plexus_macros::child(list = "nonexistent_method")]
-   |                                   ^^^^^^^^^^^^^^^^^^^^

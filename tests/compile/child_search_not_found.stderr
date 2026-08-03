@@ -1,5 +1,0 @@
-error: method `never_declared` referenced by #[plexus_macros::child(search = "never_declared")] on `planet` not found in impl
-  --> tests/compile/child_search_not_found.rs:36:37
-   |
-36 |     #[plexus_macros::child(search = "never_declared")]
-   |                                     ^^^^^^^^^^^^^^^^

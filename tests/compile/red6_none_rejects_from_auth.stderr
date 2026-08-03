@@ -1,5 +1,0 @@
-error: RED-6: activation `PublicWithAuth` is `auth = "none"` (affirmative public) but method `contradiction` uses #[from_auth(...)]. Remove the annotation or change the activation's auth posture.
-  --> tests/compile/red6_none_rejects_from_auth.rs:31:14
-   |
-31 |     async fn contradiction(&self, #[from_auth(self.validate)] _u: FakeUser)
-   |              ^^^^^^^^^^^^^

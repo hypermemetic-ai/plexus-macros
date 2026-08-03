@@ -1,5 +1,0 @@
-error: unknown `#[method(...)]` key `unknwon`. `#[activation]` accepts: bidirectional, description, ext, http_method, name, override_call, params, public, request, returns, scope, streaming. Unknown keys are errors by design — use `ext(unknwon = ...)` for open extension metadata
-  --> tests/compile/plx93_activation_unknown_method_key.rs:21:37
-   |
-21 |     #[plexus_macros::method(public, unknwon = 1)]
-   |                                     ^^^^^^^

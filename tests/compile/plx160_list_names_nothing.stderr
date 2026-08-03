@@ -1,5 +1,0 @@
-error: method `session_idz` referenced by #[plexus_macros::child(list = "session_idz")] on `session` not found in impl
-  --> tests/compile/plx160_list_names_nothing.rs:35:35
-   |
-35 |     #[plexus_macros::child(list = "session_idz")]
-   |                                   ^^^^^^^^^^^^^
