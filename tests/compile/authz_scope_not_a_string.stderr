@@ -1,5 +1,0 @@
-error: scope = ... expects a string literal, e.g. #[plexus_macros::method(scope = "facet.write")]
- --> tests/compile/authz_scope_not_a_string.rs:8:29
-  |
-8 |     #[plexus_macros::method(scope = 42)]
-  |                             ^^^^^

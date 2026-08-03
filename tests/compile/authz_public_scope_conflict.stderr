@@ -1,5 +1,0 @@
-error: a public method has no required scope; remove `public` or remove `scope = ...`
- --> tests/compile/authz_public_scope_conflict.rs:9:29
-  |
-9 |     #[plexus_macros::method(public, scope = "conflicted.read")]
-  |                             ^^^^^^

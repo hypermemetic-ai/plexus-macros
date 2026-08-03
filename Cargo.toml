@@ -9,45 +9,9 @@ repository = "https://github.com/hypermemetic-ai/plexus-macros"
 proc-macro = true
 
 [dependencies]
-proc-macro2 = "1.0"
-proc-macro-crate = "3"
-quote = "1.0"
-serde_json = "1.0"
-syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
-uuid = { version = "1.0", features = ["v5"] }
 
 [features]
-# Enables the no-op JsonSchema proc_macro_derive, used by plexus-schemars-compat
-# to intercept #[derive(schemars::JsonSchema)] in test code.
-schemars-compat = []
-
 
 [dev-dependencies]
-plexus-macros = { path = "." }
-plexus-core = { path = "../plexus-core" }
-# PLX-136 (ACP·B): the `#[acp_agent]` fixtures need `plexus_acp::v1::Agent` to
-# exist. It is a DEV-dependency ONLY — the macro holds no copy of the ACP
-# vocabulary. It emits the author's own idents as strings and lets plexus-acp
-# do the ident -> AgentMethod mapping at runtime through its public
-# `AgentMethod::ALL` / `trait_item()` surface, so nothing in `src/` names an
-# ACP wire method or a capability field.
-plexus-acp = { path = "../plexus-acp", version = "0.1" }
-# PLX-92: `plexus-auth-core` was a dev-dependency solely for the
-# AUTHZ-CRED-MACRO-1 trybuild fixtures, which went with `#[derive(Credentials)]`.
-# No test references it any more.
-dialectic = { version = "0.4.1", features = ["tokio"] }
-schemars = { version = "1.1", features = ["derive", "uuid1"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-trybuild = "1.0"
-uuid = { version = "1.0", features = ["v4"] }
-# Runtime dependencies needed by `#[plexus_macros::activation]`-generated code in compile tests
-jsonrpsee = { version = "0.26", features = ["server", "macros"] }
-async-trait = "0.1"
-tokio = { version = "1.0", features = ["full"] }
-futures = "0.3"
-async-stream = "0.3"
-
-
 
 

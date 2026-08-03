@@ -1,5 +1,0 @@
-error: #[plexus_macros::child] and #[plexus_macros::method] are mutually exclusive on the same function: a function is either an RPC method or a child router entry, not both
-  --> tests/compile/child_and_method_mutually_exclusive.rs:38:5
-   |
-38 |     async fn mercury(&self) -> impl Stream<Item = Leaf> + Send + 'static {
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

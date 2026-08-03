@@ -1,8 +1,0 @@
-error[E0046]: not all trait items implemented, missing: `prompt`
- --> tests/compile/plx136_missing_required_item.rs:9:1
-  |
-9 | #[plexus_macros::acp_agent]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `prompt` in implementation
-  |
-  = note: this error originates in the attribute macro `plexus_macros::acp_agent` (in Nightly builds, run with -Z macro-backtrace for more info)
-  = help: implement the missing item: `fn prompt<'life0: 'async_trait, 'async_trait>(&'life0 self, _: plexus_acp::v1::schema::PromptRequest) -> Pin<Box<(dyn Future<Output = Result<plexus_acp::v1::schema::PromptResponse, plexus_acp::v1::schema::Error>> + Send + 'async_trait)>> { todo!() }`

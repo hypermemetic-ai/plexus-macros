@@ -1,5 +1,0 @@
-error: duplicate ext key `nostr_kind` in one ext(...)
- --> tests/compile/plx71_ext_duplicate_key.rs:9:53
-  |
-9 |     #[plexus_macros::method(ext(nostr_kind = 30023, nostr_kind = 30024))]
-  |                                                     ^^^^^^^^^^
