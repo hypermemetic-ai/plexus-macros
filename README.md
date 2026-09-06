@@ -18,6 +18,16 @@ Client libraries (type-safe, documented, deprecation-aware)
 
 Everything downstream — generated clients, OpenAPI docs, deprecation warnings in TypeScript IDEs — is derived from what `#[plexus_macros::activation]` emits into `PluginSchema`. Do not hand-write schemas; the macro owns them.
 
+For **Rust** consumers there is a shorter path: the macro emits the client itself.
+
+```
+#[plexus_macros::activation(namespace = "tickets", client)]
+  ↓  same expansion, same information
+TicketsClient<T: plexus_client::Transport>   ← typed params, typed events
+```
+
+The Synapse → IR → codegen pipeline above stays the path for TypeScript, Python and everything non-Rust. See [The typed client](#the-typed-client-client--server_cfg).
+
 ---
 
 ## Documentation is primary: `///` everywhere
@@ -519,6 +529,120 @@ If a value would be the same for every method call in a request, it belongs in t
 
 ---
 
+## The typed client (`client` + `server_cfg`)
+
+The macro sees every method's wire name, its parameters and its
+`Stream<Item = E>` event type at the moment it runs. With the `client` flag it
+emits a **typed client** from that same information, so a Rust consumer never
+hand-writes a call site or hand-mirrors an event type.
+
+```rust
+#[plexus_macros::activation(namespace = "tickets", client)]
+impl Tickets { /* unchanged */ }
+```
+
+emits, beside the activation's own items:
+
+```rust
+pub struct TicketsClient<T> { /* .. */ }
+
+impl<T> TicketsClient<T> {
+    pub const NAMESPACE: &'static str = "tickets";
+    pub fn new(transport: T) -> Self;
+    pub fn transport(&self) -> &T;
+    pub fn into_transport(self) -> T;
+}
+
+impl<T: plexus_client::Transport> TicketsClient<T> {
+    pub const METHOD_LIST: plexus_client::MethodRef;      // one per method
+    pub fn list(&self, epic: Option<String>, parent: Option<String>)
+        -> plexus_client::EventStream<'_, TicketsEvent>;
+    pub async fn list_all(&self, epic: Option<String>, parent: Option<String>)
+        -> Result<Vec<TicketsEvent>, plexus_client::ClientError>;
+}
+```
+
+Requires the consuming crate to depend on
+[`plexus-client`](plexus-client/) — the wasm-safe runtime the emitted code
+links against. A missing dependency is reported at the `client` flag, not as
+an unresolved import in code you did not write.
+
+### What you get
+
+| | |
+|---|---|
+| **Typed params** | the method's own parameter types, in signature order. `#[activation_param]`, `#[from_auth]` and `auth:` params are absent — the server injects those. |
+| **Typed events** | `EventStream<'_, E>` for the method's `Stream<Item = E>`. `E` is the activation's own type, not a copy. |
+| **Two shapes** | `m(..)` streams; `m_all(..)` drives to completion and returns `Vec<E>`. |
+| **Transport-generic** | any `plexus_client::Transport` — in-process, WebSocket JSON-RPC, REST + SSE. The emitted code names none of them. |
+| **Two error layers** | `ClientError::Transport` (the connection failed) vs `ClientError::Remote` (the server answered `error`). An activation's *own* `Error` variant stays a data event. |
+| **Zero drift** | rename a field on an event type and every consumer of the client stops compiling. |
+
+`Option` parameters that are `None` are **omitted** from the params object,
+not sent as `null` — matching what a server with
+`skip_serializing_if = "Option::is_none"` puts on the wire.
+
+### Reaching wasm32: `server_cfg`
+
+An activation crate is usually also a server, and tokio / jsonrpsee /
+plexus-core do not build for `wasm32-unknown-unknown`. `server_cfg` puts the
+**server half** of the expansion — the impl block, the method enum, the
+`Activation` impl, the jsonrpsee trait — behind a `cfg`, while the client half
+stays unconditional:
+
+```toml
+# Cargo.toml
+[features]
+default = ["server"]
+server  = ["dep:plexus-core", "dep:tokio", "dep:jsonrpsee", "dep:serde_json", "dep:uuid", "dep:async-trait"]
+
+[dependencies]
+# NOT optional: a proc-macro crate is built for the host, never the target,
+# so a wasm32 build pays nothing for it — and that is what lets the macro run,
+# and emit the client, in a build with no server dependencies at all.
+plexus-macros = "0.6"
+plexus-client = "0.6"
+serde         = { version = "1", features = ["derive"] }
+```
+
+```rust
+#[plexus_macros::activation(
+    namespace = "tickets",
+    client,
+    server_cfg = "feature = \"server\"",
+)]
+impl Tickets { /* .. */ }
+```
+
+A consumer then needs **one dependency line**:
+
+```toml
+tickets-api = { version = "0.1", default-features = false }
+```
+
+and gets the types and the client with no tokio, jsonrpsee or plexus-core
+anywhere in its tree. Gating your own struct definition and server-only
+imports is still yours to do — the macro only gates its own output.
+
+Worked end to end in [`fixtures/tickets-api`](fixtures/tickets-api/) (the
+activation) and
+[`fixtures/tickets-wasm-consumer`](fixtures/tickets-wasm-consumer/) (a
+consumer with no wire code of its own). Both build for
+`wasm32-unknown-unknown`.
+
+### Transports
+
+| Transport | Where | Status |
+|---|---|---|
+| `MemoryTransport` | `plexus-client` | scripted test double; wasm-safe by construction |
+| `InProcessTransport` | `plexus-core` (`plexus::in_process`) | drives an `Activation` directly — no server |
+| WebSocket JSON-RPC | — | not yet built |
+| REST + SSE | — | not yet built |
+
+Both flags are opt-in: an activation naming neither expands exactly as before.
+
+---
+
 ## Security model
 
 This documents the **actual generated behavior**, not an aspiration. Read it before assuming a method is protected.
@@ -549,6 +673,8 @@ Attached to an `impl` block to generate the activation's `Activation` trait impl
 | `crate_path = "..."` | string | auto (via `proc-macro-crate`) | Override the `plexus-core` import path. Rarely needed after CHILD-6. |
 | `plugin_id = "UUID"` | string | deterministic UUIDv5 from namespace | Explicit plugin UUID. Must parse as a UUID. |
 | `namespace_fn = "method"` | string | _(none)_ | Advanced: generate `namespace()` as a method call instead of a constant. |
+| `client` | flag | _(off)_ | Also emit the typed client — see [The typed client](#the-typed-client-client--server_cfg). Requires a `plexus-client` dependency. |
+| `server_cfg = "<pred>"` | string | _(none)_ | Compile the **server** half of the expansion only under that `cfg` (e.g. `feature = "server"`). Requires `client`. This is what makes an activation crate reachable from wasm32. |
 | `hub` | flag | _(off, deprecated)_ | Deprecated — hub mode is inferred from `#[child]` methods. Removed in 0.6. |
 | `children = [ident, ...]` | ident list | _(empty, deprecated)_ | Deprecated — use `#[child]` methods. Removed in 0.6. |
 
