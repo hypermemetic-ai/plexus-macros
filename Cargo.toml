@@ -1,3 +1,10 @@
+[workspace]
+# MACRO-2: `plexus-client` is the runtime half of the client this crate
+# generates. It lives here rather than in plexus-core because it must build
+# for wasm32-unknown-unknown, and because a macro and the runtime its output
+# links against have to move together — one repo, one tag, no version skew.
+members = [".", "plexus-client"]
+
 [package]
 name = "plexus-macros"
 version = "0.6.0"
@@ -23,7 +30,11 @@ schemars-compat = []
 
 [dev-dependencies]
 plexus-macros = { path = "." }
-plexus-core = { path = "../plexus-core" }
+plexus-core = { path = "../plexus-core-macro-2" }
+# MACRO-2: the runtime the generated client links against. A dev-dependency
+# here because the macro only *emits* paths into it; consumers of a generated
+# client depend on it directly.
+plexus-client = { path = "plexus-client", version = "0.6.0" }
 # Needed by the AUTHZ-CRED-MACRO-1 trybuild fixtures: the macro emits code
 # that references `Credential`, `CredentialKind`, `AttachmentSite`,
 # `CredentialScheme`, `Scope`, `MethodPath`, `HeaderName`, `CookieName`,

@@ -1,0 +1,20 @@
+[package]
+name = "plexus-client"
+version = "0.6.0"
+edition = "2021"
+license = "MIT"
+description = "wasm-safe client runtime for Plexus RPC: the wire envelope, the Transport trait, and typed event decoding"
+
+# The whole point of this crate: a wasm32 consumer can depend on it without
+# dragging in tokio/jsonrpsee/rmcp. Every dependency below builds for
+# wasm32-unknown-unknown. Adding a dependency that does not is a regression —
+# `cargo build -p plexus-client --target wasm32-unknown-unknown` is the gate.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures-core = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+futures = "0.3"
+tokio = { version = "1.0", features = ["macros", "rt"] }
