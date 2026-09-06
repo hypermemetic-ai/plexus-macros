@@ -110,6 +110,19 @@ where
     }))
 }
 
+/// A typed stream that yields exactly one error and then ends.
+///
+/// What a generated client method returns when it cannot even build the
+/// request — a parameter that would not serialize. Keeping the signature a
+/// stream (rather than `Result<EventStream, _>`) means the call site handles
+/// one error channel, not two.
+pub fn error_stream<'a, E>(error: ClientError) -> EventStream<'a, E>
+where
+    E: 'a,
+{
+    Box::pin(stream::once(async move { Err(error) }))
+}
+
 /// Drive a typed stream to completion, collecting every `data` event.
 ///
 /// The shape a unary method wants: menger's finite calls (`list`, `get`,

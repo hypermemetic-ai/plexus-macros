@@ -1,6 +1,7 @@
 //! Code generation for Plexus RPC macros
 
 mod activation;
+mod client;
 mod method_enum;
 
 use crate::parse::{
@@ -665,7 +666,21 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &deps,
     );
 
-    Ok(quote! {
+    // MACRO-2: the typed client, when the activation opted in. Empty
+    // otherwise, so a non-opted-in expansion is byte-identical to before.
+    let client_impl = if args.client {
+        let span = args.client_span.unwrap_or_else(Span::call_site);
+        let client_path = client::resolve_client_path(span)?;
+        client::generate(&struct_name, &args.namespace, &methods, &client_path)?
+    } else {
+        TokenStream::new()
+    };
+
+    // MACRO-2: everything above this line is the SERVER half. When
+    // `server_cfg = "..."` is set it is emitted under that cfg, so a build
+    // that does not satisfy the predicate gets the client and nothing else —
+    // which is how an activation crate becomes reachable from wasm32.
+    let server_half = quote! {
         #deps_shim_mod
         #input_impl
         #method_enum
@@ -674,7 +689,64 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         #children_deprecation_warning
         #mixed_auth_warning
         #required_posture_optional_auth_warning
+    };
+
+    let server_half = match &args.server_cfg {
+        None => server_half,
+        Some(pred) => {
+            let span = args.server_cfg_span.unwrap_or_else(Span::call_site);
+            if !args.client {
+                return Err(syn::Error::new(
+                    span,
+                    "#[plexus_macros::activation]: `server_cfg = \"...\"` suppresses the \
+                     server half of the expansion, which only makes sense alongside the \
+                     `client` flag — otherwise the attribute emits nothing at all under \
+                     the negated predicate. Add `client`, or put your own `#[cfg]` on the \
+                     module instead.",
+                ));
+            }
+            cfg_gate(server_half, pred, span)?
+        }
+    };
+
+    Ok(quote! {
+        #server_half
+        #client_impl
     })
+}
+
+/// MACRO-2: put `#[cfg(<pred>)]` on every item of an emitted token stream.
+///
+/// `#[cfg]` attaches to *items*, not to token streams, so the aggregate is
+/// re-parsed as a `syn::File` and each item is re-emitted with the attribute
+/// prepended. The round trip is safe because the input is our own output —
+/// already valid Rust, spans preserved by syn.
+fn cfg_gate(items: TokenStream, predicate: &str, span: Span) -> syn::Result<TokenStream> {
+    let meta: syn::Meta = syn::parse_str(predicate).map_err(|e| {
+        syn::Error::new(
+            span,
+            format!(
+                "server_cfg = \"...\" must be a `cfg` predicate, e.g. \
+                 `feature = \"server\"` or `not(target_arch = \"wasm32\")` ({e})"
+            ),
+        )
+    })?;
+
+    let file: syn::File = syn::parse2(items).map_err(|e| {
+        syn::Error::new(
+            span,
+            format!("plexus-macros could not re-parse its own expansion to apply server_cfg ({e})"),
+        )
+    })?;
+
+    let gated = file.items.into_iter().map(|item| {
+        quote! {
+            #[cfg(#meta)]
+            #item
+        }
+    });
+
+    Ok(quote! { #(#gated)* })
 }
 
 /// AUTHZ-MACRO-OPTIONAL-AUTH-1: emit a compile-time warning when an

@@ -103,6 +103,15 @@ pub enum ClientError {
         content_type: Option<String>,
         message: String,
     },
+
+    /// An argument could not be serialized into the call's params object,
+    /// so nothing was sent. A generated client reports this rather than
+    /// panicking — a panic in a wasm32 consumer is an unrecoverable trap.
+    Encode {
+        /// The parameter that failed.
+        param: &'static str,
+        message: String,
+    },
 }
 
 impl ClientError {
@@ -137,6 +146,9 @@ impl fmt::Display for ClientError {
                 message,
             } => write!(f, "decode {ct}: {message}"),
             ClientError::Decode { message, .. } => write!(f, "decode: {message}"),
+            ClientError::Encode { param, message } => {
+                write!(f, "encode param `{param}`: {message}")
+            }
         }
     }
 }

@@ -3,7 +3,15 @@
 # generates. It lives here rather than in plexus-core because it must build
 # for wasm32-unknown-unknown, and because a macro and the runtime its output
 # links against have to move together — one repo, one tag, no version skew.
-members = [".", "plexus-client"]
+members = [
+    ".",
+    "plexus-client",
+    # MACRO-2 criterion 1's two fixtures: an activation crate that is
+    # reachable from wasm32, and a consumer that reaches it in one
+    # dependency line. Not published.
+    "fixtures/tickets-api",
+    "fixtures/tickets-wasm-consumer",
+]
 
 [package]
 name = "plexus-macros"

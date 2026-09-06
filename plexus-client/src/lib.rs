@@ -58,7 +58,7 @@ pub mod event;
 pub mod memory;
 pub mod transport;
 
-pub use decode::{collect_data, decode, EventStream};
+pub use decode::{collect_data, decode, error_stream, EventStream};
 pub use envelope::{StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};
 pub use event::ClientEvent;

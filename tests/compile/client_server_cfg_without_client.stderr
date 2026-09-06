@@ -1,0 +1,13 @@
+error: #[plexus_macros::activation]: `server_cfg = "..."` suppresses the server half of the expansion, which only makes sense alongside the `client` flag — otherwise the attribute emits nothing at all under the negated predicate. Add `client`, or put your own `#[cfg]` on the module instead.
+  --> tests/compile/client_server_cfg_without_client.rs:12:63
+   |
+12 | #[plexus_macros::activation(namespace = "thing", server_cfg = "feature = \"server\"")]
+   |                                                               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `futures::Stream`
+ --> tests/compile/client_server_cfg_without_client.rs:8:5
+  |
+8 | use futures::Stream;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -1,0 +1,25 @@
+[package]
+name = "tickets-wasm-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "MACRO-2 fixture: proves a consumer needs ONE dependency line to get the typed client for wasm32"
+
+# MACRO-2 criterion 1, as a Cargo.toml: "a consumer must be able to say
+# 'give me menger's tickets client for wasm' in one dependency line".
+#
+# This is that line. `default-features = false` drops plexus-core, tokio,
+# jsonrpsee and uuid; what is left is the activation's own types and the
+# generated client. `plexus-client` is the runtime the generated code links
+# against, and `futures` is how a caller drives a stream — no consumer of
+# this crate needs to know that plexus-core exists.
+#
+# Gate: `cargo build -p tickets-wasm-consumer --target wasm32-unknown-unknown`
+[dependencies]
+tickets-api = { path = "../tickets-api", default-features = false }
+plexus-client = { path = "../../plexus-client" }
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["macros", "rt"] }
+serde_json = "1.0"

@@ -49,7 +49,7 @@
 //!
 //! | Macro | Purpose |
 //! |---|---|
-//! | `#[plexus_macros::activation]` | Turn an `impl` block into a Plexus RPC activation. |
+//! | `#[plexus_macros::activation]` | Turn an `impl` block into a Plexus RPC activation — and, with `client`, emit its typed client. |
 //! | `#[plexus_macros::method]` | Mark a method as an RPC endpoint. |
 //! | `#[plexus_macros::child]` | Register a child activation for `ChildRouter` dispatch. |
 //! | `#[plexus_macros::removed_in]` | Companion to `#[deprecated]` carrying the removal version. |
@@ -430,6 +430,9 @@ fn generate_schema_fn(
 /// - `version = "..."` (optional, default: "1.0.0") - Version string
 /// - `description = "..."` (optional) - Activation description
 /// - `crate_path = "..."` (optional, default: "crate") - Path to substrate crate
+/// - `client` (optional flag) - also emit the typed client (MACRO-2, below)
+/// - `server_cfg = "<cfg predicate>"` (optional) - compile the server half
+///   only under that `cfg` (MACRO-2, below)
 ///
 /// # Example
 ///
@@ -443,6 +446,59 @@ fn generate_schema_fn(
 ///     }
 /// }
 /// ```
+///
+/// # The typed client (`client`, `server_cfg`) — MACRO-2
+///
+/// The macro already knows, when it runs, every method's wire name, its
+/// parameters and its `Stream<Item = E>` event type. With `client` it also
+/// emits a **typed client** for the activation, so a Rust consumer never
+/// hand-writes a call site or hand-mirrors an event type:
+///
+/// ```ignore
+/// #[plexus_macros::activation(namespace = "tickets", client)]
+/// impl Tickets { /* unchanged */ }
+///
+/// // emitted beside the impl:
+/// let client = TicketsClient::new(transport);          // any plexus_client::Transport
+/// let mut watch = client.watch(Some("MACRO".into()));  // EventStream<'_, TicketsEvent>
+/// let all = client.list_all(None, None, None).await?;  // Vec<TicketsEvent>
+/// ```
+///
+/// The client is generic over the transport, so the emitted code names none
+/// of them; its parameter and event types are the activation's own, so a
+/// change to either is a compile error in every consumer.
+///
+/// **Requires** the consuming crate to depend on `plexus-client`. A
+/// proc-macro crate cannot check that for you at expansion time in general,
+/// but the path is resolved through `proc-macro-crate`, so a missing
+/// dependency is reported at the `client` flag rather than as an unresolved
+/// import in code you did not write.
+///
+/// **`server_cfg = "..."`** puts the *server* half of the expansion — the
+/// impl block, the method enum, the `Activation` impl, the jsonrpsee trait —
+/// behind a `cfg`, while the client half stays unconditional. That is what
+/// makes an activation crate reachable from `wasm32-unknown-unknown`:
+///
+/// ```ignore
+/// // Cargo.toml: server deps are optional and behind `feature = "server"`.
+/// // plexus-macros itself stays non-optional — a proc-macro crate is built
+/// // for the host, so it costs a wasm32 build nothing.
+/// #[plexus_macros::activation(
+///     namespace = "tickets",
+///     client,
+///     server_cfg = "feature = \"server\"",
+/// )]
+/// impl Tickets { /* .. */ }
+/// ```
+///
+/// A consumer then says one line — `tickets-api = { version = "..",
+/// default-features = false }` — and gets the types and the client, with no
+/// tokio, jsonrpsee or plexus-core anywhere in its tree. Gating your own
+/// struct definition and server-only imports is still yours to do; the macro
+/// only gates its own output.
+///
+/// Both flags are opt-in: an activation that names neither expands exactly
+/// as it did before.
 #[proc_macro_attribute]
 pub fn activation(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as HubMethodsAttrs);

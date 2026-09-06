@@ -1,0 +1,49 @@
+[package]
+name = "tickets-api"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "MACRO-2 fixture: an activation crate shaped like menger's `tickets`, reachable from wasm32"
+
+# The shape MACRO-2 asks for: ONE dependency line gets a consumer the typed
+# client for wasm (`tickets-api = { .., default-features = false }`), and the
+# same crate with default features is the server.
+#
+# Everything server-only is optional and gated behind `server`; the macro's
+# server half is gated on the same predicate via `server_cfg`, so the
+# `#[activation]` attribute stays in the source unconditionally and still
+# produces the client when the feature is off.
+#
+# `plexus-macros` is NOT optional: a proc-macro crate is compiled for the
+# host, never for the target, so depending on it costs a wasm32 build
+# nothing. That is precisely what lets the macro run — and emit the client —
+# in a build that has no server dependencies at all.
+[features]
+default = ["server"]
+server = [
+    "dep:plexus-core",
+    "dep:async-trait",
+    "dep:jsonrpsee",
+    "dep:tokio",
+    "dep:uuid",
+    "dep:serde_json",
+]
+
+[dependencies]
+plexus-macros = { path = "../.." }
+plexus-client = { path = "../../plexus-client" }
+serde = { version = "1.0", features = ["derive"] }
+futures = "0.3"
+schemars = { version = "1.1", features = ["derive"] }
+
+# Server-only. None of these builds for wasm32-unknown-unknown.
+plexus-core = { path = "../../../plexus-core-macro-2", optional = true }
+async-trait = { version = "0.1", optional = true }
+jsonrpsee = { version = "0.26", features = ["server", "macros"], optional = true }
+tokio = { version = "1.0", features = ["full"], optional = true }
+uuid = { version = "1.0", features = ["v4", "v5"], optional = true }
+serde_json = { version = "1.0", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["macros", "rt"] }
+serde_json = "1.0"

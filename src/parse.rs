@@ -436,6 +436,36 @@ pub struct HubMethodsAttrs {
     /// byte-identical schemas to pre-R-1 (AP-1 acceptance criterion #2).
     /// `Some(p)` is emitted into every generated `MethodSchema.auth_posture`.
     pub auth_posture: Option<AuthPosture>,
+    /// MACRO-2: emit the typed client alongside the server side.
+    ///
+    /// Opt-in (`client` as a bare flag) rather than automatic, because the
+    /// emitted client links against `plexus-client`; turning it on for
+    /// everyone would break every existing consumer that has not added the
+    /// dependency. Same additive rule AUTHZ-CRED-MACRO-3 used for
+    /// `plexus-auth-core`.
+    pub client: bool,
+    /// Span of the `client` flag, so a missing `plexus-client` dependency
+    /// points at the flag that asked for it.
+    pub client_span: Option<proc_macro2::Span>,
+    /// MACRO-2: a `cfg` predicate under which the **server** half of the
+    /// expansion is compiled — the impl block, the method enum, the
+    /// `Activation` impl, the jsonrpsee trait, the dependency shim.
+    ///
+    /// This is what makes an activation crate reachable from wasm32. With
+    /// `server_cfg = "feature = \"server\""`, a `--no-default-features`
+    /// build of the activation's crate emits *only* the typed client, which
+    /// depends on nothing but `plexus-client` and the activation's own
+    /// event and parameter types. The consumer says one dependency line
+    /// (`tickets-api = { version = "..", default-features = false }`) and
+    /// gets a client that compiles for the browser.
+    ///
+    /// The predicate is any `cfg` meta: `feature = "server"`,
+    /// `not(target_arch = "wasm32")`, `all(..)`. Only the macro's own output
+    /// is gated — the author still gates their own struct definition and
+    /// server-only imports, as they would for any optional dependency.
+    pub server_cfg: Option<String>,
+    /// Span of `server_cfg`, for diagnostics.
+    pub server_cfg_span: Option<proc_macro2::Span>,
 }
 
 /// RED-6: declared auth enforcement posture for an activation.
@@ -469,6 +499,11 @@ impl Parse for HubMethodsAttrs {
         // R-1: `None` = posture never declared (enforced as Optional, not
         // emitted); `Some(p)` = declared and emitted.
         let mut auth_posture: Option<AuthPosture> = None;
+        // MACRO-2: opt-in typed-client emission.
+        let mut client = false;
+        let mut client_span: Option<proc_macro2::Span> = None;
+        let mut server_cfg: Option<String> = None;
+        let mut server_cfg_span: Option<proc_macro2::Span> = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -524,6 +559,10 @@ impl Parse for HubMethodsAttrs {
                                 plugin_id = Some(id_str);
                             } else if path.is_ident("namespace_fn") {
                                 namespace_fn = Some(s.value());
+                            } else if path.is_ident("server_cfg") {
+                                // MACRO-2: cfg predicate gating the server half.
+                                server_cfg = Some(s.value());
+                                server_cfg_span = Some(s.span());
                             } else if path.is_ident("auth") {
                                 // RED-6: declared auth enforcement posture.
                                 // See HubMethodsAttrs::auth_posture for semantics.
@@ -551,6 +590,10 @@ impl Parse for HubMethodsAttrs {
                         } else if path.is_ident("hub") {
                             hub = true;
                             hub_span = Some(path.span());
+                        } else if path.is_ident("client") {
+                            // MACRO-2: also emit the typed client.
+                            client = true;
+                            client_span = Some(path.span());
                         }
                     }
                     Meta::List(list) => {
@@ -598,6 +641,10 @@ impl Parse for HubMethodsAttrs {
             required_fields,
             required_fields_span,
             auth_posture,
+            client,
+            client_span,
+            server_cfg,
+            server_cfg_span,
         })
     }
 }
