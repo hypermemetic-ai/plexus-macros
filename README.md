@@ -656,11 +656,12 @@ let tickets = TicketsClient::new(&transport);   // …and reuse it for every act
 `hub_namespace` is the server's `DynamicHub::new(ns)` namespace, not an
 activation namespace: the same `tickets.list` goes to `menger.call` on one
 deployment and to another hub's `call` elsewhere. Worked end to end against a
-real server in
-[`fixtures/menger-tickets-api`](fixtures/menger-tickets-api/) — a
-**client-only** mirror of an activation whose server lives in another
-repository, which is the shape a consumer of somebody else's Plexus service
-is in.
+real server by menger itself: its `tickets` activation carries `client` and
+`server_cfg`, the browser app takes the crate with `default-features =
+false`, and `tests/wire_client.rs` there drives the emitted `TicketsClient`
+over `WsTransport` against the in-process server. (A client-only mirror of
+menger's declarations lived under `fixtures/` while menger was still on the
+0.5 line; it is gone — one declaration, nothing to drift.)
 
 Both flags are opt-in: an activation naming neither expands exactly as before.
 

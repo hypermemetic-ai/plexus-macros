@@ -11,10 +11,6 @@ members = [
     # dependency line. Not published.
     "fixtures/tickets-api",
     "fixtures/tickets-wasm-consumer",
-    # MACRO-6: a client-only mirror of menger's `tickets` activation, and
-    # the home of the WebSocket transport's tests — the fake-server unit
-    # tests and the wire test against a real menger.
-    "fixtures/menger-tickets-api",
 ]
 
 [package]
@@ -42,7 +38,7 @@ schemars-compat = []
 
 [dev-dependencies]
 plexus-macros = { path = "." }
-plexus-core = { path = "../plexus-core-macro-6" }
+plexus-core = { path = "../plexus-core" }
 # MACRO-2: the runtime the generated client links against. A dev-dependency
 # here because the macro only *emits* paths into it; consumers of a generated
 # client depend on it directly.

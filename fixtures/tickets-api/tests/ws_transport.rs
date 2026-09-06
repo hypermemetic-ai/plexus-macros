@@ -1,7 +1,7 @@
 //! MACRO-6 · the WebSocket JSON-RPC transport, pinned frame by frame.
 //!
 //! These tests speak to a **scripted** JSON-RPC server in this file rather
-//! than to menger, because the properties under test are properties of the
+//! than to a real server, because the properties under test are properties of the
 //! *transport* and several of them a real server will not reproduce on
 //! demand: a notification under a method name the server does not currently
 //! use, a socket that dies mid-stream, a JSON-RPC `error` answer to a
@@ -12,7 +12,7 @@
 //! asserts on the actual bytes.
 
 use futures::StreamExt;
-use menger_tickets_api::{MengerTicketsClient, TicketsEvent};
+use tickets_api::{TicketsClient, TicketsEvent};
 use plexus_client::{ClientEvent, MethodRef, StreamItem, Transport, TransportErrorKind, WsTransport};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -164,10 +164,10 @@ async fn a_client_call_is_one_subscribe_frame() {
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
     assert_eq!(transport.hub_namespace(), "menger");
-    let client = MengerTicketsClient::new(transport);
+    let client = TicketsClient::new(transport);
 
     let events = client
-        .list_all(Some("MACRO".into()), None, None)
+        .list_all(Some("MACRO".into()), None)
         .await
         .expect("call completes");
     assert!(events.is_empty(), "the script sent no data items");
@@ -222,7 +222,7 @@ async fn both_notification_method_names_route_by_subscription_id() {
     .await;
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
-    let client = MengerTicketsClient::new(transport);
+    let client = TicketsClient::new(transport);
 
     let ids: Vec<String> = client
         .watch_all(None)
@@ -267,7 +267,7 @@ async fn dropping_a_watch_stream_sends_call_unsub() {
     .await;
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
-    let client = MengerTicketsClient::new(transport);
+    let client = TicketsClient::new(transport);
 
     {
         let mut watch = client.watch(Some("MACRO".into()));
@@ -303,7 +303,7 @@ async fn a_stream_that_reached_done_does_not_unsubscribe() {
     .await;
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
-    let client = MengerTicketsClient::new(transport);
+    let client = TicketsClient::new(transport);
     let events = client.get_all("MACRO-6".into()).await.expect("completes");
     assert!(events.is_empty());
 
@@ -331,7 +331,7 @@ async fn a_stream_dropped_before_the_first_poll_still_unsubscribes() {
     .await;
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
-    let client = MengerTicketsClient::new(transport);
+    let client = TicketsClient::new(transport);
 
     // Not awaited, not polled — but the subscribe frame is already written.
     drop(client.watch(None));
@@ -431,9 +431,9 @@ async fn an_in_band_error_item_is_remote_not_transport() {
     .await;
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
-    let client = MengerTicketsClient::new(transport);
+    let client = TicketsClient::new(transport);
     let err = client
-        .create_all("CY".into(), "loop".into(), None, None, None, None, None)
+        .get_all("CY-1".into())
         .await
         .expect_err("the hub answered error");
     assert!(err.is_remote(), "{err}");
@@ -477,14 +477,14 @@ async fn two_concurrent_calls_are_independent_streams_on_one_connection() {
     .await;
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
-    let client = MengerTicketsClient::new(transport);
+    let client = TicketsClient::new(transport);
 
     let mut watch = client.watch(None);
     // The subscribe for `watch` has to be on the wire before `list` is sent,
     // or the script's ordering is not what is being tested.
     hub.wait_for_frames(1).await;
 
-    let listed = client.list_all(None, None, None).await.expect("list completes");
+    let listed = client.list_all(None, None).await.expect("list completes");
     assert_eq!(
         listed,
         vec![TicketsEvent::NotFound {
@@ -526,7 +526,7 @@ async fn dropping_the_transport_closes_the_socket() {
     .await;
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
-    MengerTicketsClient::new(&transport)
+    TicketsClient::new(&transport)
         .health_all()
         .await
         .expect("one call, so the connection is certainly up");
