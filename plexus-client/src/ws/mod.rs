@@ -119,6 +119,25 @@ fn trace(direction: &str, frame: &str) {
 pub struct WsTransport {
     conn: backend::Conn,
     registry: Arc<Registry>,
+    /// Shuts the socket down when the last handle goes. Streams borrow the
+    /// transport, so they are always gone by then.
+    _closer: Arc<Closer>,
+}
+
+/// Closes the connection when the last [`WsTransport`] handle drops.
+///
+/// Without it the socket outlives its transport: the reader task holds a
+/// writer handle of its own (it answers late acknowledgements with
+/// `call_unsub`), so the writer's queue never ends on its own.
+#[derive(Debug)]
+struct Closer {
+    conn: backend::Conn,
+}
+
+impl Drop for Closer {
+    fn drop(&mut self) {
+        self.conn.close();
+    }
 }
 
 impl WsTransport {
@@ -137,7 +156,11 @@ impl WsTransport {
     pub async fn connect(url: &str, hub_namespace: &str) -> Result<Self, TransportError> {
         let registry = Arc::new(Registry::new(Arc::from(hub_namespace)));
         let conn = backend::connect(url, registry.clone()).await?;
-        Ok(Self { conn, registry })
+        Ok(Self {
+            _closer: Arc::new(Closer { conn: conn.clone() }),
+            conn,
+            registry,
+        })
     }
 
     /// The hub namespace this transport prefixes `call` / `call_unsub` with.

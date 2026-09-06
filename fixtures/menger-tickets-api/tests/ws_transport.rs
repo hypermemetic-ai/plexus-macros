@@ -16,6 +16,7 @@ use menger_tickets_api::{MengerTicketsClient, TicketsEvent};
 use plexus_client::{ClientEvent, MethodRef, StreamItem, Transport, TransportErrorKind, WsTransport};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -40,6 +41,8 @@ struct FakeHub {
     addr: SocketAddr,
     /// Every frame the client sent, in order.
     seen: Arc<Mutex<Vec<Value>>>,
+    /// Set when the client's end of the socket goes away.
+    hung_up: Arc<AtomicBool>,
 }
 
 impl FakeHub {
@@ -47,8 +50,10 @@ impl FakeHub {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let hung_up = Arc::new(AtomicBool::new(false));
 
         let seen_task = seen.clone();
+        let hung_up_task = hung_up.clone();
         tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.expect("accept");
             let ws = tokio_tungstenite::accept_async(tcp).await.expect("handshake");
@@ -76,9 +81,14 @@ impl FakeHub {
                     }
                 }
             }
+            hung_up_task.store(true, Ordering::SeqCst);
         });
 
-        Self { addr, seen }
+        Self {
+            addr,
+            seen,
+            hung_up,
+        }
     }
 
     fn url(&self) -> String {
@@ -500,6 +510,37 @@ async fn two_concurrent_calls_are_independent_streams_on_one_connection() {
 // ---------------------------------------------------------------------------
 // Connecting
 // ---------------------------------------------------------------------------
+
+/// Dropping the last handle shuts the socket down. Without this the
+/// connection outlives its transport: the reader task holds a writer handle
+/// of its own, so the writer's queue never ends by itself.
+#[tokio::test]
+async fn dropping_the_transport_closes_the_socket() {
+    let hub = FakeHub::start(Arc::new(|frame: &Value| {
+        let sub = json!(1);
+        vec![
+            Act::Send(ack(frame, sub.clone())),
+            Act::Send(notify("result", sub, done())),
+        ]
+    }))
+    .await;
+
+    let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
+    MengerTicketsClient::new(&transport)
+        .health_all()
+        .await
+        .expect("one call, so the connection is certainly up");
+    assert!(!hub.hung_up.load(Ordering::SeqCst));
+
+    drop(transport);
+    for _ in 0..100 {
+        if hub.hung_up.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the socket was still open a second after the transport was dropped");
+}
 
 /// Nothing listening is a `Connect` error, reported by `connect` rather than
 /// by the first call — a consumer that cannot reach the server should learn

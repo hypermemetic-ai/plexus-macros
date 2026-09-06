@@ -61,6 +61,14 @@ impl Conn {
             .send_with_str(&text)
             .map_err(|e| TransportError::other(format!("websocket send failed: {e:?}")))
     }
+
+    /// The last `WsTransport` handle went away. `Socket`'s own `Drop` does
+    /// this too, once every clone of this handle is gone; closing here means
+    /// a browser tab does not hold a connection open for as long as some
+    /// stream's guard happens to live.
+    pub(crate) fn close(&self) {
+        let _ = self.inner.socket.close();
+    }
 }
 
 pub(crate) async fn connect(url: &str, registry: Arc<Registry>) -> Result<Conn, TransportError> {

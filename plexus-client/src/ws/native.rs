@@ -16,20 +16,33 @@ use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message;
 
+/// What the writer task accepts.
+#[derive(Debug)]
+enum Out {
+    Frame(String),
+    /// The last `WsTransport` handle went away: shut the socket down rather
+    /// than leave a connection open until the process exits.
+    Close,
+}
+
 /// A handle on the writer task's queue.
 ///
 /// Writes are queued rather than awaited so that [`Drop`] can send the
 /// unsubscribe frame — a destructor cannot await.
 #[derive(Debug, Clone)]
 pub(crate) struct Conn {
-    outbound: mpsc::UnboundedSender<String>,
+    outbound: mpsc::UnboundedSender<Out>,
 }
 
 impl Conn {
     pub(crate) fn send(&self, text: String) -> Result<(), TransportError> {
         self.outbound
-            .unbounded_send(text)
+            .unbounded_send(Out::Frame(text))
             .map_err(|_| TransportError::closed("websocket connection is closed"))
+    }
+
+    pub(crate) fn close(&self) {
+        let _ = self.outbound.unbounded_send(Out::Close);
     }
 }
 
@@ -39,12 +52,17 @@ pub(crate) async fn connect(url: &str, registry: Arc<Registry>) -> Result<Conn, 
         .map_err(|e| TransportError::connect(format!("{url}: {e}")))?;
 
     let (mut sink, mut source) = socket.split();
-    let (outbound, mut queue) = mpsc::unbounded::<String>();
+    let (outbound, mut queue) = mpsc::unbounded::<Out>();
 
     tokio::spawn(async move {
-        while let Some(text) = queue.next().await {
-            if sink.send(Message::text(text)).await.is_err() {
-                break;
+        while let Some(out) = queue.next().await {
+            match out {
+                Out::Frame(text) => {
+                    if sink.send(Message::text(text)).await.is_err() {
+                        break;
+                    }
+                }
+                Out::Close => break,
             }
         }
         let _ = sink.close().await;
@@ -58,7 +76,7 @@ pub(crate) async fn connect(url: &str, registry: Arc<Registry>) -> Result<Conn, 
         let write_back = |frame: Option<String>| {
             if let Some(frame) = frame {
                 super::trace("→", &frame);
-                let _ = reader_outbound.unbounded_send(frame);
+                let _ = reader_outbound.unbounded_send(Out::Frame(frame));
             }
         };
         loop {
