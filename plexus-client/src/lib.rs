@@ -44,9 +44,22 @@
 //!
 //! [`MemoryTransport`] ships here because it is the only transport with no
 //! I/O and therefore the only one that is wasm-safe by construction; it is
-//! the test double. The real transports live where their dependencies do:
-//! in-process on the `plexus-core` side (it drives a real `Activation`),
-//! WebSocket JSON-RPC and REST + SSE in their own crates.
+//! the test double. The in-process transport lives on the `plexus-core`
+//! side, because it drives a real `Activation`.
+//!
+//! [`WsTransport`] — WebSocket JSON-RPC, the transport that carries the full
+//! envelope — ships here too, but **behind a feature**, because a socket is
+//! I/O and the four-dependency core must stay the default:
+//!
+//! | Feature | Backend | Target |
+//! |---|---|---|
+//! | *(none)* | — | the wasm-clean core: `serde`, `serde_json`, `futures-core`, `futures-util` |
+//! | `ws-native` | `tokio-tungstenite` | native |
+//! | `ws-web` | `web_sys::WebSocket` | `wasm32-unknown-unknown` |
+//!
+//! Both features expose the same `WsTransport` type and the same
+//! `WsTransport::connect(url, hub_namespace)`, so a consumer picks the
+//! backend in `Cargo.toml` and changes no code. See [`ws`].
 
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
@@ -58,12 +71,18 @@ pub mod event;
 pub mod memory;
 pub mod transport;
 
+#[cfg(any(feature = "ws-native", feature = "ws-web"))]
+pub mod ws;
+
 pub use decode::{collect_data, decode, error_stream, EventStream};
 pub use envelope::{StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};
 pub use event::ClientEvent;
 pub use memory::MemoryTransport;
 pub use transport::{ItemStream, MethodRef, Transport};
+
+#[cfg(any(feature = "ws-native", feature = "ws-web"))]
+pub use ws::WsTransport;
 
 /// Re-exported so generated client code never needs `serde_json` in the
 /// consuming crate's own `Cargo.toml`.

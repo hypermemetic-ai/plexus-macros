@@ -11,6 +11,10 @@ members = [
     # dependency line. Not published.
     "fixtures/tickets-api",
     "fixtures/tickets-wasm-consumer",
+    # MACRO-6: a client-only mirror of menger's `tickets` activation, and
+    # the home of the WebSocket transport's tests — the fake-server unit
+    # tests and the wire test against a real menger.
+    "fixtures/menger-tickets-api",
 ]
 
 [package]

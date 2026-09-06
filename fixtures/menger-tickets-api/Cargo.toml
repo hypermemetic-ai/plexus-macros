@@ -1,0 +1,42 @@
+[package]
+name = "menger-tickets-api"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "MACRO-6 fixture: a client-only mirror of menger's `tickets` activation, for driving a real server over WsTransport"
+
+# A CLIENT-ONLY activation crate. `tickets-api` (the MACRO-3/4 fixture) is a
+# working activation that happens to emit a client; this one is the other
+# shape MACRO-2 supports and the one MFE-8 will actually be in: you consume
+# somebody else's server, so you have their method signatures and their event
+# types but no implementation and no server dependencies at all.
+#
+# `server_cfg = "feature = \"server\""` names a feature that is declared and
+# never enabled, so the server half of the expansion — and the method bodies,
+# which are `unreachable!()` — are never compiled. What is compiled is the
+# types and `MengerTicketsClient<T>`, over four wasm-safe crates.
+#
+# Gate: `cargo build -p menger-tickets-api --target wasm32-unknown-unknown`.
+[features]
+default = []
+# Declared so `server_cfg` names a real feature (no unexpected-cfg warning).
+# Enabling it does not compile: there is no server here to build.
+server = []
+
+[dependencies]
+plexus-macros = { path = "../.." }
+plexus-client = { path = "../../plexus-client" }
+serde = { version = "1.0", features = ["derive"] }
+schemars = { version = "1.1", features = ["derive"] }
+
+[dev-dependencies]
+# The transport under test. Enabled only for this crate's tests, so
+# `cargo build -p menger-tickets-api --target wasm32-unknown-unknown` still
+# sees the four-dependency core.
+plexus-client = { path = "../../plexus-client", features = ["ws-native"] }
+futures = "0.3"
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+# The stand-in JSON-RPC server the transport unit tests speak to. The wire
+# test speaks to a real menger instead.
+tokio-tungstenite = "0.30"

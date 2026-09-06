@@ -15,6 +15,41 @@ serde_json = "1.0"
 futures-core = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
+# MACRO-6: everything below is a WebSocket backend and is OPTIONAL. The
+# default feature set stays the four dependencies above.
+futures-channel = { version = "0.3", default-features = false, features = [
+    "std",
+], optional = true }
+
+# ws-native
+tokio = { version = "1.0", features = ["rt"], optional = true }
+tokio-tungstenite = { version = "0.30", optional = true }
+
+# ws-web
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "CloseEvent",
+    "Event",
+    "MessageEvent",
+    "WebSocket",
+] }
+
+# MACRO-6: the WebSocket JSON-RPC transport, one type behind two backends.
+#
+# `default = []` is load-bearing, not decoration: a wasm32 consumer that says
+# `plexus-client = "0.6"` must get the four-dependency core and nothing else,
+# and `--no-default-features` must have no tokio and no jsonrpsee anywhere in
+# the tree. Both backends expose the same `WsTransport::connect(url, hub)`.
+[features]
+default = []
+ws-native = [
+    "dep:futures-channel",
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+    "futures-util/sink",
+]
+ws-web = ["dep:futures-channel", "dep:wasm-bindgen", "dep:web-sys"]
+
 [dev-dependencies]
 futures = "0.3"
 tokio = { version = "1.0", features = ["macros", "rt"] }
