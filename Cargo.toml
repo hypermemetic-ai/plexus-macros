@@ -38,7 +38,7 @@ schemars-compat = []
 
 [dev-dependencies]
 plexus-macros = { path = "." }
-plexus-core = { path = "../plexus-core-macro-2" }
+plexus-core = { path = "../plexus-core-macro-6" }
 # MACRO-2: the runtime the generated client links against. A dev-dependency
 # here because the macro only *emits* paths into it; consumers of a generated
 # client depend on it directly.
