@@ -636,8 +636,31 @@ consumer with no wire code of its own). Both build for
 |---|---|---|
 | `MemoryTransport` | `plexus-client` | scripted test double; wasm-safe by construction |
 | `InProcessTransport` | `plexus-core` (`plexus::in_process`) | drives an `Activation` directly — no server |
-| WebSocket JSON-RPC | — | not yet built |
+| `WsTransport` | `plexus-client`, feature `ws-native` / `ws-web` | WebSocket JSON-RPC; one connection, subscriptions multiplexed |
 | REST + SSE | — | not yet built |
+
+`WsTransport::connect(url, hub_namespace)` is the wire transport, and the
+only one that carries the full `StreamMetadata`. It is **behind a feature**
+so that `plexus-client`'s default stays the four-dependency wasm-clean core:
+`ws-native` builds on `tokio-tungstenite`, `ws-web` on `web_sys::WebSocket`,
+and both expose the same type and the same constructor — a consumer picks
+the backend in `Cargo.toml` and changes no code. The protocol itself (ids,
+routing, cancellation, both frame shapes) is written once and shared, so the
+backends cannot drift.
+
+```rust
+let transport = plexus_client::WsTransport::connect("ws://127.0.0.1:4455", "menger").await?;
+let tickets = TicketsClient::new(&transport);   // …and reuse it for every activation
+```
+
+`hub_namespace` is the server's `DynamicHub::new(ns)` namespace, not an
+activation namespace: the same `tickets.list` goes to `menger.call` on one
+deployment and to another hub's `call` elsewhere. Worked end to end against a
+real server in
+[`fixtures/menger-tickets-api`](fixtures/menger-tickets-api/) — a
+**client-only** mirror of an activation whose server lives in another
+repository, which is the shape a consumer of somebody else's Plexus service
+is in.
 
 Both flags are opt-in: an activation naming neither expands exactly as before.
 
