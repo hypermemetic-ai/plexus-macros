@@ -217,6 +217,11 @@ pub(crate) fn generate(
         });
 
         method_items.push(quote! {
+            // The parameter list is the activation's, not ours: menger's
+            // `create` takes seven. A lint the consumer cannot act on
+            // without changing the *server* has no business firing in the
+            // crate that merely opted into a client.
+            #[allow(clippy::too_many_arguments)]
             #[doc = #doc]
             pub fn #fn_ident(&self #(, #sig_params)*)
                 -> #client_path::EventStream<'_, #event_ty>
@@ -232,6 +237,7 @@ pub(crate) fn generate(
                 )
             }
 
+            #[allow(clippy::too_many_arguments)]
             #[doc = #doc_all]
             pub async fn #all_ident(&self #(, #sig_params)*)
                 -> ::core::result::Result<

@@ -94,12 +94,25 @@ struct Pending {
     waiter: oneshot::Sender<Result<Items, TransportError>>,
 }
 
+/// A live subscription: where its items go, and its cancellation state.
+///
+/// The slot is kept here as well as in the caller's guard so that a
+/// *terminal item* can mark it finished. The server ending a subscription is
+/// a fact the connection knows even when the caller has not read the `done`
+/// yet — and without it, dropping a half-read unary call sends a
+/// `call_unsub` the server answers `false`.
+#[derive(Debug)]
+struct Sub {
+    sink: ItemsTx,
+    slot: Arc<SubSlot>,
+}
+
 #[derive(Debug, Default)]
 struct State {
     /// JSON-RPC request id → the call waiting for that subscribe's reply.
     pending: HashMap<u64, Pending>,
-    /// subscription key → that subscription's item sink.
-    subs: HashMap<String, ItemsTx>,
+    /// subscription key → that subscription's sink and cancellation state.
+    subs: HashMap<String, Sub>,
     /// Set once, when the socket goes away.
     closed: Option<TransportError>,
 }
@@ -230,7 +243,13 @@ impl Registry {
 
         let key = key_of(&subscription);
         let (sink, items) = mpsc::unbounded();
-        state.subs.insert(key.clone(), sink);
+        state.subs.insert(
+            key.clone(),
+            Sub {
+                sink,
+                slot: pending.slot.clone(),
+            },
+        );
         drop(state);
 
         if pending.waiter.send(Ok(items)).is_err() {
@@ -245,7 +264,11 @@ impl Registry {
     fn on_notification(&self, subscription: &Value, frame: &Value) {
         let key = key_of(subscription);
         let state = self.lock();
-        let Some(sink) = state.subs.get(&key).cloned() else {
+        let Some((sink, slot)) = state
+            .subs
+            .get(&key)
+            .map(|sub| (sub.sink.clone(), sub.slot.clone()))
+        else {
             return;
         };
         drop(state);
@@ -256,6 +279,9 @@ impl Registry {
                 let terminal = item.is_terminal();
                 let _ = sink.unbounded_send(Ok(item));
                 if terminal {
+                    // The server ended it; there is nothing left to cancel,
+                    // whether or not the caller ever reads this item.
+                    slot.mark_finished();
                     self.forget_sub(subscription);
                 }
             }
@@ -291,8 +317,8 @@ impl Registry {
         for (_, waiting) in pending {
             let _ = waiting.waiter.send(Err(error.clone()));
         }
-        for (_, sink) in subs {
-            let _ = sink.unbounded_send(Err(error.clone()));
+        for (_, sub) in subs {
+            let _ = sub.sink.unbounded_send(Err(error.clone()));
         }
     }
 
