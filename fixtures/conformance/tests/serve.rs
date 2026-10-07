@@ -6,23 +6,21 @@
 //! both dispatch paths — `Activation::call` (what a hub routes to) and the
 //! jsonrpsee subscriptions the activation registers itself.
 //!
-//! Comparison rules (the fixture's README): a `"*"` in a hash field (`hash`,
-//! `self_hash`, `plexus_hash`) matches any string; `timestamp` is normalized
-//! to 0; key order is not significant (parsed values are compared).
+//! Comparison rules (the fixture's README): `timestamp` is normalized to 0;
+//! key order is not significant (parsed values are compared); everything
+//! else is exact — hashes included since RETURNS-10, which replaced the
+//! `"*"` wildcards with the fixture's real hashes.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use conformance::Conformance;
 use futures::StreamExt;
-use plexus_core::plexus::{Activation, PlexusContext, PlexusStreamItem, RemoteError, StreamMetadata};
+use plexus_core::plexus::{Activation, PlexusContext, PlexusStreamItem, PluginSchema, RemoteError, StreamMetadata};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 const NS: &str = "conformance";
-
-/// Fields whose expected value may be the wildcard `"*"`.
-const HASH_FIELDS: [&str; 3] = ["hash", "self_hash", "plexus_hash"];
 
 fn expected_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("expected")
@@ -72,7 +70,7 @@ fn calls() -> Vec<Call> {
     serde_json::from_str(&read("calls.json")).expect("calls.json")
 }
 
-/// `expected` and `actual` are the same value, with the README's wildcard.
+/// `expected` and `actual` are the same value (key order aside).
 fn assert_matches(expected: &Value, actual: &Value, at: &str) {
     match (expected, actual) {
         (Value::Object(e), Value::Object(a)) => {
@@ -84,13 +82,7 @@ fn assert_matches(expected: &Value, actual: &Value, at: &str) {
             aks.sort();
             assert_eq!(eks, aks, "{at}: keys differ\nexpected {expected}\nactual   {actual}");
             for (k, ev) in e {
-                let av = &a[k];
-                let here = format!("{at}.{k}");
-                if HASH_FIELDS.contains(&k.as_str()) && ev == "*" {
-                    assert!(av.is_string(), "{here}: a hash is a string, got {av}");
-                    continue;
-                }
-                assert_matches(ev, av, &here);
+                assert_matches(ev, &a[k], &format!("{at}.{k}"));
             }
         }
         (Value::Array(e), Value::Array(a)) => {
@@ -113,11 +105,20 @@ fn normalized(item: &PlexusStreamItem) -> Value {
     v
 }
 
+/// What a hub does before it serves (`DynamicHub::into_rpc_module`): put its
+/// own hash in the context every frame's `plexus_hash` is read from. The
+/// fixture is its own hub, so that is its plugin hash — the one
+/// `schema.json` pins (RETURNS-10).
+fn init_context() {
+    PlexusContext::init(Conformance.plugin_schema().hash);
+}
+
 /// Serve one call the way a hub's `call` route does with the fixture as its
 /// own hub: `Activation::call`'s stream when the call dispatches, one error
 /// frame (provenance the activation, not recoverable, no `done`) when it does
 /// not.
 async fn serve(method: &str, params: Value) -> Vec<Value> {
+    init_context();
     match Activation::call(&Conformance, method, params, None, None).await {
         Ok(stream) => stream.map(|item| normalized(&item)).collect().await,
         Err(e) => vec![normalized(&PlexusStreamItem::error(
@@ -171,6 +172,7 @@ async fn every_call_sends_its_expected_frames() {
 /// registers — sends the same frames, ending in exactly one `done`.
 #[tokio::test]
 async fn the_jsonrpsee_path_sends_the_same_frames_and_one_done() {
+    init_context();
     let methods = Conformance.into_rpc_methods();
     for call in calls().into_iter().filter(|c| c.line.is_none()) {
         let params: Map<String, Value> = call
@@ -213,4 +215,41 @@ async fn the_jsonrpsee_path_sends_the_same_frames_and_one_done() {
             assert_matches(e, a, &format!("jsonrpsee {}: frame {i}", call.what()));
         }
     }
+}
+
+/// RETURNS-10: the fixture's hashes are real. The plugin hash `schema.json`
+/// pins is the one the activation computes in this build, every expected
+/// frame carries it as `plexus_hash`, and every served frame does too. Each
+/// method's pinned hash is its schema's content hash — recomputed here from
+/// the file's JSON, the way any consumer can — and the plugin's are the
+/// SHA-256 roll-up of those.
+#[tokio::test]
+async fn the_served_hash_is_the_fixtures_real_hash() {
+    let expected: Value = serde_json::from_str(&read("schema.json")).expect("schema.json");
+    let pinned = expected["hash"].as_str().expect("schema.json has a hash");
+    let is_hash16 = |h: &str| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+    assert!(is_hash16(pinned), "a hash is 16 lowercase hex: {pinned}");
+
+    let served = Conformance.plugin_schema();
+    assert_eq!(served.hash, pinned, "the served plugin hash is schema.json's");
+
+    let file: PluginSchema = serde_json::from_value(expected.clone()).expect("a PluginSchema");
+    for m in &file.methods {
+        assert!(is_hash16(&m.hash), "{}: 16 lowercase hex: {}", m.name, m.hash);
+        assert_eq!(m.content_hash(), m.hash, "{}: the pinned hash is the schema's content hash", m.name);
+    }
+    let rolled = PluginSchema::leaf(file.namespace.clone(), file.version.clone(), file.description.clone(), file.methods.clone());
+    assert_eq!((rolled.self_hash.as_str(), rolled.hash.as_str()), (file.self_hash.as_str(), pinned));
+
+    let mut frames = 0;
+    for call in calls() {
+        for frame in call.expected() {
+            assert_eq!(frame["metadata"]["plexus_hash"], pinned, "{}: expected plexus_hash", call.what());
+            frames += 1;
+        }
+        for frame in serve(&call.method, call.params.clone()).await {
+            assert_eq!(frame["metadata"]["plexus_hash"], pinned, "{}: served plexus_hash", call.what());
+        }
+    }
+    assert_eq!(frames, 25, "every expected frame checked");
 }
