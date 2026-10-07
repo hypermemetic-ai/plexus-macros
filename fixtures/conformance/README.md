@@ -52,12 +52,21 @@ follows.
 
 ## Comparing
 
-- **Hashes are wildcards.** `"*"` in `hash` or `self_hash` (schema) or in
-  `plexus_hash` (frame metadata) matches any string. The macro computes
-  these hashes (RETURNS-8), and RETURNS-10 changes what they cover.
+- **Hashes are real and compared exactly** (RETURNS-10; they were `"*"`
+  wildcards until then). Each method's `hash` is its schema's content
+  hash: drop `hash` from the method object, write the rest as canonical
+  JSON (keys sorted by code point, no whitespace, arrays in order), take
+  SHA-256 and keep the first 8 bytes as 16 lowercase hex. `self_hash` is
+  that SHA-256/16 of the method hashes, each followed by `\n`, and `hash` of
+  `self_hash` + `\n` (a hub appends its `children_hash` + `\n`).
+  plexus-core's `MethodSchema::content_hash` is the reference; Python's
+  `json.dumps(m, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`
+  writes the same bytes.
 - **Metadata is kept, made deterministic.** Every frame carries
-  `{"provenance":["conformance"],"plexus_hash":"*","timestamp":0}`. Normalize
-  `timestamp` to `0` before comparing.
+  `{"provenance":["conformance"],"plexus_hash":"60d7e85ced34c0c7","timestamp":0}`:
+  `plexus_hash` is `schema.json`'s `hash`, the fixture being served as its
+  own hub (a hub puts its own hash in every frame). Normalize `timestamp` to
+  `0` before comparing.
 - **Key order is not significant.** Compare parsed values. The server's
   content passes through `serde_json::Value`, whose keys are sorted. The
   files list keys in the types' declaration order, so a decoder that keeps
@@ -94,8 +103,8 @@ bodies, run as plain Rust, mapped to frames by RETURNS-8's frames-per-form
 table, with the schema built as RETURNS-5's Intended Usage says
 (`with_returns(schema_for!(T))`, …) and params as the unchanged
 `{Struct}Method` enum gives them. From RETURNS-8 on, the served output is the
-source: regenerate from it (`timestamp` → `0`, hashes → `"*"`), and the diff
-is the contract change.
+source: regenerate from it (`timestamp` → `0`; hashes as served since
+RETURNS-10, `"*"` before), and the diff is the contract change.
 
 RETURNS-8 served it (`tests/serve.rs`, over `Activation::call` and over the
 activation's own jsonrpsee subscriptions). Every frame of every call matched
@@ -111,3 +120,12 @@ moved. The file keeps declaration key order: dump the served
 `plugin_schema()` with `serde_json/preserve_order` on (`cargo test -p
 conformance --features serde_json/preserve_order`), pretty-printed, two
 spaces.
+
+RETURNS-10 put the real hashes in: every `hash` and `self_hash` in
+`schema.json`, and every frame's `plexus_hash`. So any change to the
+schema — a field, a doc comment, plexus-core's own `PluginSchema` /
+`MethodSchema` docs, which the `schema` method's `returns` carries — moves
+the plugin hash, and with it all 25 frames' `plexus_hash`: regenerate
+`schema.json` as above, then put its new `hash` in every frame. `tests/serve.rs`
+(`the_served_hash_is_the_fixtures_real_hash`) and plexus-core's
+`tests/conformance_fixture.rs` recompute every hash from the files.

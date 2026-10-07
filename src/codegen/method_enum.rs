@@ -3,8 +3,6 @@
 use crate::parse::{AuthPosture, BidirType, Cardinality, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use syn::Type;
 
 pub fn generate(
@@ -114,9 +112,6 @@ pub fn generate(
 
     let method_names: Vec<&str> = methods.iter().map(|m| m.method_name.as_str()).collect();
     let method_descriptions: Vec<&str> = methods.iter().map(|m| m.description.as_str()).collect();
-
-    // Compute hashes at compile time for each method
-    let method_hashes: Vec<String> = methods.iter().map(compute_method_hash).collect();
 
     // RETURNS-8: each method's contract, read from its signature — `returns`
     // is `schema_for!(T)`, `error` `schema_for!(E)` when the item is a
@@ -477,6 +472,8 @@ pub fn generate(
             /// Get per-method schema info including params, return types, and content hashes
             ///
             /// Note: This method has O(1) schema lookup cost after first call due to caching.
+            /// RETURNS-10: each schema's `hash` is its content hash, computed
+            /// once, inside that cache.
             pub fn method_schemas() -> Vec<#crate_path::plexus::MethodSchema> {
                 // Cache the computed method schemas for O(1) subsequent calls
                 static METHOD_SCHEMAS_CACHE: std::sync::OnceLock<Vec<#crate_path::plexus::MethodSchema>> = std::sync::OnceLock::new();
@@ -490,7 +487,6 @@ pub fn generate(
             fn compute_method_schemas() -> Vec<#crate_path::plexus::MethodSchema> {
                 let method_names: &[&str] = &[#(#method_names),*];
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
-                let hashes: &[&str] = &[#(#method_hashes),*];
                 let http_methods: Vec<#crate_path::plexus::schema::HttpMethod> = vec![#(#http_methods),*];
                 // RETURNS-8: per-method T / E / P schemas and cardinality.
                 let returns_schemas: Vec<#deps::schemars::Schema> = vec![#(#returns_exprs),*];
@@ -528,12 +524,11 @@ pub fn generate(
                 let mut methods: Vec<_> = method_names
                     .iter()
                     .zip(descriptions.iter())
-                    .zip(hashes.iter())
                     .zip(http_methods.into_iter())
                     .zip(returns_schemas.into_iter())
                     .zip(error_schemas.into_iter().zip(progress_schemas.into_iter()))
                     .enumerate()
-                    .map(|(i, (((((name, desc), hash), http_method), returns), (error, progress)))| {
+                    .map(|(i, ((((name, desc), http_method), returns), (error, progress)))| {
                         // Get this variant's schema from oneOf, then extract just the "params" portion
                         // The variant looks like: { properties: { method: {...}, params: {...} }, ... }
                         // We want just the params schema, but we need to merge in $defs from the root
@@ -593,10 +588,12 @@ pub fn generate(
                             #deps::serde_json::from_value::<#deps::schemars::Schema>(p_val).unwrap_or(p)
                         });
 
+                        // RETURNS-10: `hash` is set last, from the finished
+                        // schema (`with_content_hash` below).
                         let mut schema = #crate_path::plexus::MethodSchema::new(
                             name.to_string(),
                             desc.to_string(),
-                            hash.to_string(),
+                            ::std::string::String::new(),
                         );
                         if let Some(p) = params {
                             schema = schema.with_params(p);
@@ -700,7 +697,7 @@ pub fn generate(
                 let schema_method = #crate_path::plexus::MethodSchema::new(
                     "schema".to_string(),
                     "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.".to_string(),
-                    "auto_schema".to_string(), // Fixed hash since it's auto-generated
+                    ::std::string::String::new(),
                 )
                 .with_returns(#deps::schemars::schema_for!(#crate_path::plexus::SchemaResult));
                 methods.push(schema_method);
@@ -712,7 +709,16 @@ pub fn generate(
                 // `#[child(list = "...", search = "...")]`.
                 #(methods.push(#child_schema_entries);)*
 
+                // RETURNS-10: the last step — every entry (the methods, the
+                // `schema` method, the `#[child]` entries) gets its content
+                // hash: SHA-256 of its finished schema as canonical JSON, so
+                // the hash moves with anything a client is generated from,
+                // down to a field inside T, E or P. Once per process: this
+                // runs inside `method_schemas()`'s cache.
                 methods
+                    .into_iter()
+                    .map(#crate_path::plexus::MethodSchema::with_content_hash)
+                    .collect()
             }
 
         }
@@ -729,57 +735,6 @@ fn to_pascal_case(s: &str) -> String {
             }
         })
         .collect()
-}
-
-/// Compute a hash for a method definition
-///
-/// The hash is computed from:
-/// - Method name
-/// - Parameter names and types (stringified)
-/// - Description
-///
-/// This provides cache invalidation at the method level -
-/// if any aspect of the method signature changes, the hash changes.
-fn compute_method_hash(method: &MethodInfo) -> String {
-    let mut hasher = DefaultHasher::new();
-
-    // Hash method name
-    method.method_name.hash(&mut hasher);
-
-    // Hash description
-    method.description.hash(&mut hasher);
-
-    // Hash each parameter (name + type as string)
-    for param in &method.params {
-        param.name.to_string().hash(&mut hasher);
-        // Convert type to string for hashing
-        let ty = &param.ty;
-        let ty_str = quote!(#ty).to_string();
-        ty_str.hash(&mut hasher);
-        if let Some(desc) = &param.description {
-            desc.hash(&mut hasher);
-        }
-    }
-
-    // Hash the item's types as written: `T`, then `E` and `P` when present.
-    // (RETURNS-8 keeps the 0.6 token-hash mechanism — a plain-T stream hashes
-    // exactly as before; RETURNS-10 makes the hash cover shape and
-    // cardinality.)
-    let ok_ty = &method.ok_ty;
-    quote!(#ok_ty).to_string().hash(&mut hasher);
-    if let Some(err_ty) = &method.err_ty {
-        quote!(#err_ty).to_string().hash(&mut hasher);
-    }
-    if let Some(p) = &method.progress_ty {
-        match p {
-            crate::parse::ProgressTy::Note => "Note".hash(&mut hasher),
-            crate::parse::ProgressTy::Declared(p_ty) => {
-                quote!(#p_ty).to_string().hash(&mut hasher)
-            }
-        }
-    }
-
-    format!("{:016x}", hasher.finish())
 }
 
 /// IR-3: generate the `schema = schema.with_deprecation(DeprecationInfo { .. });`
@@ -878,10 +833,11 @@ fn child_schema_entry(child: &ChildMethodInfo, crate_path: &syn::Path) -> TokenS
         }
     };
 
-    // The `hash` for a child entry is stable w.r.t. the child's routing name;
-    // there's no method signature to hash since these don't carry RPC params.
-    // An empty hash matches the convention used by `plugin_children` synthesis
-    // for `ChildSummary.hash` (see codegen/activation.rs CHILD-8 comments).
+    // The `hash` is left empty here: `compute_method_schemas` gives every
+    // entry, this one included, its content hash as its last step
+    // (RETURNS-10) — of the entry itself (name, description, role,
+    // deprecation). The child's own schema is not this entry's to cover: it
+    // belongs in the parent's `ChildSummary.hash` / `children_hash`.
     let deprecation_application = if let Some(dep) = &child.deprecation {
         let call = deprecation_call(dep, crate_path);
         quote! { #call }

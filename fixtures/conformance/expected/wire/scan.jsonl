@@ -1,4 +1,4 @@
-{"type":"data","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0},"content_type":"conformance.scan","content":{"ok":{"key":"a1"}}}
-{"type":"data","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0},"content_type":"conformance.scan","content":{"err":{"type":"unreadable","key":"a2"}}}
-{"type":"data","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0},"content_type":"conformance.scan","content":{"ok":{"key":"a3"}}}
-{"type":"done","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0}}
+{"type":"data","metadata":{"provenance":["conformance"],"plexus_hash":"60d7e85ced34c0c7","timestamp":0},"content_type":"conformance.scan","content":{"ok":{"key":"a1"}}}
+{"type":"data","metadata":{"provenance":["conformance"],"plexus_hash":"60d7e85ced34c0c7","timestamp":0},"content_type":"conformance.scan","content":{"err":{"type":"unreadable","key":"a2"}}}
+{"type":"data","metadata":{"provenance":["conformance"],"plexus_hash":"60d7e85ced34c0c7","timestamp":0},"content_type":"conformance.scan","content":{"ok":{"key":"a3"}}}
+{"type":"done","metadata":{"provenance":["conformance"],"plexus_hash":"60d7e85ced34c0c7","timestamp":0}}
