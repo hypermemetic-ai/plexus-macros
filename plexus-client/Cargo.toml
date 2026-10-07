@@ -1,6 +1,6 @@
 [package]
 name = "plexus-client"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 description = "wasm-safe client runtime for Plexus RPC: the wire envelope, the Transport trait, and typed event decoding"
@@ -14,6 +14,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures-core = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# RETURNS-4: `JsonSchema` for `Note` and `RemoteError`, so a server can
+# describe them. OPTIONAL (feature `schema`): a wasm32 consumer that only
+# decodes needs none of it. plexus-core enables it.
+schemars = { version = "1.1", optional = true }
 
 # MACRO-6: everything below is a WebSocket backend and is OPTIONAL. The
 # default feature set stays the four dependencies above.
@@ -37,11 +42,15 @@ web-sys = { version = "0.3", optional = true, features = [
 # MACRO-6: the WebSocket JSON-RPC transport, one type behind two backends.
 #
 # `default = []` is load-bearing, not decoration: a wasm32 consumer that says
-# `plexus-client = "0.6"` must get the four-dependency core and nothing else,
-# and `--no-default-features` must have no tokio and no jsonrpsee anywhere in
-# the tree. Both backends expose the same `WsTransport::connect(url, hub)`.
+# `plexus-client = "0.7"` must get the four-dependency core and nothing else,
+# and `--no-default-features` must have no tokio, jsonrpsee or schemars
+# anywhere in the tree. Both backends expose the same
+# `WsTransport::connect(url, hub)`.
 [features]
 default = []
+# RETURNS-4: `schemars::JsonSchema` impls for the wire vocabulary (`Note`,
+# `RemoteError`, `ParamProblem`, `DenyReason`).
+schema = ["dep:schemars"]
 ws-native = [
     "dep:futures-channel",
     "dep:tokio",
