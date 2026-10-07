@@ -25,15 +25,14 @@
 //!
 //! pub struct Bash;
 //!
-//! #[plexus_macros::activation(
-//!     namespace = "bash",
+//! #[plexus_macros::activation(            // namespace "bash", implicitly
 //!     version = "1.0.0",
 //!     description = "Execute bash commands and stream output",
 //!     request = BashRequest,
 //! )]
 //! impl Bash {
 //!     /// Execute a bash command and stream output.
-//!     #[plexus_macros::method(streaming)]
+//!     #[plexus_macros::method]
 //!     async fn execute(
 //!         &self,
 //!         command: String,
@@ -56,9 +55,27 @@
 //! | `#[derive(PlexusRequest)]` | Typed extraction from `RawRequestContext`. |
 //! | `#[derive(HandleEnum)]` | Type-safe handle enums for an activation. |
 //!
-//! Deprecated surfaces kept through 0.5.x (removed in 0.6): `#[hub_methods]`,
-//! `#[hub_method]`, `#[derive(StreamEvent)]`, the `hub` and `children = [...]`
-//! flags on `#[activation]`. See the migration section of the README.
+//! # A method's return type is its contract (0.7)
+//!
+//! | signature | cardinality | schema `returns` / `error` / `progress` |
+//! |---|---|---|
+//! | `-> T` | one | T / — / — |
+//! | `-> Result<T, E>` | one | T / E / — |
+//! | `-> impl Stream<Item = T>` | many | T / — / — |
+//! | `-> impl Stream<Item = Result<T, E>>` | many | T / E / — |
+//! | `-> impl Stream<Item = Progress<T, P>>` | many | T / — / P |
+//! | `-> impl Stream<Item = Result<Progress<T, P>, E>>` | many | T / E / P |
+//!
+//! A Result item travels as data, `{"ok": t}` or `{"err": e}`; a
+//! `Progress::Update(p)` as a progress frame. The namespace is implicit: the
+//! struct's name in snake_case, a trailing `Hub` / `Activation` dropped
+//! (`namespace = "..."` overrides it). `#[method(streaming)]`,
+//! `#[method(returns(..))]` and `#[derive(StreamEvent)]` are gone. See the
+//! README's per-macro reference.
+//!
+//! Deprecated surfaces still accepted: `#[hub_methods]`, `#[hub_method]`, the
+//! `hub` and `children = [...]` flags on `#[activation]`. See the migration
+//! section of the README.
 //!
 //! ## Crate version (UMB-2)
 //!
@@ -73,7 +90,6 @@ mod credential;
 mod handle_enum;
 mod parse;
 mod request;
-mod stream_event;
 
 
 use codegen::generate_all;
@@ -107,6 +123,17 @@ impl Parse for HubMethodAttrs {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
 
             for meta in metas {
+                // RETURNS-8: the removed attributes fail here too, not only
+                // inside `#[activation]`.
+                match &meta {
+                    Meta::Path(path) if path.is_ident("streaming") => {
+                        return Err(syn::Error::new_spanned(path, parse::STREAMING_REMOVED));
+                    }
+                    Meta::List(list) if list.path.is_ident("returns") => {
+                        return Err(syn::Error::new_spanned(&list.path, parse::RETURNS_REMOVED));
+                    }
+                    _ => {}
+                }
                 if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
                     if path.is_ident("name") {
                         if let Expr::Lit(ExprLit {
@@ -143,7 +170,7 @@ impl Parse for HubMethodAttrs {
 /// # Example
 ///
 /// ```ignore
-/// #[plexus::activation(namespace = "bash")]
+/// #[plexus::activation]                    // namespace "bash", implicitly
 /// impl Bash {
 ///     /// Execute a bash command
 ///     #[plexus::method]
@@ -152,6 +179,15 @@ impl Parse for HubMethodAttrs {
 ///     }
 /// }
 /// ```
+///
+/// # The return type is the contract (RETURNS-8)
+///
+/// Six forms: `-> T`, `-> Result<T, E>`, `-> impl Stream<Item = T>`,
+/// `-> impl Stream<Item = Result<T, E>>`, `-> impl Stream<Item = Progress<T,
+/// P>>`, `-> impl Stream<Item = Result<Progress<T, P>, E>>`. A plain return
+/// yields one item, `impl Stream` many; `Result` and `Progress` are
+/// recognised by name. Any other return type is a compile error that lists
+/// the six. `streaming` and `returns(..)` are removed (compile errors).
 ///
 /// # Authorization arguments (R-1 / AUTHZ-CORE-2)
 ///
@@ -426,7 +462,9 @@ fn generate_schema_fn(
 ///
 /// # Attributes
 ///
-/// - `namespace = "..."` (required) - The activation namespace
+/// - `namespace = "..."` (optional) - The activation namespace. Default: the
+///   struct's name in snake_case with a trailing `Hub` / `Activation`
+///   dropped (`HyperforgeHub` → `hyperforge`, `ClaudeCode` → `claude_code`)
 /// - `version = "..."` (optional, default: "1.0.0") - Version string
 /// - `description = "..."` (optional) - Activation description
 /// - `crate_path = "..."` (optional, default: "crate") - Path to substrate crate
@@ -589,31 +627,6 @@ pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(Credentials, attributes(credential))]
 pub fn credentials_derive(input: TokenStream) -> TokenStream {
     credential::expand_credentials_derive(input)
-}
-
-/// **DEPRECATED**: This derive macro is no longer needed.
-///
-/// With the caller-wraps streaming architecture, event types no longer need to
-/// implement `ActivationStreamItem`. Just use plain domain types with standard
-/// derives:
-///
-/// ```ignore
-/// #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-/// #[serde(tag = "event", rename_all = "snake_case")]
-/// pub enum MyEvent {
-///     Data { value: String },
-///     Complete { result: i32 },
-/// }
-/// ```
-///
-/// The wrapping happens at the call site via `wrap_stream()`.
-#[deprecated(
-    since = "0.2.0",
-    note = "No longer needed - use plain domain types with Serialize/Deserialize"
-)]
-#[proc_macro_derive(StreamEvent, attributes(stream_event, terminal))]
-pub fn stream_event_derive(input: TokenStream) -> TokenStream {
-    stream_event::derive(input)
 }
 
 /// Derive macro for type-safe handle creation and parsing.

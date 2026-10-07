@@ -1,0 +1,12 @@
+error: #[plexus_macros::method] `tick`: the return type is not one of the six signature forms:
+           -> T
+           -> Result<T, E>
+           -> impl Stream<Item = T>
+           -> impl Stream<Item = Result<T, E>>
+           -> impl Stream<Item = Progress<T, P>>
+           -> impl Stream<Item = Result<Progress<T, P>, E>>
+       A boxed or named stream (`BoxStream`, `Pin<Box<dyn Stream>>`, `PlexusStream`) is not recognised — return `impl Stream<Item = ...> + Send + 'static` instead. `Result` (two type arguments) and `Progress` (one or two) are recognised by name; an alias of either is a plain `T`.
+  --> tests/compile/sig_boxstream_rejected.rs:10:29
+   |
+10 |     async fn tick(&self) -> futures::stream::BoxStream<'static, u64> {
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

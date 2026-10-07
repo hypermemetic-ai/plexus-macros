@@ -21,7 +21,7 @@ Everything downstream — generated clients, OpenAPI docs, deprecation warnings 
 For **Rust** consumers there is a shorter path: the macro emits the client itself.
 
 ```
-#[plexus_macros::activation(namespace = "tickets", client)]
+#[plexus_macros::activation(client)]   // impl Tickets — namespace "tickets", implicitly
   ↓  same expansion, same information
 TicketsClient<T: plexus_client::Transport>   ← typed params, typed events
 ```
@@ -46,6 +46,47 @@ The Synapse → IR → codegen pipeline above stays the path for TypeScript, Pyt
 **Parameters are the only exception** — individual parameter descriptions must use the `params(name = "...", other = "...")` attr on `#[plexus_macros::method]` (Rust has no per-argument doc-comment syntax).
 
 **Precedence** — if both an explicit attr arg and a `///` doc comment are present, the explicit attr arg wins. In practice, prefer `///`; reach for the attr arg only when you need to diverge (e.g., a deliberately terser wire description than the internal Rust docs).
+
+---
+
+## A method's return type is its contract (0.7)
+
+Write the narrowest signature that tells the truth; the macro reads
+everything else from it — cardinality, item, error and progress — and never
+needs a flag to know what a method does.
+
+```rust,ignore
+#[plexus_macros::activation(client)]                     // namespace "tickets", implicitly
+impl Tickets {
+    /// One item, can't fail.
+    #[plexus_macros::method]
+    pub async fn health(&self) -> Health { /* … */ }
+
+    /// One item, can say no.
+    #[plexus_macros::method(params(id = "Ticket id, e.g. MNG-2"))]
+    pub async fn get(&self, id: String) -> Result<Ticket, GetError> { /* … */ }
+
+    /// Many items, each can fail; an `Err` does not end the stream.
+    #[plexus_macros::method]
+    pub async fn list(&self, epic: Option<String>)
+        -> impl Stream<Item = Result<ListItem, ListError>> + Send + 'static { /* … */ }
+
+    /// Many items, with typed progress on the way.
+    #[plexus_macros::method]
+    pub async fn import(&self, source: String)
+        -> impl Stream<Item = Result<Progress<ImportSummary, ImportStep>, ImportError>> + Send + 'static
+    {
+        stream! {
+            yield Ok(Progress::Update(ImportStep::Chunk { done: 0, of: 10 }));
+            yield Ok(Progress::Item(summary));
+        }
+    }
+}
+```
+
+The full table — schema fields and the frames each item becomes — is in the
+[per-macro reference](#the-six-signature-forms). `Progress` and `Note` are
+`plexus_client::{Progress, Note}` (re-exported as `plexus_core::plexus::{Progress, Note}`).
 
 ---
 
@@ -81,7 +122,7 @@ impl Echo {
 }
 
 /// Echo messages back verbatim; nested `stats` child exposes call introspection.
-#[plexus_macros::activation(namespace = "echo", version = "1.0.0")]
+#[plexus_macros::activation(version = "1.0.0")]          // namespace "echo", implicitly
 impl Echo {
     /// Echo the given message back to the caller exactly as received.
     #[plexus_macros::method(params(message = "The message to echo"))]
@@ -110,8 +151,8 @@ impl EchoStats {
 impl EchoStats {
     /// Return the total number of `echo` calls served since startup.
     #[plexus_macros::method]
-    async fn total(&self) -> impl Stream<Item = u64> + Send + 'static {
-        stream! { yield 0; }  // placeholder — wire up real state in production
+    async fn total(&self) -> u64 {
+        0  // placeholder — wire up real state in production
     }
 }
 ```
@@ -123,6 +164,8 @@ impl EchoStats {
 - **`params(message = "...")`** is the only way to document individual params — Rust has no per-argument doc-comment syntax.
 - **`#[plexus_macros::child]` on a zero-arg accessor fn** creates a static child namespace. `synapse lforge echo stats total` routes into the nested activation.
 - **Stream item type derives `JsonSchema`**, so its variant and field `///` doc comments flow through to the wire.
+- **The namespace is implicit** for `Echo` (`echo`); `EchoStats` names its own (`stats`) because its implicit one would be `echo_stats`.
+- **`total` returns a plain `u64`** — one item, so one data frame; `echo` returns a stream — many.
 
 **Synapse invocations:**
 
@@ -137,7 +180,7 @@ synapse lforge echo stats total                 # → 0
 
 ## Comprehensive example
 
-A single realistic activation that exercises every macro in the crate. Every attribute shown is currently supported on **0.5.x**. Features that are less common are called out inline.
+A single realistic activation that exercises every macro in the crate. Every attribute shown is supported on **0.7**. Features that are less common are called out inline.
 
 > The example below uses several `description = "..."` attr args explicitly — partly for readability in a reference doc, partly because the comprehensive activation description is the easier way to show the `long_description` companion. **In your own code prefer `///` doc comments** per the [Documentation is primary](#documentation-is-primary--everywhere) section above.
 
@@ -243,9 +286,9 @@ pub struct Item; // stand-in for the child activation
     request = CounterRequest,
 )]
 impl Counter {
-    // -- A. Regular streaming method (the common case) --
+    // -- A. A stream of items: the return type says "many" --
     /// Tick the counter and stream `CounterEvent`s.
-    #[plexus_macros::method(streaming)]
+    #[plexus_macros::method]
     async fn tick(&self, n: u32) -> impl Stream<Item = CounterEvent> + Send + 'static {
         stream! {
             for i in 0..n {
@@ -262,8 +305,8 @@ impl Counter {
             b = "Right operand",
         )
     )]
-    async fn add(&self, a: i64, b: i64) -> impl Stream<Item = i64> + Send + 'static {
-        stream! { yield a + b; }
+    async fn add(&self, a: i64, b: i64) -> i64 {
+        a + b    // a plain return: one item
     }
 
     // -- C. Deprecation with precise `removed_in` hint --
@@ -293,7 +336,7 @@ impl Counter {
     // request/response types, use
     // `bidirectional(request = "MyReq", response = "MyResp")`.
     /// Interactive prompt over a bidirectional channel.
-    #[plexus_macros::method(bidirectional, streaming)]
+    #[plexus_macros::method(bidirectional)]
     async fn prompt(&self, ctx: &Arc<StandardBidirChannel>)
         -> impl Stream<Item = String> + Send + 'static
     {
@@ -367,7 +410,7 @@ impl Counter {
 pub struct Stats;
 ```
 
-The example above is the **full** feature surface of plexus-macros 0.5.x. Real activations typically use a subset — see [`plexus-substrate`](https://github.com/hypermemetic/plexus-substrate/tree/main/src/activations) for concrete, minimally-documented usage (`echo` and `bash` are the smallest; `cone`, `claudecode`, and `solar` exercise children, handles, and generics).
+The example above is the **full** attribute surface of plexus-macros 0.7 (the six return-type forms are in the [per-macro reference](#the-six-signature-forms)). Real activations typically use a subset — see [`plexus-substrate`](https://github.com/hypermemetic/plexus-substrate/tree/main/src/activations) for concrete, minimally-documented usage (`echo` and `bash` are the smallest; `cone`, `claudecode`, and `solar` exercise children, handles, and generics).
 
 ---
 
@@ -572,7 +615,7 @@ an unresolved import in code you did not write.
 | | |
 |---|---|
 | **Typed params** | the method's own parameter types, in signature order. `#[activation_param]`, `#[from_auth]` and `auth:` params are absent — the server injects those. |
-| **Typed events** | `EventStream<'_, E>` for the method's `Stream<Item = E>`. `E` is the activation's own type, not a copy. |
+| **Typed events** | `EventStream<'_, I>` for the method's item `I` — `T`, or `Result<T, E>` decoded from its `{"ok"}` / `{"err"}` wire form — whatever its signature form; a one-item method's stream carries its one item. `I` is the activation's own type, not a copy. (0.7 interim: RETURNS-9 replaces this shape with one-item `async fn`s, `MethodStream` and the `{Ns}Event` aggregate.) |
 | **Two shapes** | `m(..)` streams; `m_all(..)` drives to completion and returns `Vec<E>`. |
 | **Transport-generic** | any `plexus_client::Transport` — in-process, WebSocket JSON-RPC, REST + SSE. The emitted code names none of them. |
 | **Two error layers** | `ClientError::Transport` (the connection failed) vs `ClientError::Remote` (the server answered `error`). An activation's *own* `Error` variant stays a data event. |
@@ -688,7 +731,7 @@ Attached to an `impl` block to generate the activation's `Activation` trait impl
 
 | Arg | Type | Default | Notes |
 |---|---|---|---|
-| `namespace = "..."` | string | _(required)_ | Activation namespace. Appears as `plugin_schema.namespace`. |
+| `namespace = "..."` | string | implicit: snake_case(struct), a trailing `Hub` / `Activation` dropped | Activation namespace. Appears as `plugin_schema.namespace` and in every frame's `content_type` (`ns.method`). Only needed when the implicit one is wrong — see [the implicit namespace](#the-implicit-namespace). |
 | `version = "..."` | string | `CARGO_PKG_VERSION` | Semver; used by handles and deprecation schemas. |
 | `description = "..."` | string | _(none)_ | Max **15 words** — macro errors on overflow. Use `long_description` for more. |
 | `long_description = "..."` | string | _(none)_ | Unbounded documentation; projected into `PluginSchema`. |
@@ -710,18 +753,78 @@ Attached to methods inside an `#[activation]` impl. Marks the method as an RPC e
 |---|---|---|---|
 | `description = "..."` | string | first `///` doc-comment block (CHILD-5) | Explicit arg wins over doc comments. |
 | `name = "..."` | string | method identifier | Override the RPC name without renaming the Rust fn. |
-| `streaming` | flag | _(off)_ | Advertises the method as `AsyncGenerator`-shaped in generated clients. |
 | `bidirectional` | flag | _(off)_ | Method uses `StandardBidirChannel`. Use `bidirectional(request = "...", response = "...")` for custom types. |
 | `http_method = "..."` | string | _(none)_ | One of `GET\|POST\|PUT\|DELETE\|PATCH`. Hint for REST generators. |
 | `params(name = "doc", ...)` | key/value list | _(empty)_ | Per-parameter descriptions. Less common now that field-level `///` extraction works; retained for cases where parameters have no natural Rust doc site. |
-| `returns(Variant, ...)` | ident list | _(all variants)_ | Filter the return enum to named variants. Rare. |
 | `request = ()` | tuple | _(inherits)_ | Skip activation-level request extraction for this method (public endpoint escape hatch). |
 | `request = OtherType` | type | _(inherits)_ | Reserved — per-method request type override is not yet wired end-to-end. |
+
+**Removed in 0.7** (compile errors that name the replacement):
+
+| Arg | Error says | Instead |
+|---|---|---|
+| `streaming` | "cardinality comes from the return type — remove `streaming`" | `-> T` / `-> Result<T, E>` is one item; `-> impl Stream<Item = …>` is many |
+| `returns(Variant, ...)` | "give each method its own return type" | a per-method item type, e.g. `-> Result<Ticket, GetError>` |
 
 **Method parameter attributes** (applied inside the `fn` signature):
 
 - `#[activation_param]` — inject a field from the activation-level request struct; name + type must match.
 - `#[from_auth(expr)]` — call `expr(&auth_context)` and bind the result; useful for validated user types.
+
+Params are decoded one at a time, so a bad call names its param: a missing
+required one is an error frame `invalid_params { param, problem: "missing" }`,
+one of the wrong JSON type `invalid_params { param, problem: "malformed",
+detail }`.
+
+#### The six signature forms
+
+A method's return type is its whole contract. The macro reads it and fills
+`MethodSchema`'s `returns` (`T`), `error` (`E`), `progress` (`P`) and
+`cardinality`, and dispatches each item to its frames:
+
+| signature | cardinality | schema `returns` / `error` / `progress` | frames per item |
+|---|---|---|---|
+| `-> T` | one | T / — / — | data `content: T`, then done |
+| `-> Result<T, E>` | one | T / E / — | data `{"ok": t}` or `{"err": e}`, then done |
+| `-> impl Stream<Item = T>` | many | T / — / — | data `content: T` … done |
+| `-> impl Stream<Item = Result<T, E>>` | many | T / E / — | data `{ok}` / `{err}` … done; an `Err` does not end the stream |
+| `-> impl Stream<Item = Progress<T, P>>` | many | T / — / P | `Update(p)` → progress `content: p`; `Item(t)` → data `content: t` |
+| `-> impl Stream<Item = Result<Progress<T, P>, E>>` | many | T / E / P | `Ok(Update(p))` → progress; `Ok(Item(t))` → data `{ok}`; `Err(e)` → data `{err}` |
+
+- **An err is data.** `Err(e)` is the activation saying no, not the call
+  failing; a stream carries on past it unless the method ends it (`yield
+  Err(e); return;`). A call failure (bad params, unknown method, auth) is the
+  error frame.
+- **Progress needs a stream.** `Progress<T>` defaults `P` to `Note { message,
+  percentage }`; `Progress<T, P>` declares it. `-> Progress<T>` (one item) is
+  a compile error.
+- **Recognition is syntactic**: a type whose last path segment is `Result`
+  with two type arguments, or `Progress` with one or two. An alias
+  (`anyhow::Result<T>`, `type R = …`) is a plain `T`. `impl Stream<Item = …>`
+  may carry any extra bounds (`+ Send + 'static`), and `stream! { … }` bodies
+  work as before.
+- **Anything else is a compile error that lists the six forms** — notably
+  `BoxStream<'_, T>`, `Pin<Box<dyn Stream<…>>>` and `PlexusStream`: return
+  `impl Stream<Item = …> + Send + 'static` instead.
+- A plain-`T` stream (`impl Stream<Item = OneEnum>`, 0.6's only form) compiles
+  and sends exactly what it did.
+
+Bidirectional methods, `#[child]` list/search methods, `#[activation_param]`
+/ `#[from_auth]` parameters and `request = …` work with every form.
+
+#### The implicit namespace
+
+Without `namespace = "..."`, an activation's namespace is its struct's name
+in snake_case with one trailing `Hub` or `Activation` removed:
+
+| struct | namespace |
+|---|---|
+| `Tickets` | `tickets` |
+| `HyperforgeHub` | `hyperforge` |
+| `InfoActivation` | `info` |
+| `ClaudeCode` | `claude_code` (write `namespace = "claudecode"` to keep a legacy name) |
+
+`namespace = "..."` is used exactly as given.
 
 ### `#[plexus_macros::child]` / `#[plexus_macros::child(list = "...", search = "...")]`
 
@@ -863,9 +966,9 @@ What the macro emits (consumed downstream for schema + redaction):
 
 `#[derive(Credentials)]` cannot be applied to a union.
 
-### `#[derive(StreamEvent)]` — **deprecated**
+### `#[derive(StreamEvent)]` — **removed in 0.7**
 
-Kept for backward compatibility. The caller-wraps streaming architecture means stream-item enums should just use `Serialize + Deserialize + JsonSchema` (standard derives). Do **not** reach for `StreamEvent` in new code.
+The derive no longer exists. Item types are plain `Serialize + Deserialize + JsonSchema` types.
 
 ### `#[derive(JsonSchema)]` (compat shim)
 
@@ -876,6 +979,21 @@ Library crates almost never need this directly; the companion crate [`plexus-sch
 ---
 
 ## Migration from deprecated surfaces
+
+### 0.6 → 0.7: the return type is the contract
+
+- **Drop `streaming`** — cardinality is the return type. A method that yields
+  one value can now say so: `-> T` / `-> Result<T, E>`.
+- **Drop `returns(..)`** — give the method its own item type instead of a
+  filtered shared enum.
+- **`namespace = "..."` is optional** — drop it when it equals the implicit
+  namespace (snake_case of the struct, `Hub` / `Activation` dropped).
+- **`#[derive(StreamEvent)]` is gone** — delete it; nothing replaces it.
+- Methods returning `impl Stream<Item = OneEnum>` compile unchanged.
+- `#[plexus_macros::activation(client)]`: every form is on the client; a
+  `Result` item decodes from its `{"ok"}` / `{"err"}` wire form.
+
+### 0.5 → 0.6
 
 All deprecations in plexus-macros 0.5 continue to compile with warnings through 0.5.x and are removed in 0.6.
 

@@ -347,6 +347,18 @@
       "role": {
         "kind": "rpc"
       }
+    },
+    {
+      "name": "schema",
+      "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
+      "hash": "*",
+      "returns": {},
+      "cardinality": "one",
+      "bidirectional": false,
+      "http_method": "POST",
+      "role": {
+        "kind": "rpc"
+      }
     }
   ]
 }

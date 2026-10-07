@@ -25,7 +25,9 @@ follows.
 - `expected/calls.json`: every call, as `{method, params, frames}`, where
   `frames` is relative to `expected/` (plus `line`, 1-based, for
   `errors.jsonl`).
-- `expected/schema.json`: the `PluginSchema` the schema RPC returns.
+- `expected/schema.json`: the `PluginSchema` the schema RPC returns: the six
+  methods, then the `schema` method every activation's schema RPC lists
+  (`returns: {}`, cardinality `one`).
 - `expected/wire/<method>[.<case>].jsonl`: the frames of one call, ending in
   its one `done`.
 - `expected/errors.jsonl`: one error frame per call failure the fixture can
@@ -92,3 +94,10 @@ table, with the schema built as RETURNS-5's Intended Usage says
 `{Struct}Method` enum gives them. From RETURNS-8 on, the served output is the
 source: regenerate from it (`timestamp` → `0`, hashes → `"*"`), and the diff
 is the contract change.
+
+RETURNS-8 served it (`tests/serve.rs`, over `Activation::call` and over the
+activation's own jsonrpsee subscriptions). Every frame of every call matched
+as derived. One diff, in `schema.json`: the served schema lists the
+auto-generated `schema` method after the six — the macro has always put it
+in every activation's schema, and the hand derivation left it out. It is now
+in the file; no RETURNS-1 decision moved.

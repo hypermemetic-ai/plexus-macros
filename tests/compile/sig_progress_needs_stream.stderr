@@ -1,0 +1,5 @@
+error: #[plexus_macros::method] `load`: a method that reports progress yields many items — return `impl Stream<Item = Progress<T, P>>` (or `impl Stream<Item = Result<Progress<T, P>, E>>`). A one-item method cannot report progress.
+  --> tests/compile/sig_progress_needs_stream.rs:10:29
+   |
+10 |     async fn load(&self) -> plexus_client::Progress<u64> {
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

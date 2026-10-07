@@ -76,6 +76,21 @@ pub enum MethodRequestOverride {
     Type(syn::Type),
 }
 
+/// RETURNS-8: `#[method(streaming)]` is gone — a method's cardinality is
+/// read from its return type (RETURNS-1 decision 2).
+pub(crate) const STREAMING_REMOVED: &str =
+    "`streaming` is removed: cardinality comes from the return type — remove `streaming`. \
+     A method returning `-> T` or `-> Result<T, E>` yields one item; one returning \
+     `-> impl Stream<Item = ...>` yields many.";
+
+/// RETURNS-8: `#[method(returns(..))]` is gone — it filtered the variants of
+/// a shared event enum, and a method's own return type now says exactly what
+/// it yields (RETURNS-1 decision 16).
+pub(crate) const RETURNS_REMOVED: &str =
+    "`returns(..)` is removed: a method's return type is its contract. Instead of \
+     filtering a shared event enum's variants, give each method its own return type — \
+     e.g. `-> Result<Ticket, GetError>` or `-> impl Stream<Item = ListItem>`.";
+
 /// Parsed attributes for #[hub_method]
 pub struct HubMethodAttrs {
     pub name: Option<String>,
@@ -85,14 +100,6 @@ pub struct HubMethodAttrs {
     pub description: Option<String>,
     /// Parameter descriptions: param_name -> description
     pub param_docs: HashMap<String, String>,
-    /// Specific enum variants this method can return (for filtered schema generation)
-    /// When specified, the return schema will only include these variants from the event enum.
-    /// Format: returns(Variant1, Variant2, Error)
-    pub returns_variants: Vec<String>,
-    /// If true, this method streams multiple events over time.
-    /// If false (default), it yields a single result.
-    /// Used to determine client API: streaming -> AsyncGenerator, non-streaming -> Promise
-    pub streaming: bool,
     /// Bidirectional channel type (from #[hub_method(bidirectional)] or #[hub_method(bidirectional(request = "...", response = "..."))])
     pub bidirectional: BidirType,
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
@@ -176,8 +183,6 @@ impl Parse for HubMethodAttrs {
         let mut name = None;
         let mut description: Option<String> = None;
         let mut param_docs = HashMap::new();
-        let mut returns_variants = Vec::new();
-        let mut streaming = false;
         let mut bidirectional = BidirType::None;
         let mut http_method = None;
         let mut request_override: Option<MethodRequestOverride> = None;
@@ -202,11 +207,11 @@ impl Parse for HubMethodAttrs {
                                 "override_call is deprecated. Use the streaming pattern instead:\n\
                                  - Return `impl Stream<Item = YourEvent>` from the method\n\
                                  - Forward PlexusStreamItem variants into your event enum\n\
-                                 - Add `streaming` attribute if the method yields multiple events\n\
                                  See plexus.call implementation for an example.",
                             ));
                         } else if path.is_ident("streaming") {
-                            streaming = true;
+                            // RETURNS-8: cardinality is read from the signature.
+                            return Err(syn::Error::new_spanned(&path, STREAMING_REMOVED));
                         } else if path.is_ident("bidirectional") {
                             bidirectional = BidirType::Standard;
                         } else if path.is_ident("public") {
@@ -311,12 +316,9 @@ impl Parse for HubMethodAttrs {
                                 }
                             }
                         } else if path.is_ident("returns") {
-                            // Parse returns(Variant1, Variant2, Error)
-                            let parser = Punctuated::<syn::Ident, Token![,]>::parse_terminated;
-                            let nested = syn::parse::Parser::parse2(parser, tokens.clone())?;
-                            for ident in nested {
-                                returns_variants.push(ident.to_string());
-                            }
+                            // RETURNS-8: a method's return type is its
+                            // contract; there is no shared enum to filter.
+                            return Err(syn::Error::new_spanned(&path, RETURNS_REMOVED));
                         } else if path.is_ident("bidirectional") {
                             // Parse bidirectional(request = "MyReq", response = "MyResp")
                             let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
@@ -367,7 +369,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes })
+        Ok(HubMethodAttrs { name, description, param_docs, bidirectional, http_method, request_override, public, scopes })
     }
 }
 
@@ -376,7 +378,9 @@ const MAX_DESCRIPTION_WORDS: usize = 15;
 
 /// Parsed attributes for #[hub_methods]
 pub struct HubMethodsAttrs {
-    pub namespace: String,
+    /// `namespace = "..."`, or `None` for the implicit namespace
+    /// ([`implicit_namespace`] of the struct's name, RETURNS-8).
+    pub namespace: Option<String>,
     /// Explicit version string, or None to use CARGO_PKG_VERSION at compile time
     pub version: Option<String>,
     /// Short description (max 15 words)
@@ -481,7 +485,7 @@ pub enum AuthPosture {
 
 impl Parse for HubMethodsAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut namespace = String::new();
+        let mut namespace: Option<String> = None;
         let mut version: Option<String> = None;
         let mut description = None;
         let mut long_description = None;
@@ -525,7 +529,7 @@ impl Parse for HubMethodsAttrs {
 
                         if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
                             if path.is_ident("namespace") {
-                                namespace = s.value();
+                                namespace = Some(s.value());
                             } else if path.is_ident("version") {
                                 version = Some(s.value());
                             } else if path.is_ident("description") {
@@ -617,10 +621,11 @@ impl Parse for HubMethodsAttrs {
             }
         }
 
-        if namespace.is_empty() {
+        if namespace.as_deref() == Some("") {
             return Err(syn::Error::new(
                 input.span(),
-                "hub_methods requires namespace = \"...\" attribute",
+                "namespace = \"\" is empty; omit `namespace` for the implicit one \
+                 (the struct's name in snake_case, a trailing `Hub` / `Activation` dropped)",
             ));
         }
 
@@ -1327,15 +1332,18 @@ pub struct MethodInfo {
     pub method_name: String,
     pub description: String,
     pub params: Vec<ParamInfo>,
-    /// Return type - reserved for future protocol schema generation
-    #[allow(dead_code)]
-    pub return_type: Type,
-    pub stream_item_type: Option<Type>,
-    /// Specific enum variants this method can return (empty = all variants)
-    pub returns_variants: Vec<String>,
-    /// True if method streams multiple events (from #[hub_method(streaming)])
-    /// False (default) means method yields a single result
-    pub streaming: bool,
+    /// RETURNS-8: one item (`-> T`, `-> Result<T, E>`) or many (`-> impl
+    /// Stream<Item = …>`), read from the return type.
+    pub cardinality: Cardinality,
+    /// RETURNS-8: `T` — the item minus its `Result` / `Progress` wrappers.
+    pub ok_ty: Type,
+    /// RETURNS-8: `E` when the item is a `Result<_, E>`; `None` when the method
+    /// is infallible.
+    pub err_ty: Option<Type>,
+    /// RETURNS-8: `P` when the item is a `Progress<_, P>` (or `Progress<_>`,
+    /// whose `P` is the default `Note`); `None` when the method reports no
+    /// progress.
+    pub progress_ty: Option<ProgressTy>,
     /// Bidirectional channel type (from attribute or inferred from parameter type)
     pub bidirectional: BidirType,
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
@@ -1401,17 +1409,11 @@ impl MethodInfo {
             None => extract_doc_description(&method.attrs).unwrap_or_default(),
         };
 
-        // Get param docs and returns_variants from hub_method attrs
+        // Get param docs from hub_method attrs
         let param_docs = hub_method_attrs
             .map(|a| &a.param_docs)
             .cloned()
             .unwrap_or_default();
-        let returns_variants = hub_method_attrs
-            .map(|a| a.returns_variants.clone())
-            .unwrap_or_default();
-        let streaming = hub_method_attrs
-            .map(|a| a.streaming)
-            .unwrap_or(false);
         let http_method = hub_method_attrs
             .and_then(|a| a.http_method.clone());
         let request_override = hub_method_attrs
@@ -1516,34 +1518,10 @@ impl MethodInfo {
             }
         }
 
-        // Extract return type
-        let return_type = match &method.sig.output {
-            ReturnType::Default => {
-                return Err(syn::Error::new_spanned(
-                    &method.sig,
-                    "hub_method requires a return type",
-                ))
-            }
-            ReturnType::Type(_, ty) => (**ty).clone(),
-        };
-
-        let stream_item_type = extract_stream_item_type(&return_type);
-
-        // Check for PlexusStream return type - must use streaming pattern instead
-        if is_result_plexus_stream(&return_type) {
-            return Err(syn::Error::new_spanned(
-                &method.sig.output,
-                format!(
-                    "Method `{}` returns Result<PlexusStream, _> which bypasses schema generation. \
-                    Use the streaming pattern instead:\n\
-                    - Return `impl Stream<Item = YourEvent>` from the method\n\
-                    - Forward PlexusStreamItem variants into your event enum\n\
-                    - Add `streaming` attribute if the method yields multiple events\n\
-                    See plexus.call implementation for an example.",
-                    fn_name
-                ),
-            ));
-        }
+        // RETURNS-8: the return type is the method's whole contract —
+        // cardinality, item, error and progress, read syntactically.
+        let ReturnShape { cardinality, ok_ty, err_ty, progress_ty } =
+            classify_return(&method.sig)?;
 
         // IR-3: extract deprecation info from the method's attributes (before
         // codegen strips the `#[plexus_macros::removed_in]` companion).
@@ -1564,10 +1542,10 @@ impl MethodInfo {
             method_name,
             description,
             params,
-            return_type,
-            stream_item_type,
-            returns_variants,
-            streaming,
+            cardinality,
+            ok_ty,
+            err_ty,
+            progress_ty,
             bidirectional,
             http_method,
             requires_auth,
@@ -1795,27 +1773,260 @@ fn type_to_string(ty: &Type) -> String {
     }
 }
 
-/// Extract Item type from `impl Stream<Item = T>`
-fn extract_stream_item_type(ty: &Type) -> Option<Type> {
-    if let Type::ImplTrait(impl_trait) = ty {
-        for bound in &impl_trait.bounds {
-            if let syn::TypeParamBound::Trait(trait_bound) = bound {
-                let last_segment = trait_bound.path.segments.last()?;
-                if last_segment.ident == "Stream" {
-                    if let PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                        for arg in &args.args {
-                            if let GenericArgument::AssocType(assoc) = arg {
-                                if assoc.ident == "Item" {
-                                    return Some(assoc.ty.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+// ============================================================================
+// RETURNS-8: the signature forms
+// ============================================================================
+
+/// Whether a method yields one item or many (RETURNS-1 decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cardinality {
+    /// `-> T` / `-> Result<T, E>`: exactly one item.
+    One,
+    /// `-> impl Stream<Item = …>`: zero or more items.
+    Many,
+}
+
+/// The progress type `P` of a `Progress<T, P>` item.
+#[derive(Debug, Clone)]
+pub enum ProgressTy {
+    /// `Progress<T>`: `P` is the default, `plexus_client::Note`. It has no
+    /// path of its own in the signature, so each half of the expansion names
+    /// it through the crate it links — the server through `plexus-core`'s
+    /// re-export, a client through `plexus-client` (see [`ProgressTy::to_type`]).
+    Note,
+    /// `Progress<T, P>`: `P` as written.
+    Declared(Type),
+}
+
+impl ProgressTy {
+    /// `P` as a type, given the path of a crate that exports `Note` at
+    /// `<vocabulary>::Note` (`::plexus_core::plexus` server-side,
+    /// `::plexus_client` client-side).
+    pub fn to_type(&self, vocabulary: &syn::Path) -> Type {
+        match self {
+            ProgressTy::Note => syn::parse_quote!(#vocabulary::Note),
+            ProgressTy::Declared(ty) => ty.clone(),
         }
     }
-    None
+}
+
+/// A method's return type, taken apart (RETURNS-1 decisions 2, 3, 10).
+pub struct ReturnShape {
+    pub cardinality: Cardinality,
+    pub ok_ty: Type,
+    pub err_ty: Option<Type>,
+    pub progress_ty: Option<ProgressTy>,
+}
+
+/// The six forms, as the error that names them lists them.
+const SIX_FORMS: &str = "\
+    -> T\n    \
+    -> Result<T, E>\n    \
+    -> impl Stream<Item = T>\n    \
+    -> impl Stream<Item = Result<T, E>>\n    \
+    -> impl Stream<Item = Progress<T, P>>\n    \
+    -> impl Stream<Item = Result<Progress<T, P>, E>>";
+
+fn not_a_form(span: impl quote::ToTokens, method: &syn::Ident) -> syn::Error {
+    syn::Error::new_spanned(
+        span,
+        format!(
+            "#[plexus_macros::method] `{method}`: the return type is not one of the six \
+             signature forms:\n    {SIX_FORMS}\n\
+             A boxed or named stream (`BoxStream`, `Pin<Box<dyn Stream>>`, `PlexusStream`) is \
+             not recognised — return `impl Stream<Item = ...> + Send + 'static` instead. \
+             `Result` (two type arguments) and `Progress` (one or two) are recognised by \
+             name; an alias of either is a plain `T`."
+        ),
+    )
+}
+
+/// Read a method's signature form (RETURNS-1 pin 14: syntactic — the last
+/// path segment `Result` with two type arguments, `Progress` with one or
+/// two; `impl Stream<Item = X>` with any extra bounds).
+pub fn classify_return(sig: &syn::Signature) -> syn::Result<ReturnShape> {
+    let method = &sig.ident;
+    let ty = match &sig.output {
+        ReturnType::Default => return Err(not_a_form(sig, method)),
+        ReturnType::Type(_, ty) => ungroup(ty),
+    };
+
+    let (item, cardinality) = match ty {
+        Type::ImplTrait(it) => (
+            impl_stream_item(it).ok_or_else(|| not_a_form(ty, method))?,
+            Cardinality::Many,
+        ),
+        _ => (ty, Cardinality::One),
+    };
+
+    let (inner, err_ty) = match result_args(item) {
+        Some((t, e)) => (t, Some(e)),
+        None => (item, None),
+    };
+    let (ok_ty, progress_ty) = match progress_args(inner) {
+        Some((t, p)) => (t, Some(p)),
+        None => (inner, None),
+    };
+
+    if progress_ty.is_some() && cardinality == Cardinality::One {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "#[plexus_macros::method] `{method}`: a method that reports progress yields \
+                 many items — return `impl Stream<Item = Progress<T, P>>` (or \
+                 `impl Stream<Item = Result<Progress<T, P>, E>>`). A one-item method \
+                 cannot report progress."
+            ),
+        ));
+    }
+
+    for part in [Some(ok_ty), err_ty].into_iter().flatten() {
+        if !is_plain_item(part) {
+            return Err(not_a_form(part, method));
+        }
+    }
+    if let Some(ProgressTy::Declared(p)) = &progress_ty {
+        if !is_plain_item(p) {
+            return Err(not_a_form(p, method));
+        }
+    }
+
+    Ok(ReturnShape {
+        cardinality,
+        ok_ty: ok_ty.clone(),
+        err_ty: err_ty.cloned(),
+        progress_ty,
+    })
+}
+
+/// `(T)` and invisible groups are the type inside them.
+fn ungroup(ty: &Type) -> &Type {
+    match ty {
+        Type::Paren(p) => ungroup(&p.elem),
+        Type::Group(g) => ungroup(&g.elem),
+        other => other,
+    }
+}
+
+/// `X` of `impl Stream<Item = X> [+ bounds]`; `None` for any other `impl`.
+fn impl_stream_item(it: &syn::TypeImplTrait) -> Option<&Type> {
+    it.bounds.iter().find_map(|bound| {
+        let syn::TypeParamBound::Trait(tb) = bound else { return None };
+        let last = tb.path.segments.last()?;
+        if last.ident != "Stream" {
+            return None;
+        }
+        let PathArguments::AngleBracketed(args) = &last.arguments else { return None };
+        args.args.iter().find_map(|arg| match arg {
+            GenericArgument::AssocType(at) if at.ident == "Item" => Some(ungroup(&at.ty)),
+            _ => None,
+        })
+    })
+}
+
+/// The type arguments of a path type's last segment, if it is `name`.
+fn type_args<'a>(ty: &'a Type, name: &str) -> Option<Vec<&'a Type>> {
+    let Type::Path(tp) = ty else { return None };
+    if tp.qself.is_some() {
+        return None;
+    }
+    let last = tp.path.segments.last()?;
+    if last.ident != name {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &last.arguments else { return None };
+    let tys: Vec<&Type> = args
+        .args
+        .iter()
+        .filter_map(|a| match a {
+            GenericArgument::Type(t) => Some(ungroup(t)),
+            _ => None,
+        })
+        .collect();
+    (tys.len() == args.args.len()).then_some(tys)
+}
+
+/// `(T, E)` of `Result<T, E>` — exactly two type arguments.
+fn result_args(ty: &Type) -> Option<(&Type, &Type)> {
+    match type_args(ty, "Result")?.as_slice() {
+        [t, e] => Some((t, e)),
+        _ => None,
+    }
+}
+
+/// `(T, P)` of `Progress<T, P>` / `Progress<T>` (`P` = `Note`).
+fn progress_args(ty: &Type) -> Option<(&Type, ProgressTy)> {
+    match type_args(ty, "Progress")?.as_slice() {
+        [t] => Some((t, ProgressTy::Note)),
+        [t, p] => Some((t, ProgressTy::Declared((*p).clone()))),
+        _ => None,
+    }
+}
+
+/// `false` for a type that is a stream or an opaque trait rather than a
+/// value: `impl Trait`, `dyn Trait`, `Box<dyn …>`, `Pin<…>`, and the named
+/// stream types (`BoxStream`, `LocalBoxStream`, `PlexusStream`, `Stream`).
+/// Any other type is a plain item the schema and the wire can carry.
+fn is_plain_item(ty: &Type) -> bool {
+    match ungroup(ty) {
+        Type::ImplTrait(_) | Type::TraitObject(_) => false,
+        Type::Path(tp) => {
+            let Some(last) = tp.path.segments.last() else { return true };
+            let name = last.ident.to_string();
+            if matches!(
+                name.as_str(),
+                "BoxStream" | "LocalBoxStream" | "PlexusStream" | "Stream" | "Pin"
+            ) {
+                return false;
+            }
+            if name == "Box" {
+                if let Some(args) = type_args(ty, "Box") {
+                    return !args.iter().any(|t| matches!(t, Type::TraitObject(_)));
+                }
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+/// RETURNS-8: the implicit namespace (RETURNS-1 decision 7) — the struct's
+/// name in snake_case, with one trailing `Hub` or `Activation` removed:
+/// `Tickets` → `tickets`, `HyperforgeHub` → `hyperforge`, `InfoActivation`
+/// → `info`, `ClaudeCode` → `claude_code`. A struct named exactly `Hub` or
+/// `Activation` keeps its name.
+pub fn implicit_namespace(struct_name: &str) -> String {
+    let base = ["Activation", "Hub"]
+        .iter()
+        .find_map(|suffix| struct_name.strip_suffix(suffix).filter(|rest| !rest.is_empty()))
+        .unwrap_or(struct_name);
+    to_snake_case(base)
+}
+
+/// `ClaudeCode` → `claude_code`, `HTTPServer` → `http_server`, `V2Api` →
+/// `v2_api`: a word starts at an uppercase letter after a lowercase letter
+/// or digit, and at the last capital of an acronym followed by lowercase.
+fn to_snake_case(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let boundary = match i.checked_sub(1).map(|j| chars[j]) {
+                Some(prev) if prev.is_lowercase() || prev.is_ascii_digit() => true,
+                Some(prev) if prev.is_uppercase() => {
+                    chars.get(i + 1).is_some_and(|next| next.is_lowercase())
+                }
+                _ => false,
+            };
+            if boundary {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Extract the description from `///` doc comment attributes on an item.
@@ -1879,28 +2090,6 @@ fn strip_common_leading_whitespace(lines: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Check if return type looks like Result<PlexusStream, _>
-/// This is now rejected - methods should use the streaming pattern instead
-fn is_result_plexus_stream(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "Result" {
-                if let PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(GenericArgument::Type(first_type)) = args.args.first() {
-                        // Check if first type arg is PlexusStream
-                        if let Type::Path(inner_path) = first_type {
-                            if let Some(inner_seg) = inner_path.path.segments.last() {
-                                return inner_seg.ident == "PlexusStream";
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
 }
 
 #[cfg(test)]
@@ -2026,8 +2215,6 @@ mod tests {
                 m.insert("message".to_string(), "explicit description".to_string());
                 m
             },
-            returns_variants: vec![],
-            streaming: false,
             bidirectional: BidirType::None,
             http_method: None,
             request_override: None,
@@ -2132,5 +2319,152 @@ mod tests {
             err.to_string().contains("invalid scope literal"),
             "unexpected error: {err}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // RETURNS-8: the signature forms and the implicit namespace
+    // ------------------------------------------------------------------
+
+    fn shape(sig: syn::Signature) -> syn::Result<ReturnShape> {
+        classify_return(&sig)
+    }
+
+    fn tokens(ty: &Type) -> String {
+        quote::quote!(#ty).to_string()
+    }
+
+    /// The six forms, each with its cardinality, `T`, `E` and `P`.
+    #[test]
+    fn the_six_forms_are_read_from_the_signature() {
+        let cases: Vec<(syn::Signature, Cardinality, &str, Option<&str>, Option<&str>)> = vec![
+            (parse_quote! { async fn a(&self) -> Pong }, Cardinality::One, "Pong", None, None),
+            (
+                parse_quote! { async fn b(&self) -> Result<Thing, LookupError> },
+                Cardinality::One,
+                "Thing",
+                Some("LookupError"),
+                None,
+            ),
+            (
+                parse_quote! { async fn c(&self) -> impl Stream<Item = Tick> + Send + 'static },
+                Cardinality::Many,
+                "Tick",
+                None,
+                None,
+            ),
+            (
+                parse_quote! { async fn d(&self) -> impl Send + Stream<Item = std::result::Result<Row, ScanError>> },
+                Cardinality::Many,
+                "Row",
+                Some("ScanError"),
+                None,
+            ),
+            (
+                parse_quote! { async fn e(&self) -> impl Stream<Item = Result<Progress<Loaded, LoadStep>, LoadError>> },
+                Cardinality::Many,
+                "Loaded",
+                Some("LoadError"),
+                Some("LoadStep"),
+            ),
+            (
+                parse_quote! { async fn f(&self) -> impl Stream<Item = plexus_client::Progress<Warmed>> },
+                Cardinality::Many,
+                "Warmed",
+                None,
+                Some("Note"),
+            ),
+        ];
+        let vocabulary: syn::Path = parse_quote!(v);
+        for (sig, cardinality, ok, err, progress) in cases {
+            let name = sig.ident.to_string();
+            let s = shape(sig).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(s.cardinality, cardinality, "{name}");
+            assert_eq!(tokens(&s.ok_ty), ok, "{name}");
+            assert_eq!(s.err_ty.as_ref().map(tokens).as_deref(), err, "{name}");
+            let p = s.progress_ty.map(|p| match p {
+                ProgressTy::Note => "Note".to_string(),
+                declared => tokens(&declared.to_type(&vocabulary)),
+            });
+            assert_eq!(p.as_deref(), progress, "{name}");
+        }
+    }
+
+    /// Pin 14: recognition is by name and arity — `anyhow::Result<T>` (one
+    /// argument) is a plain `T`.
+    #[test]
+    fn a_one_argument_result_alias_is_a_plain_item() {
+        let s = shape(parse_quote! { async fn a(&self) -> anyhow::Result<Pong> }).unwrap();
+        assert_eq!(s.cardinality, Cardinality::One);
+        assert_eq!(tokens(&s.ok_ty), "anyhow :: Result < Pong >");
+        assert!(s.err_ty.is_none());
+    }
+
+    #[test]
+    fn other_return_types_name_the_six_forms() {
+        let bad: Vec<syn::Signature> = vec![
+            parse_quote! { async fn a(&self) -> BoxStream<'static, Tick> },
+            parse_quote! { async fn a(&self) -> Pin<Box<dyn Stream<Item = Tick> + Send>> },
+            parse_quote! { async fn a(&self) -> PlexusStream },
+            parse_quote! { async fn a(&self) -> Result<PlexusStream, PlexusError> },
+            parse_quote! { async fn a(&self) -> impl Future<Output = Tick> },
+            parse_quote! { async fn a(&self) -> Box<dyn Stream<Item = Tick>> },
+            parse_quote! { async fn a(&self) },
+        ];
+        for sig in bad {
+            let msg = match shape(sig) {
+                Ok(_) => panic!("must be rejected"),
+                Err(e) => e.to_string(),
+            };
+            assert!(msg.contains("six signature forms"), "{msg}");
+            assert!(msg.contains("-> impl Stream<Item = Result<Progress<T, P>, E>>"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn progress_needs_a_stream() {
+        for sig in [
+            parse_quote! { async fn a(&self) -> Progress<Tick> },
+            parse_quote! { async fn a(&self) -> Result<Progress<Tick, Step>, E> },
+        ] {
+            let sig: syn::Signature = sig;
+            let msg = match shape(sig) {
+                Ok(_) => panic!("must be rejected"),
+                Err(e) => e.to_string(),
+            };
+            assert!(msg.contains("cannot report progress"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn streaming_and_returns_are_removed() {
+        let err = match syn::parse_str::<HubMethodAttrs>("streaming") {
+            Ok(_) => panic!("`streaming` must be rejected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("cardinality comes from the return type — remove `streaming`"), "{err}");
+        let err = match syn::parse_str::<HubMethodAttrs>("returns(Ok, Error)") {
+            Ok(_) => panic!("`returns(..)` must be rejected"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("give each method its own return type"), "{err}");
+    }
+
+    #[test]
+    fn the_implicit_namespace() {
+        for (name, ns) in [
+            ("Tickets", "tickets"),
+            ("HyperforgeHub", "hyperforge"),
+            ("InfoActivation", "info"),
+            ("ClaudeCode", "claude_code"),
+            ("Conformance", "conformance"),
+            ("DynamicHub", "dynamic"),
+            ("HTTPServer", "http_server"),
+            ("V2Api", "v2_api"),
+            ("Hub", "hub"),
+            ("Activation", "activation"),
+            ("echo", "echo"),
+        ] {
+            assert_eq!(implicit_namespace(name), ns, "{name}");
+        }
     }
 }

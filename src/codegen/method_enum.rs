@@ -1,11 +1,11 @@
 //! Generate method enum from hub methods
 
-use crate::parse::{AuthPosture, BidirType, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
+use crate::parse::{AuthPosture, BidirType, Cardinality, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use syn::{GenericArgument, PathArguments, Type};
+use syn::Type;
 
 pub fn generate(
     struct_name: &syn::Ident,
@@ -118,24 +118,40 @@ pub fn generate(
     // Compute hashes at compile time for each method
     let method_hashes: Vec<String> = methods.iter().map(compute_method_hash).collect();
 
-    // Generate return type schemas for each method
-    // Each entry is a tuple of (full_schema, variant_filter)
-    // If variant_filter is non-empty, we filter the oneOf to only those variants
-    let return_schema_entries: Vec<TokenStream> = methods
+    // RETURNS-8: each method's contract, read from its signature — `returns`
+    // is `schema_for!(T)`, `error` `schema_for!(E)` when the item is a
+    // `Result`, `progress` `schema_for!(P)` when it is a `Progress`, and the
+    // cardinality one or many (RETURNS-5's `MethodSchema` 0.7 fields).
+    let vocabulary: syn::Path = syn::parse_quote!(#crate_path::plexus);
+    let returns_exprs: Vec<TokenStream> = methods
         .iter()
         .map(|m| {
-            if let Some(item_ty) = &m.stream_item_type {
-                if m.returns_variants.is_empty() {
-                    // No filtering - return full schema
-                    quote! { (Some(#deps::schemars::schema_for!(#item_ty)), Vec::<&str>::new()) }
-                } else {
-                    // Return schema with filter list
-                    let variants = &m.returns_variants;
-                    quote! { (Some(#deps::schemars::schema_for!(#item_ty)), vec![#(#variants),*]) }
-                }
-            } else {
-                quote! { (None, Vec::<&str>::new()) }
+            let ok_ty = &m.ok_ty;
+            quote! { #deps::schemars::schema_for!(#ok_ty) }
+        })
+        .collect();
+    let error_exprs: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| match &m.err_ty {
+            Some(err_ty) => quote! { Some(#deps::schemars::schema_for!(#err_ty)) },
+            None => quote! { None },
+        })
+        .collect();
+    let progress_exprs: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| match &m.progress_ty {
+            Some(p) => {
+                let p_ty = p.to_type(&vocabulary);
+                quote! { Some(#deps::schemars::schema_for!(#p_ty)) }
             }
+            None => quote! { None },
+        })
+        .collect();
+    let cardinality_exprs: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| match m.cardinality {
+            Cardinality::One => quote! { #crate_path::plexus::schema::Cardinality::One },
+            Cardinality::Many => quote! { #crate_path::plexus::schema::Cardinality::Many },
         })
         .collect();
 
@@ -213,13 +229,6 @@ pub fn generate(
             Some((quote! { #idx_lit }, expr))
         })
         .unzip();
-
-    // Generate streaming flags for each method
-    // Streaming is explicitly declared via #[hub_method(streaming)] attribute
-    let streaming_flags: Vec<bool> = methods
-        .iter()
-        .map(|m| m.streaming)
-        .collect();
 
     // Generate HTTP method enum values for each method (defaults to POST if not specified)
     let http_methods: Vec<TokenStream> = methods
@@ -482,9 +491,12 @@ pub fn generate(
                 let method_names: &[&str] = &[#(#method_names),*];
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
                 let hashes: &[&str] = &[#(#method_hashes),*];
-                let streaming: &[bool] = &[#(#streaming_flags),*];
                 let http_methods: Vec<#crate_path::plexus::schema::HttpMethod> = vec![#(#http_methods),*];
-                let return_schemas: Vec<(Option<#deps::schemars::Schema>, Vec<&str>)> = vec![#(#return_schema_entries),*];
+                // RETURNS-8: per-method T / E / P schemas and cardinality.
+                let returns_schemas: Vec<#deps::schemars::Schema> = vec![#(#returns_exprs),*];
+                let error_schemas: Vec<Option<#deps::schemars::Schema>> = vec![#(#error_exprs),*];
+                let progress_schemas: Vec<Option<#deps::schemars::Schema>> = vec![#(#progress_exprs),*];
+                let cardinalities: &[#crate_path::plexus::schema::Cardinality] = &[#(#cardinality_exprs),*];
 
                 // REQ-6 runtime data: per-method auth resolvers, override flags, activation request schema.
                 let auth_entries_per_method: Vec<&[(&str, &str)]> = vec![#(#auth_entries_per_method),*];
@@ -517,11 +529,11 @@ pub fn generate(
                     .iter()
                     .zip(descriptions.iter())
                     .zip(hashes.iter())
-                    .zip(streaming.iter())
                     .zip(http_methods.into_iter())
-                    .zip(return_schemas.into_iter())
+                    .zip(returns_schemas.into_iter())
+                    .zip(error_schemas.into_iter().zip(progress_schemas.into_iter()))
                     .enumerate()
-                    .map(|(i, (((((name, desc), hash), is_streaming), http_method), (returns_opt, variant_filter)))| {
+                    .map(|(i, (((((name, desc), hash), http_method), returns), (error, progress)))| {
                         // Get this variant's schema from oneOf, then extract just the "params" portion
                         // The variant looks like: { properties: { method: {...}, params: {...} }, ... }
                         // We want just the params schema, but we need to merge in $defs from the root
@@ -537,15 +549,6 @@ pub fn generate(
                                     }
                                     #deps::serde_json::from_value::<#deps::schemars::Schema>(p).ok()
                                 })
-                        });
-
-                        // Filter return schema if variant_filter is specified
-                        let filtered_returns = returns_opt.map(|schema| {
-                            if variant_filter.is_empty() {
-                                schema
-                            } else {
-                                Self::filter_return_schema(schema, &variant_filter)
-                            }
                         });
 
                         // REQ-6: augment the method's params schema with:
@@ -598,10 +601,14 @@ pub fn generate(
                         if let Some(p) = params {
                             schema = schema.with_params(p);
                         }
-                        if let Some(r) = filtered_returns {
-                            schema = schema.with_returns(r);
+                        schema = schema.with_returns(returns);
+                        if let Some(e) = error {
+                            schema = schema.with_error(e);
                         }
-                        schema = schema.with_cardinality(if *is_streaming { #crate_path::plexus::schema::Cardinality::Many } else { #crate_path::plexus::schema::Cardinality::One });
+                        if let Some(p) = progress {
+                            schema = schema.with_progress(p);
+                        }
+                        schema = schema.with_cardinality(cardinalities[i]);
                         schema = schema.with_http_method(http_method);
 
                         // R-1 (joint AP-1): stamp the activation-declared
@@ -704,62 +711,6 @@ pub fn generate(
                 methods
             }
 
-            /// Filter a return schema to only include specified variants
-            ///
-            /// This handles the case where a method returns an enum but only uses
-            /// specific variants. The schema is filtered at runtime to only include
-            /// those variants in the oneOf array.
-            fn filter_return_schema(schema: #deps::schemars::Schema, allowed_variants: &[&str]) -> #deps::schemars::Schema {
-                // Convert to JSON for manipulation
-                let mut schema_value = #deps::serde_json::to_value(&schema).expect("Schema should serialize");
-
-                // Check if this is a oneOf enum schema
-                if let Some(one_of) = schema_value.get_mut("oneOf").and_then(|v| v.as_array_mut()) {
-                    // Filter to only variants whose "type" field (the discriminant) matches allowed_variants
-                    // serde's internally tagged enums produce: { "type": "variant_name", ...fields }
-                    // We need to check the "const" value in the "type" property
-                    one_of.retain(|variant| {
-                        // Try to find the variant's tag name
-                        let variant_name = variant
-                            .get("properties")
-                            .and_then(|props| props.get("type"))
-                            .and_then(|type_prop| type_prop.get("const"))
-                            .and_then(|c| c.as_str())
-                            .or_else(|| {
-                                // Some schemas use "enum" instead of "const"
-                                variant
-                                    .get("properties")
-                                    .and_then(|props| props.get("type"))
-                                    .and_then(|type_prop| type_prop.get("enum"))
-                                    .and_then(|e| e.as_array())
-                                    .and_then(|arr| arr.first())
-                                    .and_then(|v| v.as_str())
-                            });
-
-                        if let Some(name) = variant_name {
-                            // Convert snake_case variant name to PascalCase for comparison
-                            let pascal_name = name.split('_')
-                                .map(|word| {
-                                    let mut chars = word.chars();
-                                    match chars.next() {
-                                        None => String::new(),
-                                        Some(first) => first.to_uppercase().chain(chars).collect(),
-                                    }
-                                })
-                                .collect::<String>();
-
-                            allowed_variants.contains(&pascal_name.as_str()) ||
-                            allowed_variants.contains(&name)
-                        } else {
-                            // Can't determine variant name, keep it
-                            true
-                        }
-                    });
-                }
-
-                // Convert back to Schema
-                #deps::serde_json::from_value(schema_value).expect("Filtered schema should deserialize")
-            }
         }
     }
 }
@@ -806,10 +757,22 @@ fn compute_method_hash(method: &MethodInfo) -> String {
         }
     }
 
-    // Hash return type if present
-    if let Some(item_ty) = &method.stream_item_type {
-        let ty_str = quote!(#item_ty).to_string();
-        ty_str.hash(&mut hasher);
+    // Hash the item's types as written: `T`, then `E` and `P` when present.
+    // (RETURNS-8 keeps the 0.6 token-hash mechanism — a plain-T stream hashes
+    // exactly as before; RETURNS-10 makes the hash cover shape and
+    // cardinality.)
+    let ok_ty = &method.ok_ty;
+    quote!(#ok_ty).to_string().hash(&mut hasher);
+    if let Some(err_ty) = &method.err_ty {
+        quote!(#err_ty).to_string().hash(&mut hasher);
+    }
+    if let Some(p) = &method.progress_ty {
+        match p {
+            crate::parse::ProgressTy::Note => "Note".hash(&mut hasher),
+            crate::parse::ProgressTy::Declared(p_ty) => {
+                quote!(#p_ty).to_string().hash(&mut hasher)
+            }
+        }
     }
 
     format!("{:016x}", hasher.finish())
@@ -876,7 +839,7 @@ fn params_meta_call(m: &MethodInfo, crate_path: &syn::Path) -> Option<TokenStrea
 ///
 /// The generated schema carries just enough metadata for downstream consumers
 /// (synapse CLI, schema introspection) to recognize it as a child-routing
-/// entry — the full RPC-method surface (params, returns, streaming, http_method)
+/// entry — the full RPC-method surface (params, returns, cardinality, http_method)
 /// doesn't apply to child methods.
 fn child_schema_entry(child: &ChildMethodInfo, crate_path: &syn::Path) -> TokenStream {
     let name = child.fn_name.to_string();
@@ -952,53 +915,11 @@ pub fn is_option_type(ty: &syn::Type) -> bool {
 /// AUTHZ-CRED-MACRO-3: derive the "credential probe type" for a method —
 /// the type that should be probed for `#[derive(Credentials)]` markers.
 ///
-/// Resolution order:
-/// 1. If the method has `stream_item_type` populated (streaming method
-///    returning `impl Stream<Item = T>` or `impl Stream<Item = T> + Send`),
-///    the probe type is `T`.
-/// 2. Otherwise, if the return type is `Result<T, _>`, the probe type is `T`
-///    (the Ok variant). This is the most common shape for non-streaming
-///    methods.
-/// 3. Otherwise, the probe type is the return type as-is.
-/// 4. Returns `None` only when the return type contains a syntactic pattern
-///    we don't know how to handle (e.g., bare `impl Trait` with no
-///    extractable inner type, or a tuple). For those, the macro emits an
-///    empty credential decls vec — same as pre-ticket behavior.
-///
-/// We deliberately do NOT recurse into `Option<T>`, `Vec<T>`, etc. The
-/// autoref-probe handles the fallback uniformly: if the probe type doesn't
-/// derive `Credentials`, the trait's empty-slice default applies and the
-/// schema's `credentials` field stays empty.
+/// RETURNS-8: that is the method's item `T` — the return type minus its
+/// `impl Stream`, `Result` and `Progress` wrappers — whatever the signature
+/// form. A type that does not derive `Credentials` falls through the
+/// autoref probe to the trait's empty-slice default, so the schema's
+/// `credentials` field stays empty.
 fn effective_credential_probe_type(m: &MethodInfo) -> Option<Type> {
-    // Streaming: probe the stream item type. The stream's `Item = T`
-    // associated type IS the user's per-event payload, which is where
-    // `#[derive(Credentials)]` lives in the streaming case.
-    if let Some(item_ty) = &m.stream_item_type {
-        return Some(item_ty.clone());
-    }
-
-    // Non-streaming: unwrap `Result<T, _>` to T if present, else use the
-    // return type as-is. The recursion stops at one level — a user with
-    // `Result<Result<T, E1>, E2>` would get the inner `Result<T, E1>`
-    // probed, which falls through to empty via the trait default.
-    if let Type::Path(tp) = &m.return_type {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Result" {
-                if let PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(GenericArgument::Type(ok_ty)) = args.args.first() {
-                        return Some(ok_ty.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    // Bare `impl Trait` returns aren't probable without the Stream-item
-    // extraction having succeeded — there's no syntactic handle on the
-    // concrete type. Emit `None` so the caller skips the credentials wiring.
-    if matches!(&m.return_type, Type::ImplTrait(_)) {
-        return None;
-    }
-
-    Some(m.return_type.clone())
+    Some(m.ok_ty.clone())
 }
