@@ -424,7 +424,11 @@ async fn an_in_band_error_item_is_remote_not_transport() {
             Act::Send(notify(
                 "result",
                 sub,
-                json!({"type": "error", "message": "cycle", "code": "E_CYCLE"}),
+                json!({
+                    "type": "error",
+                    "recoverable": false,
+                    "error": {"kind": "execution", "message": "cycle"}
+                }),
             )),
         ]
     }))

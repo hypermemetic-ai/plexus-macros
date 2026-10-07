@@ -1120,8 +1120,33 @@ fn generate_dispatch_arms(
 }
 
 /// Generate param extraction code and return the param names for the call
+///
+/// RETURNS-6 bridge: each failure is the structured
+/// `PlexusError::InvalidParams { param, problem }` — `Missing` when a
+/// required param is absent, `Malformed { detail }` when one does not
+/// decode, naming the param either way (`param: None` only when the params
+/// value is not an object at all). RETURNS-8 owns the dispatch rewrite.
 fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps: &syn::Ident) -> (TokenStream, Vec<&'a syn::Ident>) {
     let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
+
+    // `|e| InvalidParams { param: Some(name), problem: Malformed { detail } }`
+    let malformed = |name: &str| {
+        quote! {
+            |e| #crate_path::plexus::PlexusError::InvalidParams {
+                param: Some(#name.to_string()),
+                problem: #crate_path::plexus::ParamProblem::Malformed { detail: e.to_string() },
+            }
+        }
+    };
+    // `InvalidParams { param: Some(name), problem: Missing }`
+    let missing = |name: &str| {
+        quote! {
+            #crate_path::plexus::PlexusError::InvalidParams {
+                param: Some(#name.to_string()),
+                problem: #crate_path::plexus::ParamProblem::Missing,
+            }
+        }
+    };
 
     let extraction = match m.params.len() {
         0 => quote! {},
@@ -1130,6 +1155,8 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
             let param_name = &param.name;
             let param_str = param_name.to_string();
             let is_option = crate::codegen::method_enum::is_option_type(&param.ty);
+            let malformed = malformed(&param_str);
+            let missing = missing(&param_str);
 
             if is_option {
                 // For Option<T>, missing field OR explicit null = None (not an error)
@@ -1140,11 +1167,11 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                                 .filter(|v| !v.is_null())  // Treat explicit null as missing
                                 .map(|v| #deps::serde_json::from_value(v.clone()))
                                 .transpose()
-                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
+                                .map_err(#malformed)?
                         }
                         #deps::serde_json::Value::Null => None,
                         _ => #deps::serde_json::from_value(params.clone())
-                            .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
+                            .map_err(#malformed)?,
                     };
                 }
             } else {
@@ -1154,15 +1181,13 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                         #deps::serde_json::Value::Object(map) => {
                             if let Some(val) = map.get(#param_str) {
                                 #deps::serde_json::from_value(val.clone())
-                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
+                                    .map_err(#malformed)?
                             } else {
-                                return Err(#crate_path::plexus::PlexusError::InvalidParams(
-                                    format!("missing field: {}", #param_str)
-                                ));
+                                return Err(#missing);
                             }
                         }
                         _ => #deps::serde_json::from_value(params.clone())
-                            .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
+                            .map_err(#malformed)?,
                     };
                 }
             }
@@ -1175,6 +1200,8 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                     let name = &p.name;
                     let name_str = name.to_string();
                     let is_option = crate::codegen::method_enum::is_option_type(&p.ty);
+                    let malformed = malformed(&name_str);
+                    let missing = missing(&name_str);
 
                     if is_option {
                         // For Option<T>, missing field OR explicit null = None (not an error)
@@ -1183,17 +1210,15 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                                 .filter(|v| !v.is_null())  // Treat explicit null as missing
                                 .map(|v| #deps::serde_json::from_value(v.clone()))
                                 .transpose()
-                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?;
+                                .map_err(#malformed)?;
                         }
                     } else {
                         // For required fields, error on missing
                         quote! {
                             let #name = map.get(#name_str)
-                                .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
-                                    format!("missing field: {}", #name_str)
-                                ))
+                                .ok_or_else(|| #missing)
                                 .and_then(|v| #deps::serde_json::from_value(v.clone())
-                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string())))?;
+                                    .map_err(#malformed))?;
                         }
                     }
                 })
@@ -1201,9 +1226,12 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
 
             quote! {
                 let map = params.as_object()
-                    .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
-                        "expected object".to_string()
-                    ))?;
+                    .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams {
+                        param: None,
+                        problem: #crate_path::plexus::ParamProblem::Malformed {
+                            detail: "expected object".to_string(),
+                        },
+                    })?;
                 #(#extractions)*
             }
         }

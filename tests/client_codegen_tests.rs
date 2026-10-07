@@ -216,9 +216,8 @@ async fn an_in_band_error_and_a_transport_failure_stay_distinguishable() {
         HEALTH,
         vec![StreamItem::Error {
             metadata: None,
-            message: "denied".into(),
-            code: Some("E403".into()),
             recoverable: false,
+            error: plexus_client::RemoteError::Unauthenticated,
         }],
     ));
     let err = remote.health_all().await.unwrap_err();
