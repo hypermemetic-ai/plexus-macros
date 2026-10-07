@@ -352,7 +352,849 @@
       "name": "schema",
       "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "hash": "*",
-      "returns": {},
+      "returns": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SchemaResult",
+        "description": "Result of a schema query - either full plugin or single method",
+        "anyOf": [
+          {
+            "description": "Full plugin schema (when no method specified)",
+            "$ref": "#/$defs/PluginSchema"
+          },
+          {
+            "description": "Single method schema (when method specified)",
+            "$ref": "#/$defs/MethodSchema"
+          }
+        ],
+        "$defs": {
+          "PluginSchema": {
+            "description": "A plugin's schema with methods and child summaries.\n\nChildren are represented as summaries (namespace, description, hash) rather\nthan full recursive schemas. This enables lazy traversal - clients can fetch\nchild schemas individually via `{namespace}.schema`.\n\n- Leaf plugins have `children = None`\n- Hub plugins have `children = Some([ChildSummary, ...])`",
+            "type": "object",
+            "properties": {
+              "namespace": {
+                "description": "The plugin's namespace (e.g., \"echo\", \"plexus\")",
+                "type": "string"
+              },
+              "version": {
+                "description": "The plugin's version (e.g., \"1.0.0\")",
+                "type": "string"
+              },
+              "description": {
+                "description": "Short description of the plugin (max 15 words)",
+                "type": "string"
+              },
+              "long_description": {
+                "description": "Detailed description of the plugin (optional)",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "self_hash": {
+                "description": "Hash of ONLY this plugin's methods (ignores children)\nChanges when method signatures, names, or descriptions change",
+                "type": "string"
+              },
+              "children_hash": {
+                "description": "Hash of ONLY child plugin hashes (None for leaf plugins)\nChanges when any child's hash changes (recursively)",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hash": {
+                "description": "Composite hash = hash(self_hash + children_hash)\nUse this if you want a single hash for the entire subtree\nBackward compatible with previous single-hash system",
+                "type": "string"
+              },
+              "methods": {
+                "description": "Methods exposed by this plugin",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/MethodSchema"
+                }
+              },
+              "children": {
+                "description": "Child plugin summaries (None = leaf plugin, Some = hub plugin)\n\n# Deprecated (IR-4)\n\nThis side-table is deterministically derived from the method list's\n`MethodRole` tags (one `ChildSummary` per non-`Rpc` method). It stays\non the wire for back-compat during the 0.5 transition window and is\nslated for removal in 0.6.\n\nConsumers reading child metadata should switch to iterating\n`methods` and filtering by `role != MethodRole::Rpc`. The name field\non each `MethodSchema` is the child's namespace.",
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/ChildSummary"
+                },
+                "deprecated": true
+              },
+              "request": {
+                "description": "JSON Schema for the HTTP request type this activation extracts from incoming connections.\n\nPresent when the activation declares `request = MyRequest` in `#[plexus::activation(...)]`.\nThe schema includes `x-plexus-source` extension fields on each property describing\nwhere each field is sourced from (cookie, header, query param, peer address, etc.).\n\nClients can use this to understand what request data the activation expects and\nto generate appropriate authentication/context documentation."
+              },
+              "deprecation": {
+                "description": "If set, this whole activation is deprecated.\n\nAdded in IR-5. Defaults to `None` via `#[serde(default)]` so pre-IR\nschemas deserialize cleanly.\n\nPopulated by the `#[deprecated(...)]` attribute on the `impl\nActivation for Foo` block (IR-5).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DeprecationInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "namespace",
+              "version",
+              "description",
+              "self_hash",
+              "hash",
+              "methods"
+            ]
+          },
+          "MethodSchema": {
+            "description": "Schema for a single method exposed by a plugin",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "Method name (e.g., \"echo\", \"check\")",
+                "type": "string"
+              },
+              "description": {
+                "description": "Human-readable description of what this method does",
+                "type": "string"
+              },
+              "hash": {
+                "description": "Content hash of the method definition (for cache invalidation)\nGenerated by hashing the method signature within hub-macro",
+                "type": "string"
+              },
+              "params": {
+                "description": "JSON Schema for the method's parameters (None if no params)",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Schema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "returns": {
+                "description": "JSON Schema for the method's item type `T` — what one success carries.\n\nAlways present: every method has a return type. For a `Result<T, E>`\nor `Progress<T, P>` item it is `T` alone — `E` and `P` have fields of\ntheir own. [`MethodSchema::new`] starts it at the empty schema `{}`\n(any value) until [`MethodSchema::with_returns`] sets it.",
+                "$ref": "#/$defs/Schema"
+              },
+              "error": {
+                "description": "JSON Schema for the method's error type `E` — what the activation says\nwhen it says no (`-> Result<T, E>`). Absent from the wire when the\nmethod is infallible.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Schema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "progress": {
+                "description": "JSON Schema for the method's progress type `P` (an item of\n`Progress<T, P>`), carried by progress frames. Absent from the wire\nwhen the method reports no progress.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Schema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "cardinality": {
+                "description": "Whether the method yields one item or many — `\"one\"` / `\"many\"`.\n\nRequired on the wire: a schema that does not state its cardinality is\nnot a 0.7 schema, and guessing would reintroduce the disagreement this\nfield exists to end.",
+                "$ref": "#/$defs/Cardinality"
+              },
+              "bidirectional": {
+                "description": "Whether this method supports bidirectional communication\n\nWhen true, the server can send requests to the client during method execution\nand wait for responses (e.g., confirmations, prompts, selections).",
+                "type": "boolean",
+                "default": false
+              },
+              "http_method": {
+                "description": "HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)\n\nThis field is used by the HTTP gateway to determine which HTTP method\nto use when exposing this method as a REST endpoint. Defaults to POST\nfor backward compatibility.\n\n- GET: Idempotent read operations (no side effects)\n- POST: Create operations or non-idempotent actions (default)\n- PUT: Replace/update operations (idempotent)\n- DELETE: Remove operations (idempotent)\n- PATCH: Partial update operations",
+                "$ref": "#/$defs/HttpMethod",
+                "default": "POST"
+              },
+              "request_type": {
+                "description": "JSON Schema for the request type sent from server to client\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nrequests the server may send during method execution.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Schema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "response_type": {
+                "description": "JSON Schema for the response type sent from client to server\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nresponses the client should send in reply to server requests.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Schema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "role": {
+                "description": "How this method participates in the activation graph.\n\nAdded in IR-2. Defaults to `MethodRole::Rpc` via `#[serde(default)]`\nso pre-IR schemas deserialize cleanly.\n\nPopulated by the `#[plexus::method]` / `#[child]` macros (IR-3).",
+                "$ref": "#/$defs/MethodRole",
+                "default": {
+                  "kind": "rpc"
+                }
+              },
+              "deprecation": {
+                "description": "If set, this method is deprecated.\n\nAdded in IR-2. Defaults to `None` via `#[serde(default)]` so pre-IR\nschemas deserialize cleanly.\n\nPopulated by the `#[deprecated(...)]` attribute on the underlying\nmethod (IR-5).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DeprecationInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "params_meta": {
+                "description": "Per-parameter metadata (currently just deprecation).\n\nAdded in IR-5. Defaults to an empty vec via `#[serde(default)]` so\npre-IR schemas deserialize cleanly. Only parameters that carry\nmetadata appear in this list — absence means \"no metadata\" for that\nparameter, not a bug.\n\nPopulated by the `#[deprecated(...)]` attribute on individual\nparameters (IR-5).",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ParamSchema"
+                }
+              },
+              "credentials": {
+                "description": "Credential-bearing fields in this method's return type.\n\nOne entry per `#[plexus::credential(...)]`-annotated field on the\nreturn-type struct/enum, in stable declaration order. Empty when\nthe return type contains no credentials.\n\nAdded in `AUTHZ-CRED-CORE-3`. Defaults to an empty vec via\n`#[serde(default)]` so pre-IR schemas deserialize cleanly. The\n`skip_serializing_if = \"Vec::is_empty\"` clause keeps the wire JSON\nshape unchanged for methods with no credential-bearing fields\n(back-compat per the ticket's \"Wire-format back-compat\" table).\n\nPopulated at schema-build time from the `CredentialFieldMarker`\nregistry emitted by `#[derive(Credentials)]` (`AUTHZ-CRED-MACRO-1`).",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/CredentialFieldDecl"
+                }
+              },
+              "requires_credential": {
+                "description": "What credential this method requires on input (if any).\n\nDerived implicitly from the method's scope tagging and the\ncredential-graph linkage at schema-build time (per\n`AUTHZ-CRED-CORE-3` §\"Implicit derivation\"):\n\n- `scope = \"...\"` → `RequiredCredential::from_method_scope(scope)`.\n- `public` method → `None` (the absence of this field).\n- target of `refresh_via`/`revoke_via` of another credential →\n  `RequiredCredential::from_refresh_revoke_target(kind, scopes)`.\n\nAdded in `AUTHZ-CRED-CORE-3`. Defaults to `None` via\n`#[serde(default)]` so pre-IR schemas deserialize cleanly. The\n`skip_serializing_if = \"Option::is_none\"` clause keeps the wire JSON\nshape unchanged for public methods and methods with no scope-derived\nrequirement.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RequiredCredential"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "auth_posture": {
+                "description": "Declared auth posture of the activation this method belongs to.\n\nPopulated by `#[plexus_macros::activation(auth = \"...\")]` (R-1) —\nstamped onto every RPC method of the activation. `None` means the\nactivation never declared a posture (pre-R-1 emissions and\nposture-silent activations are byte-identical on the wire).\n\nAdded in R-2 (joint AP-1). Defaults to `None` via `#[serde(default)]`\nso pre-R IRs decode cleanly; `skip_serializing_if` keeps the wire\nshape unchanged when unset.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AuthPosture"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "public": {
+                "description": "Whether this method is explicitly public — exempt from the\ndefault-deny gate (AUTHZ-CORE-2's `#[plexus::method(public)]`).\n\n`public` and a populated `requires_credential` are mutually exclusive\nby construction: the macro rejects `public` + `scope = \"...\"` at\ncompile time.\n\nAdded in R-2. Defaults to `false` via `#[serde(default)]` so pre-R\nIRs decode cleanly; `skip_serializing_if` keeps the wire shape\nunchanged for non-public methods (i.e., every pre-R method).",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "hash",
+              "returns",
+              "cardinality"
+            ]
+          },
+          "Schema": {
+            "type": [
+              "object",
+              "boolean"
+            ]
+          },
+          "Cardinality": {
+            "description": "How many items a method yields: exactly one, or a stream of them.\n\nRead from the method's signature (RETURNS-1 decision 2): a plain return\ntype (`-> T`, `-> Result<T, E>`) is [`Cardinality::One`]; `-> impl\nStream<Item = …>` is [`Cardinality::Many`]. A reader decides how to present\na method (a single awaited value vs. a stream) from this field alone —\nnever from the presence of a stream type or a guess at the item's shape.\n\nSerialized as `\"one\"` / `\"many\"`.",
+            "oneOf": [
+              {
+                "description": "The method yields exactly one item.",
+                "type": "string",
+                "const": "one"
+              },
+              {
+                "description": "The method yields a stream of zero or more items.",
+                "type": "string",
+                "const": "many"
+              }
+            ]
+          },
+          "HttpMethod": {
+            "description": "HTTP method for REST endpoint routing",
+            "oneOf": [
+              {
+                "description": "GET: Idempotent read operations with no side effects",
+                "type": "string",
+                "const": "GET"
+              },
+              {
+                "description": "POST: Create operations or non-idempotent actions (default)",
+                "type": "string",
+                "const": "POST"
+              },
+              {
+                "description": "PUT: Replace/update operations (idempotent)",
+                "type": "string",
+                "const": "PUT"
+              },
+              {
+                "description": "DELETE: Remove operations (idempotent)",
+                "type": "string",
+                "const": "DELETE"
+              },
+              {
+                "description": "PATCH: Partial update operations",
+                "type": "string",
+                "const": "PATCH"
+              }
+            ]
+          },
+          "MethodRole": {
+            "description": "Describes how a method participates in the activation graph.\n\nEvery method on a plugin is exactly one of three kinds:\n\n- `Rpc` — a regular RPC endpoint (the default).\n- `StaticChild` — the method returns a child activation by a static name\n  (no lookup argument). Used by `#[child]`-annotated methods on hubs.\n- `DynamicChild { .. }` — the method gates a dynamic child keyed by its\n  argument. `list_method` optionally names a sibling method that enumerates\n  available keys, and `search_method` optionally names a sibling method\n  that searches keys.\n\nThis tag is consumed by downstream tooling (synapse, synapse-cc,\nintrospection clients) to reconstruct the child graph without a separate\nside-table. Today's macros emit `MethodRole::Rpc` for every method; IR-3\npopulates child roles from `#[child]` annotations.\n\n# Wire back-compat\n\nAdded in IR-2. Serde defaults to `Rpc` for pre-IR schemas.\n`#[non_exhaustive]` reserves space for future variants without breaking\ndownstream match arms.",
+            "oneOf": [
+              {
+                "description": "Method is an RPC endpoint (the default for ordinary methods).",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "rpc"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Method returns a child activation by static name (no lookup arg).",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "static_child"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Method gates a dynamic child keyed by its argument.",
+                "type": "object",
+                "properties": {
+                  "list_method": {
+                    "description": "Optional sibling method that lists available keys.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "search_method": {
+                    "description": "Optional sibling method that searches available keys.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "dynamic_child"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "DeprecationInfo": {
+            "description": "Structured deprecation metadata attached to a `MethodSchema`.\n\nDownstream consumers (CLI help, docs generators, IDEs) use these fields\nto surface migration guidance to users.\n\n# Example\n\n```\nuse plexus_core::DeprecationInfo;\n\nlet info = DeprecationInfo {\n    since: \"0.5\".into(),\n    removed_in: \"0.6\".into(),\n    message: \"Use `new_method` instead.\".into(),\n};\n```",
+            "type": "object",
+            "properties": {
+              "since": {
+                "description": "The plexus-core version at which deprecation began (e.g., `\"0.5\"`).",
+                "type": "string"
+              },
+              "removed_in": {
+                "description": "The plexus-core version planned for removal (e.g., `\"0.6\"`).\n\nNot binding — serves as a consumer-visible hint.",
+                "type": "string"
+              },
+              "message": {
+                "description": "Human-readable migration guidance.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "since",
+              "removed_in",
+              "message"
+            ]
+          },
+          "ParamSchema": {
+            "description": "Per-parameter metadata for a method's parameters.\n\n`MethodSchema.params` already carries the fine-grained JSON Schema for the\ncombined parameter object. `ParamSchema` carries orthogonal, parameter-\nscoped metadata that doesn't fit on a JSON Schema node — currently just\ndeprecation info (IR-5).\n\nThe `name` field matches the parameter identifier in the method signature\nso consumers can correlate entries against the `params` JSON Schema's\n`properties` map.\n\nAdded in IR-5. Defaults to an empty list on `MethodSchema` so pre-IR\nschemas deserialize cleanly.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "Parameter name, matching the identifier in the method signature.",
+                "type": "string"
+              },
+              "deprecation": {
+                "description": "If set, this parameter is deprecated.\n\nPopulated by `#[deprecated(...)]` (+ optional\n`#[plexus_macros::removed_in(\"...\")]`) on the parameter in the\nmethod signature (IR-5).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DeprecationInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "CredentialFieldDecl": {
+            "description": "One entry per credential-bearing field in a method's return type.\n\nPinned by `AUTHZ-CRED-S01-output.md` §4 and `AUTHZ-CRED-CORE-3` §\"Required\nbehavior\". Projected onto `MethodSchema.credentials` at schema-build time\nfrom the `CredentialFieldMarker` registry the `#[derive(Credentials)]` macro\nemits per credential-bearing type (`AUTHZ-CRED-MACRO-1`).\n\n# Field path semantics (Tier B Q-IR-1)\n\n`field_path` is the JSON-object path to the credential field within the\nmethod's return type. v1 always uses object-field paths (one segment per\nfield name walked); array indices and JSON Pointer syntax are intentionally\nexcluded because credentials always live on object fields in v1, never\ninside array elements.\n\nExample: for a return type\n`struct LoginResult { session: Credential<String> }`, the field path is\n`[\"session\"]`. For a nested case\n`struct LoginResult { auth: AuthBundle }` where `AuthBundle` itself\ndeclares a `#[plexus::credential(..)]` field `token: Credential<String>`,\nthe field path is `[\"auth\", \"token\"]`.\n\n# Variant tagging\n\n`variant_tag` is `Some(tag)` when the method's return type is an enum and\nthe credential lives on a single variant. The tag matches the variant\nidentifier as the macro registry records it (e.g. `\"Issued\"` for the\n`LoginEvent::Issued` variant). `None` means the return type is a struct,\nor the credential appears on every variant of the enum (rare).\n\n# Wire back-compat\n\nAdded in `AUTHZ-CRED-CORE-3`. Pre-existing readers tolerate `credentials:\n[]` (the default on `MethodSchema` when no credentials are declared) and\npre-existing IRs that omit the field altogether decode cleanly via\n`#[serde(default)]` on the field site.",
+            "type": "object",
+            "properties": {
+              "field_path": {
+                "description": "JSON-object path to the credential field within the method's return\ntype. One segment per field-name walk; pinned to object paths (no\narray indices, no JSON Pointer) per Tier B Q-IR-1.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "variant_tag": {
+                "description": "Variant tag when the return type is an enum and the credential lives\non a single variant. `None` for structs.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "metadata": {
+                "description": "The credential's metadata (kind, attach site, scheme, scopes, expiry,\nrefresh/revoke hints, issuer, sensitivity). Carried verbatim so\nconsumers embed identical storage-and-attach logic to the runtime.",
+                "$ref": "#/$defs/CredentialMetadata"
+              }
+            },
+            "required": [
+              "field_path",
+              "metadata"
+            ]
+          },
+          "CredentialMetadata": {
+            "description": "What this credential is and how to attach it on subsequent calls.\n\nEvery metadata field is a typed newtype, never a bare string. The\n[`CredentialMetadata::sensitive`] field is always `true`; it exists on the\nstruct so the metadata is the single source of truth for the redaction\npipeline (AUTHZ-PRIVACY-1).\n\nMetadata is **fixed at mint time**: a `Credential<T>` exposes its metadata\nvia [`Credential::metadata`], but there is no mutable accessor.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "description": "What kind of credential this is. Tags storage decisions and drives\nselection.",
+                "$ref": "#/$defs/CredentialKind"
+              },
+              "attach_as": {
+                "description": "Where the credential is attached on the wire when sent on subsequent\ncalls.",
+                "$ref": "#/$defs/AttachmentSite"
+              },
+              "scheme": {
+                "description": "Optional prefix prepended to the value at attach time (e.g.,\n`\"Bearer \"` for `Authorization: Bearer <token>`). Stored in the\nmetadata so the client doesn't have to guess.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CredentialScheme"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "scopes": {
+                "description": "Which scopes this credential authorizes. Empty set means \"scope\ndecision is server-side; client doesn't filter.\"",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "expires_at": {
+                "description": "Hard expiry of the credential value, if known at issue time. Used\nfor proactive refresh and for dropping stale stored credentials.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "refresh_via": {
+                "description": "Optional refresh hint: if this credential expires, call this method\nto obtain a fresh one. The named-session framework handles the swap;\nactivation code is uninvolved.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MethodPath"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "revoke_via": {
+                "description": "Optional revocation hint: calling this method invalidates the\ncredential server-side.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MethodPath"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "issuer": {
+                "description": "Identity of the issuing party.",
+                "$ref": "#/$defs/CredentialIssuer"
+              },
+              "sensitive": {
+                "description": "Sensitivity marker for the redaction pipeline (AUTHZ-PRIVACY-1).\nAlways `true`; present for type-system uniformity so any code that\nreads the metadata has a single source of truth.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "attach_as",
+              "scopes",
+              "issuer",
+              "sensitive"
+            ]
+          },
+          "CredentialKind": {
+            "description": "What kind of credential this is. Tags storage decisions and drives the\nselection filter (`AUTHZ-CRED-CLI-3`). **Closed** for v1 — third crates\ncannot extend the enum; backends with bespoke schemes use the\n[`CredentialKind::Other`] escape valve.\n\nThe cost of going `Other` is loss of generic client integration — a method\nrequiring `Bearer` will not auto-attach an `Other`-kinded credential.",
+            "oneOf": [
+              {
+                "description": "Static or short-lived bearer token (JWT, opaque token).",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "bearer"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Cookie-shaped session credential (server may issue `Set-Cookie`).",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cookie"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "OAuth/OIDC access token (paired with refresh; `refresh_via` populated).",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "oauth_access"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "OAuth/OIDC refresh token. Long-lived, used to mint new\n[`CredentialKind::OauthAccess`] credentials.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "oauth_refresh"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "OIDC ID token (informational identity assertion; not for auth).",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "oidc_id"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "AWS STS credential set (composite: access_key_id + secret + token + exp).",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "aws_sts"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Macaroon-style capability token with caveats.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "macaroon"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Custom kind, for backends with bespoke schemes; stored opaquely.",
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "description": "Opaque name supplied by the backend.",
+                    "$ref": "#/$defs/CredentialKindName"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "other"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ]
+              }
+            ]
+          },
+          "CredentialKindName": {
+            "description": "Opaque kind name for `CredentialKind::Other`. The framework's\ncompatibility logic treats `Other`-kinded credentials as untagged for\nthe purposes of `requires_credential` matching (per Tier B Q-FLOW-2).",
+            "type": "string"
+          },
+          "AttachmentSite": {
+            "description": "Where the credential is attached on the wire when sent on subsequent\ncalls. The framework's client-side replay machinery reads this to build\nthe outbound request.",
+            "oneOf": [
+              {
+                "description": "HTTP header. e.g. `Authorization: <scheme><value>`.",
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "description": "The header name (e.g. `authorization`).",
+                    "$ref": "#/$defs/HeaderName"
+                  },
+                  "site": {
+                    "type": "string",
+                    "const": "header"
+                  }
+                },
+                "required": [
+                  "site",
+                  "name"
+                ]
+              },
+              {
+                "description": "HTTP cookie. e.g. `Cookie: plexus_session=<value>`.",
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "description": "The cookie name (e.g. `plexus_session`).",
+                    "$ref": "#/$defs/CookieName"
+                  },
+                  "site": {
+                    "type": "string",
+                    "const": "cookie"
+                  }
+                },
+                "required": [
+                  "site",
+                  "name"
+                ]
+              },
+              {
+                "description": "First-frame WS auth: included as a parameter to a setup method.",
+                "type": "object",
+                "properties": {
+                  "setup_method": {
+                    "description": "The method that the client calls first on the WS connection.",
+                    "$ref": "#/$defs/MethodPath"
+                  },
+                  "param": {
+                    "description": "The parameter on that setup call where the credential is passed.",
+                    "$ref": "#/$defs/ParamName"
+                  },
+                  "site": {
+                    "type": "string",
+                    "const": "first_frame"
+                  }
+                },
+                "required": [
+                  "site",
+                  "setup_method",
+                  "param"
+                ]
+              },
+              {
+                "description": "In-RPC parameter: each call receives this credential as a named\nparameter on the inbound activation. Used for backends without HTTP\ncookie/header support (e.g., pure stdio).",
+                "type": "object",
+                "properties": {
+                  "param": {
+                    "description": "The parameter name on every credential-requiring method.",
+                    "$ref": "#/$defs/ParamName"
+                  },
+                  "site": {
+                    "type": "string",
+                    "const": "in_rpc_param"
+                  }
+                },
+                "required": [
+                  "site",
+                  "param"
+                ]
+              }
+            ]
+          },
+          "HeaderName": {
+            "description": "An HTTP header name (e.g. `\"Authorization\"`).\n\nStored normalized to lowercase so equality matches the case-insensitive\nHTTP convention. RFC 7230 §3.2 token-set validation applied to the input\nbefore normalization. Per AUTHZ-S01-output §1.",
+            "type": "string"
+          },
+          "CookieName": {
+            "description": "A cookie name (e.g. `\"plexus_session\"`). RFC 6265 token-set validation.\n\nPer AUTHZ-S01-output §1. RFC 6265 defines `cookie-name = token` and `token`\nfrom RFC 7230 §3.2.6: any VCHAR except CTLs, separators, and the\ndelimiters listed in RFC 7230.",
+            "type": "string"
+          },
+          "MethodPath": {
+            "description": "A dotted method path like `auth.login` or `cone.send_message`.\n\nWire form: bare string. Validation: must match\n`^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`. At least two segments are required\n(the activation namespace plus the method name).\n\nWildcards are NOT allowed — wildcards belong to `Scope` (AUTHZ-CORE-4).\n\nPer AUTHZ-S01-output §1.",
+            "type": "string"
+          },
+          "ParamName": {
+            "description": "Parameter name for in-RPC-parameter and first-frame attachment sites.",
+            "type": "string"
+          },
+          "CredentialScheme": {
+            "description": "Credential attach-time prefix, e.g. `\"Bearer \"` (trailing space\nincluded). Pinned by AUTHZ-CRED-S01-output §2.",
+            "type": "string"
+          },
+          "Scope": {
+            "description": "Atomic capability identifier, e.g. `cone.send_message`. Canonical\n`Scope` newtype pinned by AUTHZ-S01-output §1. The grammar-validated\nconstructor (`Scope::try_new`), wildcard predicate (`is_wildcard`),\nand segment-bounded matching (`Scope::matches`) live in\n`crate::scope_registry` (AUTHZ-CORE-4). The macro-generated\n`Scope::new` below stays unvalidated for wire-decoded values;\nregistry construction goes through `try_new`.",
+            "type": "string"
+          },
+          "CredentialIssuer": {
+            "description": "Identity of the issuing party: the Origin the credential was issued from\nand the method that issued it. Drives the named-session auto-naming\nalgorithm (AUTHZ-CRED-S01-output §5) and ties the credential to its\nlineage in audit.",
+            "type": "object",
+            "properties": {
+              "origin": {
+                "description": "Backend Origin that issued this credential.",
+                "$ref": "#/$defs/Origin"
+              },
+              "method": {
+                "description": "Method whose return type carries this credential field.",
+                "$ref": "#/$defs/MethodPath"
+              }
+            },
+            "required": [
+              "origin",
+              "method"
+            ]
+          },
+          "Origin": {
+            "description": "Backend Origin identifier (typically a URL like `ws://localhost:4444`).\nLocal stub for the canonical `Origin` newtype pinned by\nCLIENTS-S01-output §1. NOTE: the workspace also has an unrelated\n`plexus_core::types::Origin` (plugin-id + method, not URL-shaped); the\nAUTHZ-CRED design uses the URL-shaped Origin from CLIENTS-S01.",
+            "type": "string"
+          },
+          "RequiredCredential": {
+            "description": "What a method requires on input — the implicit-derivation projection of\nscope tagging and credential-graph linkage onto a per-method filter.\n\nPinned by `AUTHZ-CRED-S01-output.md` §4 (Q-SELECT-1 resolution: implicit\nderivation from scope tagging plus refresh/revoke linkage) and\n`AUTHZ-CRED-CORE-3` §\"Implicit derivation\". This ticket explicitly does\nNOT add a `#[plexus::method(requires_credential = { .. })]` attribute\nsurface — the proposal from `AUTHZ-CRED-S01-output` §10 is superseded by\nthe implicit-derivation approach pinned here.\n\n# Matching semantics (consumer-side)\n\nA candidate credential matches this `RequiredCredential` iff:\n1. `kind`: if `Some(k)`, the candidate's `CredentialMetadata.kind`\n   matches `k` (or the kind-subsumption table per `AUTHZ-CRED-CORE-1`\n   accepts the substitution; e.g. `OauthAccess <: Bearer`). If `None`,\n   any kind whose scope set matches is acceptable.\n2. `scopes`: each scope in this set must be wildcard-matched by the\n   candidate's `CredentialMetadata.scopes`. The wildcard rules belong to\n   the `Scope` type itself.\n3. `site_hint`: when populated, prefers the candidate whose\n   `CredentialMetadata.attach_as` equals the hint. Advisory only — a\n   candidate without the hint is not rejected.\n\n# Wire back-compat\n\nAdded in `AUTHZ-CRED-CORE-3`. Pre-existing readers tolerate\n`requires_credential: null` (omitted on the wire when `None`) and\npre-existing IRs that omit the field altogether decode cleanly via\n`#[serde(default)]` on the field site.",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "description": "Specific kind a candidate credential must have (e.g.,\n`OauthRefresh`), or `None` for \"any kind whose scope set matches\".",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CredentialKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "scopes": {
+                "description": "Required scope set. A candidate credential's metadata scopes must\nwildcard-match each scope in this set.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "site_hint": {
+                "description": "Preferred attach site for the client to use when the candidate\ncredential has multiple alternates. Advisory only.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AttachmentSite"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "AuthPosture": {
+            "description": "Declared auth-enforcement posture of the activation a method belongs to.\n\nMirrors `plexus-macros`' RED-6 `auth = \"required\" | \"optional\" | \"mixed\" |\n\"none\"` activation attribute, which until R-1/R-2 (the ROLES+AP merged\nwave) was parsed and compile-enforced but never emitted — invisible to\nevery downstream IR consumer (synapse, hub-codegen, generated clients).\n\nSemantics (compile-time enforcement lives in plexus-macros; this is the\nescaped declaration):\n\n- `Required` — every method is auth-gated (`#[from_auth]`) or explicitly\n  `public`.\n- `Optional` — no enforcement; auth may be asymmetric across methods.\n- `Mixed` — like `Optional`, but the asymmetry is explicitly acknowledged.\n- `None` — affirmatively public activation; no method takes auth.\n\n# Wire back-compat\n\nAdded in R-2 (joint AP-1). Pre-existing readers tolerate the field's\nabsence (`auth_posture` is omitted on the wire when the activation never\ndeclared a posture) and pre-existing IRs that omit the field decode\ncleanly via `#[serde(default)]` on the field site. `#[non_exhaustive]`\nreserves space for future postures without breaking downstream match arms.",
+            "oneOf": [
+              {
+                "description": "Every method is auth-gated or explicitly public.",
+                "type": "string",
+                "const": "required"
+              },
+              {
+                "description": "No enforcement; auth may be asymmetric across methods.",
+                "type": "string",
+                "const": "optional"
+              },
+              {
+                "description": "Asymmetric auth, explicitly acknowledged.",
+                "type": "string",
+                "const": "mixed"
+              },
+              {
+                "description": "Affirmatively public activation; no method takes auth.",
+                "type": "string",
+                "const": "none"
+              }
+            ]
+          },
+          "ChildSummary": {
+            "description": "Summary of a child plugin",
+            "type": "object",
+            "properties": {
+              "namespace": {
+                "description": "The child's namespace",
+                "type": "string"
+              },
+              "description": {
+                "description": "Human-readable description",
+                "type": "string"
+              },
+              "hash": {
+                "description": "Content hash for cache invalidation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "namespace",
+              "description",
+              "hash"
+            ]
+          }
+        }
+      },
       "cardinality": "one",
       "bidirectional": false,
       "http_method": "POST",
