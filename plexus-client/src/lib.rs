@@ -96,7 +96,7 @@ pub mod wire_result;
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub mod ws;
 
-pub use decode::{collect_data, decode, error_stream, EventStream};
+pub use decode::{collect_data, decode, decode_result, error_stream, EventStream};
 pub use envelope::{StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};
 pub use event::ClientEvent;

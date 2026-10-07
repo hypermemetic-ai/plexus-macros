@@ -17,7 +17,7 @@ fn client_compile_fail() {
     let t = TestCases::new();
     // `server_cfg` with nothing to keep is a mistake, not an empty expansion.
     t.compile_fail("tests/compile/client_server_cfg_without_client.rs");
-    // A method with no event type cannot be on the client, and being told so
-    // beats finding it missing later.
-    t.compile_fail("tests/compile/client_non_stream_method.rs");
+    // (RETURNS-8 retired `client_non_stream_method`: every signature form now
+    // has an item, so every method is on the client — the conformance
+    // fixture, `fixtures/conformance`, compiles all six with `client`.)
 }

@@ -159,21 +159,19 @@ pub(crate) fn generate(
     let mut consts: Vec<TokenStream> = Vec::new();
 
     for m in methods {
-        // A method whose return type is not `impl Stream<Item = E>` has no
-        // event type to give a caller. Silently omitting it from the client
-        // would recreate exactly the drift this ticket removes — a consumer
-        // would find the method missing and hand-write it again.
-        let Some(event_ty) = &m.stream_item_type else {
-            return Err(syn::Error::new(
-                m.fn_name.span(),
-                format!(
-                    "#[plexus_macros::activation(client)]: method `{}` does not return \
-                     `impl Stream<Item = ..>`, so the generated client has no event type \
-                     for it. Give it a stream return type, or remove the `client` flag \
-                     from the activation.",
-                    m.method_name
-                ),
-            ));
+        // RETURNS-8 bridge: every signature form has an item — `T`, or
+        // `Result<T, E>` — so every method gets a client method, in the
+        // MACRO-2 shape (`EventStream` + `_all`) until RETURNS-9 replaces it.
+        // A one-item method's stream carries its one item; progress frames
+        // arrive as `ClientEvent::Progress`, as before; a Result item decodes
+        // from its `{"ok"}` / `{"err"}` wire form.
+        let ok_ty = &m.ok_ty;
+        let (event_ty, decoder) = match &m.err_ty {
+            None => (quote! { #ok_ty }, quote! { #client_path::decode::<#ok_ty> }),
+            Some(err_ty) => (
+                quote! { ::core::result::Result<#ok_ty, #err_ty> },
+                quote! { #client_path::decode_result::<#ok_ty, #err_ty> },
+            ),
         };
 
         let fn_ident = &m.fn_name;
@@ -228,7 +226,7 @@ pub(crate) fn generate(
             {
                 let mut __params = #client_path::__rt::serde_json::Map::new();
                 #(#inserts)*
-                #client_path::decode::<#event_ty>(
+                #decoder(
                     #client_path::Transport::call(
                         &self.transport,
                         Self::#const_ident,

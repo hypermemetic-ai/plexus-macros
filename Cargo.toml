@@ -11,11 +11,15 @@ members = [
     # dependency line. Not published.
     "fixtures/tickets-api",
     "fixtures/tickets-wasm-consumer",
+    # RETURNS-7's conformance fixture: one activation per signature form.
+    # RETURNS-8 serves it in-process against its `expected/` JSON
+    # (`fixtures/conformance/tests/serve.rs`).
+    "fixtures/conformance",
 ]
 
 [package]
 name = "plexus-macros"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 description = "Procedural macros for Plexus RPC activations"

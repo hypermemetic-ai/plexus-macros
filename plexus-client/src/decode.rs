@@ -117,6 +117,37 @@ where
     }))
 }
 
+/// [`decode`] for a method whose item is a `Result<T, E>`: each data frame's
+/// content is `{"ok": t}` or `{"err": e}` ([`wire_result`](crate::wire_result))
+/// and decodes as `Ok(t)` / `Err(e)`. An `Err` is data — the activation saying
+/// no — so it does not end the stream; every other row of [`decode`]'s table
+/// holds as written.
+///
+/// The bridge that lets the MACRO-2 client shape carry a 0.7 Result method
+/// (RETURNS-8); RETURNS-9 replaces that shape.
+pub fn decode_result<'a, T, E>(items: ItemStream<'a>) -> EventStream<'a, Result<T, E>>
+where
+    T: DeserializeOwned + 'a,
+    E: DeserializeOwned + 'a,
+{
+    #[derive(Deserialize)]
+    #[serde(bound(deserialize = "T: DeserializeOwned, E: DeserializeOwned"))]
+    struct Item<T, E>(#[serde(with = "crate::wire_result")] Result<T, E>);
+
+    Box::pin(decode::<Item<T, E>>(items).map(|event| {
+        event.map(|event| match event {
+            ClientEvent::Data(Item(result)) => ClientEvent::Data(result),
+            ClientEvent::Progress {
+                message,
+                percentage,
+            } => ClientEvent::Progress {
+                message,
+                percentage,
+            },
+        })
+    }))
+}
+
 /// A typed stream that yields exactly one error and then ends.
 ///
 /// What a generated client method returns when it cannot even build the

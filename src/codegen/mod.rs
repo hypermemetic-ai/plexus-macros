@@ -6,7 +6,7 @@ mod method_enum;
 
 use crate::parse::{
     extract_doc_description, find_and_validate_list_search_method, has_child_attr,
-    has_method_attr, parse_deprecation_attrs, ChildMethodInfo, ChildMethodKind, HubMethodAttrs,
+    has_method_attr, implicit_namespace, parse_deprecation_attrs, ChildMethodInfo, ChildMethodKind, HubMethodAttrs,
     HubMethodsAttrs, ListSearchKind, ListSearchMethodInfo, MethodInfo, ParsedDeprecation,
 };
 use proc_macro2::{Span, TokenStream};
@@ -189,6 +189,13 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             .ok_or_else(|| syn::Error::new_spanned(&input_impl.self_ty, "Expected struct name"))?,
         _ => return Err(syn::Error::new_spanned(&input_impl.self_ty, "Expected struct type")),
     };
+
+    // RETURNS-8: the namespace is implicit — snake_case(struct), a trailing
+    // `Hub` / `Activation` dropped — unless `namespace = "..."` overrides it.
+    let namespace: String = args
+        .namespace
+        .clone()
+        .unwrap_or_else(|| implicit_namespace(&struct_name.to_string()));
 
     // Get full self type (with generics) and impl generics for trait impl
     let self_ty = &input_impl.self_ty;
@@ -645,7 +652,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         self_ty,
         &impl_generics,
         where_clause,
-        &args.namespace,
+        &namespace,
         args.version.as_deref(),
         &resolved_description,
         args.long_description.as_deref(),
@@ -671,7 +678,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let client_impl = if args.client {
         let span = args.client_span.unwrap_or_else(Span::call_site);
         let client_path = client::resolve_client_path(span)?;
-        client::generate(&struct_name, &args.namespace, &methods, &client_path)?
+        client::generate(&struct_name, &namespace, &methods, &client_path)?
     } else {
         TokenStream::new()
     };

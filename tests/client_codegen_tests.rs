@@ -3,7 +3,7 @@
 //! The fixture activation below is shaped like menger's `tickets`: an event
 //! enum tagged `#[serde(tag = "type", rename_all = "snake_case")]`, a mix of
 //! required and `Option` parameters, a no-parameter method, and one
-//! `streaming` method. What is asserted here is what MFE-8 will rely on.
+//! subscription method. What is asserted here is what MFE-8 will rely on.
 
 use futures::StreamExt;
 use plexus_client::{
@@ -72,7 +72,7 @@ impl Tickets {
     }
 
     /// Subscribe to changes.
-    #[plexus_macros::method(streaming)]
+    #[plexus_macros::method]
     pub async fn watch(
         &self,
         epic: Option<String>,

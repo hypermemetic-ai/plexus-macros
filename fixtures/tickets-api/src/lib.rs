@@ -152,7 +152,7 @@ impl Tickets {
     }
 
     /// Subscribe to ticket changes.
-    #[plexus_macros::method(streaming)]
+    #[plexus_macros::method]
     pub async fn watch(
         &self,
         epic: Option<String>,

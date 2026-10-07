@@ -5,9 +5,9 @@ edition = "2021"
 publish = false
 description = "RETURNS-7 fixture: one activation per signature form, and the schema, wire and aggregate JSON every generator must reproduce"
 
-# Not a workspace member yet: it needs the macro to understand the 0.7
-# signature forms, which RETURNS-8 builds. RETURNS-8 adds it to the
-# plexus-macros workspace and serves it against `expected/`.
+# A plexus-macros workspace member since RETURNS-8, which taught the macro
+# the 0.7 signature forms: `tests/serve.rs` serves the activation in-process
+# and compares its schema and frames with `expected/`.
 #
 # The activation's schema `version` is this crate's version
 # (`env!("CARGO_PKG_VERSION")`), so `expected/schema.json` says "0.7.0".

@@ -1,7 +1,8 @@
 //! Generate Activation trait implementation and RPC server
 
 use crate::parse::{
-    ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo, ParsedDeprecation,
+    Cardinality, ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo,
+    ParsedDeprecation,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -842,8 +843,10 @@ fn generate_rpc_impl_methods(
                 }
             };
 
-            // All methods use wrap_stream for consistent streaming pattern
+            // RETURNS-8: the same per-form wrapper as `Activation::call`, so
+            // both paths send the same frames.
             let content_type = format!("{}.{}", namespace, method_name_str);
+            let wrapped = wrap_return(m, quote! { __ret }, &content_type, namespace, crate_path);
 
             quote! {
                 async fn #method_name(
@@ -855,13 +858,11 @@ fn generate_rpc_impl_methods(
 
                     let sink = pending.accept().await?;
                     #bidir_setup
-                    let stream = #method_call;
-                    let wrapped = #crate_path::plexus::wrap_stream(
-                        stream,
-                        #content_type,
-                        vec![#namespace.into()]
-                    );
+                    let __ret = #method_call;
+                    let wrapped = #wrapped;
 
+                    // The wrapper ends the stream with its one `done`
+                    // (RETURNS-8: this task used to append a second).
                     #deps::tokio::spawn(async move {
                         let mut stream = wrapped;
                         while let Some(item) = stream.next().await {
@@ -870,16 +871,6 @@ fn generate_rpc_impl_methods(
                                     break;
                                 }
                             }
-                        }
-                        // Send done event
-                        let done = #crate_path::plexus::PlexusStreamItem::Done {
-                            metadata: #crate_path::plexus::StreamMetadata::new(
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ),
-                        };
-                        if let Ok(raw_value) = #deps::serde_json::value::to_raw_value(&done) {
-                            let _ = sink.send(raw_value).await;
                         }
                     });
 
@@ -1022,10 +1013,13 @@ fn generate_dispatch_arms(
                 quote! { #(#param_names),* }
             };
 
+            // RETURNS-8: the wrapper that matches the method's signature
+            // form turns its return value into frames.
+            let wrapped = wrap_return(m, quote! { __ret }, &content_type, namespace, crate_path);
+
             // Generate code based on bidirectional type
             match &m.bidirectional {
                 BidirType::None => {
-                    // No bidirectional - simple wrap_stream
                     quote! {
                         #method_name => {
                             #auth_injection
@@ -1033,12 +1027,8 @@ fn generate_dispatch_arms(
                             #(#activation_param_bindings)*
                             #(#resolver_bindings)*
                             #param_extraction
-                            let stream = self.#fn_name(#method_params).await;
-                            Ok(#crate_path::plexus::wrap_stream(
-                                stream,
-                                #content_type,
-                                vec![#namespace.into()]
-                            ))
+                            let __ret = self.#fn_name(#method_params).await;
+                            Ok(#wrapped)
                         }
                     }
                 }
@@ -1065,14 +1055,10 @@ fn generate_dispatch_arms(
                             >(#content_type, vec![#namespace.into()]);
 
                             // Call the method with the bidir channel
-                            let user_stream = self.#fn_name(#bidir_params).await;
+                            let __ret = self.#fn_name(#bidir_params).await;
 
-                            // Wrap the user's stream and merge with bidir requests
-                            let wrapped_user = #crate_path::plexus::wrap_stream(
-                                user_stream,
-                                #content_type,
-                                vec![#namespace.into()]
-                            );
+                            // Wrap the method's output and merge with bidir requests
+                            let wrapped_user = #wrapped;
                             Ok(wrap_fn(wrapped_user))
                         }
                     }
@@ -1102,14 +1088,10 @@ fn generate_dispatch_arms(
                             >(#content_type, vec![#namespace.into()]);
 
                             // Call the method with the bidir channel
-                            let user_stream = self.#fn_name(#bidir_params).await;
+                            let __ret = self.#fn_name(#bidir_params).await;
 
-                            // Wrap the user's stream and merge with bidir requests
-                            let wrapped_user = #crate_path::plexus::wrap_stream(
-                                user_stream,
-                                #content_type,
-                                vec![#namespace.into()]
-                            );
+                            // Wrap the method's output and merge with bidir requests
+                            let wrapped_user = #wrapped;
                             Ok(wrap_fn(wrapped_user))
                         }
                     }
@@ -1119,13 +1101,44 @@ fn generate_dispatch_arms(
         .collect()
 }
 
+/// RETURNS-8: the expression that turns a method's return value `ret` into a
+/// `PlexusStream`, by signature form (plexus-core's per-form wrappers):
+///
+/// | form | wrapper |
+/// |---|---|
+/// | `-> T` | `wrap_one` |
+/// | `-> Result<T, E>` | `wrap_one_result` |
+/// | `-> impl Stream<Item = T>` | `wrap_stream` |
+/// | `-> impl Stream<Item = Result<T, E>>` | `wrap_result_stream` |
+/// | `-> impl Stream<Item = Progress<T, P>>` | `wrap_progress_stream` |
+/// | `-> impl Stream<Item = Result<Progress<T, P>, E>>` | `wrap_result_progress_stream` |
+fn wrap_return(
+    m: &MethodInfo,
+    ret: TokenStream,
+    content_type: &str,
+    namespace: &str,
+    crate_path: &syn::Path,
+) -> TokenStream {
+    let wrapper = match (m.cardinality, m.err_ty.is_some(), m.progress_ty.is_some()) {
+        (Cardinality::One, false, _) => format_ident!("wrap_one"),
+        (Cardinality::One, true, _) => format_ident!("wrap_one_result"),
+        (Cardinality::Many, false, false) => format_ident!("wrap_stream"),
+        (Cardinality::Many, true, false) => format_ident!("wrap_result_stream"),
+        (Cardinality::Many, false, true) => format_ident!("wrap_progress_stream"),
+        (Cardinality::Many, true, true) => format_ident!("wrap_result_progress_stream"),
+    };
+    quote! {
+        #crate_path::plexus::#wrapper(#ret, #content_type, vec![#namespace.into()])
+    }
+}
+
 /// Generate param extraction code and return the param names for the call
 ///
-/// RETURNS-6 bridge: each failure is the structured
-/// `PlexusError::InvalidParams { param, problem }` — `Missing` when a
-/// required param is absent, `Malformed { detail }` when one does not
+/// Params are decoded one at a time, so each failure is the structured
+/// `PlexusError::InvalidParams { param, problem }` (RETURNS-6) — `Missing`
+/// when a required param is absent, `Malformed { detail }` when one does not
 /// decode, naming the param either way (`param: None` only when the params
-/// value is not an object at all). RETURNS-8 owns the dispatch rewrite.
+/// value is not an object at all).
 fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps: &syn::Ident) -> (TokenStream, Vec<&'a syn::Ident>) {
     let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
 
