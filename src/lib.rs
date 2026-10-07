@@ -485,26 +485,35 @@ fn generate_schema_fn(
 /// }
 /// ```
 ///
-/// # The typed client (`client`, `server_cfg`) — MACRO-2
+/// # The typed client (`client`, `server_cfg`) — MACRO-2, 0.7 shapes RETURNS-9
 ///
 /// The macro already knows, when it runs, every method's wire name, its
-/// parameters and its `Stream<Item = E>` event type. With `client` it also
-/// emits a **typed client** for the activation, so a Rust consumer never
-/// hand-writes a call site or hand-mirrors an event type:
+/// parameters and its precise contract (cardinality, item, error, progress).
+/// With `client` it also emits a **typed client** for the activation, and the
+/// activation's **aggregate** `{Ns}Event` (one variant per method, carrying
+/// that method's item), so a Rust consumer never hand-writes a call site or
+/// hand-mirrors an item type:
 ///
 /// ```ignore
-/// #[plexus_macros::activation(namespace = "tickets", client)]
+/// #[plexus_macros::activation(client)]                 // namespace "tickets", implicitly
 /// impl Tickets { /* unchanged */ }
 ///
-/// // emitted beside the impl:
-/// let client = TicketsClient::new(transport);          // any plexus_client::Transport
-/// let mut watch = client.watch(Some("MACRO".into()));  // EventStream<'_, TicketsEvent>
-/// let all = client.list_all(None, None, None).await?;  // Vec<TicketsEvent>
+/// // emitted beside the impl: TicketsClient<T>, and TicketsEvent
+/// let client = TicketsClient::new(transport);                      // any plexus_client::Transport
+/// let health = client.health().await?;                             // one item: Health
+/// match client.get("MNG-2".into()).await? { Ok(t) => .., Err(no) => .. }   // one, fallible
+/// let rows: Vec<_> = client.list(None, None).try_collect().await?; // many: MethodStream
+/// let mut s = client.import(src).with_progress();                  // Frame<item, P>
+/// let mut ev = client.watch(None).events();                        // TicketsEvent
 /// ```
 ///
-/// The client is generic over the transport, so the emitted code names none
-/// of them; its parameter and event types are the activation's own, so a
-/// change to either is a compile error in every consumer.
+/// `?` is the call failing (`ClientError::Remote(RemoteError)` for the
+/// server's typed error frame); a match on the item is the activation's
+/// answer. The client is generic over the transport, so the emitted code
+/// names none of them; its parameter and item types are the activation's
+/// own, so a change to either is a compile error in every consumer. A crate
+/// that already defines a type named `{Ns}Event` renames it before turning
+/// `client` on.
 ///
 /// **Requires** the consuming crate to depend on `plexus-client`. A
 /// proc-macro crate cannot check that for you at expansion time in general,

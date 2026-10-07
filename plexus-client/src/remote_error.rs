@@ -111,8 +111,9 @@ pub enum DenyReason {
 }
 
 impl RemoteError {
-    /// The variant's `kind` tag, as on the wire (`"method_not_found"`, …).
-    pub(crate) fn kind(&self) -> &'static str {
+    /// The variant's `kind` tag, as on the wire (`"method_not_found"`, …) —
+    /// for a log line or an exit code; match on the variant to handle it.
+    pub fn kind(&self) -> &'static str {
         match self {
             RemoteError::ActivationNotFound { .. } => "activation_not_found",
             RemoteError::MethodNotFound { .. } => "method_not_found",

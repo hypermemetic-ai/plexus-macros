@@ -23,7 +23,8 @@ For **Rust** consumers there is a shorter path: the macro emits the client itsel
 ```
 #[plexus_macros::activation(client)]   // impl Tickets — namespace "tickets", implicitly
   ↓  same expansion, same information
-TicketsClient<T: plexus_client::Transport>   ← typed params, typed events
+TicketsClient<T: plexus_client::Transport>   ← typed params, each method's precise item
+TicketsEvent                                 ← the activation's aggregate, one variant per method
 ```
 
 The Synapse → IR → codegen pipeline above stays the path for TypeScript, Python and everything non-Rust. See [The typed client](#the-typed-client-client--server_cfg).
@@ -574,19 +575,36 @@ If a value would be the same for every method call in a request, it belongs in t
 
 ## The typed client (`client` + `server_cfg`)
 
-The macro sees every method's wire name, its parameters and its
-`Stream<Item = E>` event type at the moment it runs. With the `client` flag it
-emits a **typed client** from that same information, so a Rust consumer never
-hand-writes a call site or hand-mirrors an event type.
+The macro sees every method's wire name, its parameters and its precise
+contract — cardinality, item, error, progress — at the moment it runs. With
+the `client` flag it emits a **typed client** from that same information, and
+the activation's **aggregate event type**, so a Rust consumer never
+hand-writes a call site or hand-mirrors an item type.
 
 ```rust
-#[plexus_macros::activation(namespace = "tickets", client)]
-impl Tickets { /* unchanged */ }
+#[plexus_macros::activation(client)]   // namespace "tickets", implicitly
+impl Tickets {
+    #[plexus_macros::method] pub async fn health(&self) -> Health { /* … */ }
+    #[plexus_macros::method] pub async fn get(&self, id: String) -> Result<Ticket, GetError> { /* … */ }
+    #[plexus_macros::method] pub async fn list(&self, epic: Option<String>)
+        -> impl Stream<Item = Result<ListItem, ListError>> + Send + 'static { /* … */ }
+    #[plexus_macros::method] pub async fn import(&self, source: String)
+        -> impl Stream<Item = Result<Progress<ImportSummary, ImportStep>, ImportError>> + Send + 'static { /* … */ }
+}
 ```
 
 emits, beside the activation's own items:
 
 ```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "method", content = "event")]
+pub enum TicketsEvent {                          // Pascal(namespace) + "Event"
+    #[serde(rename = "health")] Health(Health),
+    #[serde(rename = "get")]    Get(#[serde(with = "plexus_client::wire_result")] Result<Ticket, GetError>),
+    #[serde(rename = "list")]   List(#[serde(with = "plexus_client::wire_result")] Result<ListItem, ListError>),
+    #[serde(rename = "import")] Import(#[serde(with = "plexus_client::wire_result")] Result<ImportSummary, ImportError>),
+}
+
 pub struct TicketsClient<T> { /* .. */ }
 
 impl<T> TicketsClient<T> {
@@ -597,33 +615,83 @@ impl<T> TicketsClient<T> {
 }
 
 impl<T: plexus_client::Transport> TicketsClient<T> {
-    pub const METHOD_LIST: plexus_client::MethodRef;      // one per method
-    pub fn list(&self, epic: Option<String>, parent: Option<String>)
-        -> plexus_client::EventStream<'_, TicketsEvent>;
-    pub async fn list_all(&self, epic: Option<String>, parent: Option<String>)
-        -> Result<Vec<TicketsEvent>, plexus_client::ClientError>;
+    pub const METHOD_GET: plexus_client::MethodRef;            // one per method
+
+    // one item: an async fn returning it
+    pub async fn health(&self) -> Result<Health, ClientError>;
+    pub async fn get(&self, id: String) -> Result<Result<Ticket, GetError>, ClientError>;
+
+    // many items: a MethodStream<'_, item, progress, aggregate>
+    pub fn list(&self, epic: Option<String>)
+        -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent>;
+    pub fn import(&self, source: String)
+        -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent>;
 }
 ```
 
 Requires the consuming crate to depend on
 [`plexus-client`](plexus-client/) — the wasm-safe runtime the emitted code
-links against. A missing dependency is reported at the `client` flag, not as
-an unresolved import in code you did not write.
+links against (and derives the aggregate through, so nothing else is needed
+in `Cargo.toml`). A missing dependency is reported at the `client` flag, not
+as an unresolved import in code you did not write.
 
 ### What you get
 
+| method form (server) | client method | yields |
+|---|---|---|
+| one: `-> T` / `-> Result<T, E>` | `async fn m(&self, ..) -> Result<I, ClientError>` | `I` = `T` / `Result<T, E>` |
+| many: `-> impl Stream<Item = …>` | `fn m(&self, ..) -> MethodStream<'_, I, P, {Ns}Event>` | `Result<I, ClientError>`; progress frames dropped undecoded |
+| `.with_progress()` on a many call | — | `Result<Frame<I, P>, ClientError>`, in arrival order |
+| `.events()` on a many call | — | `Result<{Ns}Event, ClientError>`, `{Ns}Event::M(item)` |
+
+`I` is the method's item: `T`, or `Result<T, E>` decoded from its
+`{"ok"}` / `{"err"}` wire form. `P` is its progress type — `Note` for
+`Progress<T>`, the declared `P` for `Progress<T, P>`, and the uninhabited
+`NoProgress` when the item is not a `Progress` (so `.with_progress()` exists
+on every many call and never yields progress the schema does not declare).
+A one-item method never reports progress, so it has no stream to opt in on.
+
+**The one rule for a receiver: `?` is the call failing; a match on the item
+is the activation's answer** (RETURNS-1 decision 8):
+
+```rust
+match client.get("MNG-2".into()).await? {                 // ? = the call failed (typed RemoteError)
+    Ok(ticket) => show(ticket),
+    Err(GetError::NotFound { id }) => missing(id),        // the activation said no
+}
+
+let rows: Vec<_> = client.list(Some("MNG".into())).try_collect().await?;   // a plain TryStream
+
+let mut s = client.import(src).with_progress();          // opted in
+while let Some(frame) = s.next().await {
+    match frame? { Frame::Progress(ImportStep::Chunk { done, of }) => bar.set(done, of), Frame::Item(r) => finish(r) }
+}
+
+let mut all = futures::stream::select_all([client.list(None).events(), client.import(src).events()]);
+while let Some(ev) = all.next().await { state.reduce(ev?) }   // ev: TicketsEvent
+```
+
 | | |
 |---|---|
-| **Typed params** | the method's own parameter types, in signature order. `#[activation_param]`, `#[from_auth]` and `auth:` params are absent — the server injects those. |
-| **Typed events** | `EventStream<'_, I>` for the method's item `I` — `T`, or `Result<T, E>` decoded from its `{"ok"}` / `{"err"}` wire form — whatever its signature form; a one-item method's stream carries its one item. `I` is the activation's own type, not a copy. (0.7 interim: RETURNS-9 replaces this shape with one-item `async fn`s, `MethodStream` and the `{Ns}Event` aggregate.) |
-| **Two shapes** | `m(..)` streams; `m_all(..)` drives to completion and returns `Vec<E>`. |
+| **Typed params** | the method's own parameter types, in signature order. `#[activation_param]`, `#[from_auth]` and `auth:` params are absent — the server injects those. `Option` params that are `None` are **omitted**, not sent as `null`. |
+| **Precise items** | each method's own item type — not a shared enum, not a copy. A Result method's err is a value (`Ok(Err(e))` in a stream) and does not end it. |
+| **Typed call failures** | `ClientError::Remote(RemoteError)` — the server's error frame, `kind`-tagged and exhaustive (`method_not_found`, `invalid_params { param, problem }`, `unauthenticated`, `forbidden { reason }`, …) — vs `ClientError::Transport` (the connection failed), `Decode` (the answer does not fit the contract) and `Encode` (an argument would not serialize; nothing was sent). A failed call is an item of the stream, so a cut-off stream cannot pass for a finished one. |
+| **The aggregate** | `{Ns}Event`: one variant per method, named Pascal(method), tagged with the wire name, carrying the item. Derived, never sent. Every `.events()` has the same type, so merging calls is ordinary stream plumbing. |
 | **Transport-generic** | any `plexus_client::Transport` — in-process, WebSocket JSON-RPC, REST + SSE. The emitted code names none of them. |
-| **Two error layers** | `ClientError::Transport` (the connection failed) vs `ClientError::Remote` (the server answered `error`). An activation's *own* `Error` variant stays a data event. |
-| **Zero drift** | rename a field on an event type and every consumer of the client stops compiling. |
+| **Zero drift** | rename a field on an item type and every consumer of the client stops compiling. |
 
-`Option` parameters that are `None` are **omitted** from the params object,
-not sent as `null` — matching what a server with
-`skip_serializing_if = "Option::is_none"` puts on the wire.
+A one-item call reads the call to its `done` before it returns, so a
+transport that cancels a dropped call (the WebSocket one unsubscribes) never
+cancels one that finished; no item, or a second one, is a `Decode` error.
+
+The aggregate derives `Debug` and `Clone`, so every item type of a `client`
+activation implements both. **A crate that already has a type named
+`{Ns}Event`** — the hand-written shared enum the aggregate replaces — renames
+it before turning `client` on (RETURNS-1 pin 13).
+
+Without the macro, the same decoding is `plexus_client::decode::<I>(items)`
+(and `decode_result::<T, E>`, `decode_with_progress::<I, P>`) over a raw
+`Transport::call` stream.
 
 ### Reaching wasm32: `server_cfg`
 
@@ -643,8 +711,8 @@ server  = ["dep:plexus-core", "dep:tokio", "dep:jsonrpsee", "dep:serde_json", "d
 # NOT optional: a proc-macro crate is built for the host, never the target,
 # so a wasm32 build pays nothing for it — and that is what lets the macro run,
 # and emit the client, in a build with no server dependencies at all.
-plexus-macros = "0.6"
-plexus-client = "0.6"
+plexus-macros = "0.7"
+plexus-client = "0.7"
 serde         = { version = "1", features = ["derive"] }
 ```
 
@@ -678,7 +746,7 @@ consumer with no wire code of its own). Both build for
 | Transport | Where | Status |
 |---|---|---|
 | `MemoryTransport` | `plexus-client` | scripted test double; wasm-safe by construction |
-| `InProcessTransport` | `plexus-core` (`plexus::in_process`) | drives an `Activation` directly — no server |
+| `InProcessTransport` | `plexus-core` (`plexus::in_process`) | drives an `Activation` directly — no server; a call it cannot dispatch is the typed error frame a hub would send |
 | `WsTransport` | `plexus-client`, feature `ws-native` / `ws-web` | WebSocket JSON-RPC; one connection, subscriptions multiplexed |
 | REST + SSE | — | not yet built |
 
@@ -990,8 +1058,14 @@ Library crates almost never need this directly; the companion crate [`plexus-sch
   namespace (snake_case of the struct, `Hub` / `Activation` dropped).
 - **`#[derive(StreamEvent)]` is gone** — delete it; nothing replaces it.
 - Methods returning `impl Stream<Item = OneEnum>` compile unchanged.
-- `#[plexus_macros::activation(client)]`: every form is on the client; a
-  `Result` item decodes from its `{"ok"}` / `{"err"}` wire form.
+- `#[plexus_macros::activation(client)]`: a one-item method is an `async fn`
+  returning its item (`m_all` is gone); a many-item method returns a
+  `MethodStream` — `.try_collect()` where you called `m_all`, items directly
+  where you matched `ClientEvent::Data(..)` (`ClientEvent` is gone; opt in to
+  progress with `.with_progress()`, which yields `Frame`). A call failure is
+  `ClientError::Remote(RemoteError)`, typed, instead of a message string.
+  The flag now also derives `{Ns}Event`: rename a hand-written type of that
+  name first.
 
 ### 0.5 → 0.6
 

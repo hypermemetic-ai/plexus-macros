@@ -1,0 +1,5 @@
+error[E0599]: no method named `with_progress` found for opaque type `impl futures::Future<Output = Result<std::string::String, ClientError>>` in the current scope
+  --> tests/compile/client_one_item_has_no_with_progress.rs:22:27
+   |
+22 |     let _ = client.ping().with_progress();
+   |                           ^^^^^^^^^^^^^ method not found in `impl futures::Future<Output = Result<std::string::String, ClientError>>`

@@ -42,7 +42,7 @@ follows.
 |---|---|---|---|
 | plexus-core (the files themselves) | RETURNS-7 | `expected/`, `src/types.rs` | every frame a `PlexusStreamItem` 0.7; the schema a `PluginSchema` 0.7 whose `returns`/`error`/`progress` are `schema_for!` of T/E/P; every Result item through `wire_result` (`plexus-core/tests/conformance_fixture.rs`) |
 | macro, server half | RETURNS-8 | `src/`, `calls.json` | serve the activation in-process: its schema RPC equals `schema.json`, and each call in `calls.json` yields exactly its frames (`wire/`, or its `errors.jsonl` line) |
-| macro, client half | RETURNS-9 | `src/`, `calls.json`, `wire/`, `errors.jsonl`, `aggregate.jsonl` | over `InProcessTransport`, each call decodes to the items `wire/` encodes (`load`'s `.with_progress()` yields its two `LoadStep`s; `scan` carries on past its err); `errors.jsonl` calls surface as `ClientError::Remote(RemoteError::…)` of that kind; the derived `ConformanceEvent` serializes them to `aggregate.jsonl` byte for byte, and back |
+| macro, client half | RETURNS-9 | `src/`, `calls.json`, `wire/`, `errors.jsonl`, `aggregate.jsonl` | (`tests/client.rs`) over `InProcessTransport`, each call decodes to the items `wire/` encodes (`load`'s `.with_progress()` yields its two `LoadStep`s; `scan` carries on past its err); `errors.jsonl` calls surface as `ClientError::Remote(RemoteError::…)` of that kind; the derived `ConformanceEvent` serializes them to `aggregate.jsonl` byte for byte, and back |
 | plexus-protocol (Haskell) | RETURNS-12 | `schema.json`, `wire/`, `errors.jsonl` | parse, re-encode, equal (key order aside) |
 | synapse IR 3.0 | RETURNS-13 | `schema.json` | the IR built from it equals `ir.json`, which RETURNS-13 writes |
 | hub-codegen, TS | RETURNS-17 | `ir.json`, `wire/`, `errors.jsonl`, `aggregate.jsonl` | the generated client typechecks; replaying `wire/` decodes the items (`withProgress()`, `scan` as above); `errors.jsonl` throws `RemoteCallError` of that kind; `JSON.stringify` of each `.events()` value is its `aggregate.jsonl` line |
@@ -66,24 +66,25 @@ follows.
 
 `ConformanceEvent` is RETURNS-1's aggregate rule applied to this activation.
 It is derived by each generator and never sent, so it is not written in
-`src/`:
+`src/`. The macro's `client` flag derives it (RETURNS-9) as:
 
 ```rust
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "method", content = "event", rename_all = "snake_case")]
-enum ConformanceEvent {
-    Ping(Pong),
-    Lookup(#[serde(with = "plexus_client::wire_result")] Result<Thing, LookupError>),
-    Count(Tick),
-    Scan(#[serde(with = "plexus_client::wire_result")] Result<Row, ScanError>),
-    Load(#[serde(with = "plexus_client::wire_result")] Result<Loaded, LoadError>),
-    Warm(Warmed),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "method", content = "event")]
+pub enum ConformanceEvent {
+    #[serde(rename = "ping")]   Ping(Pong),
+    #[serde(rename = "lookup")] Lookup(#[serde(with = "plexus_client::wire_result")] Result<Thing, LookupError>),
+    #[serde(rename = "count")]  Count(Tick),
+    #[serde(rename = "scan")]   Scan(#[serde(with = "plexus_client::wire_result")] Result<Row, ScanError>),
+    #[serde(rename = "load")]   Load(#[serde(with = "plexus_client::wire_result")] Result<Loaded, LoadError>),
+    #[serde(rename = "warm")]   Warm(Warmed),
 }
 ```
 
-A progress update is not an item, so `load` carries `Result<Loaded,
-LoadError>` and `warm` carries `Warmed`. A call failure is not an item
-either.
+One variant per method, named Pascal(method), tagged with the method's wire
+name, carrying its item. A progress update is not an item, so `load`
+carries `Result<Loaded, LoadError>` and `warm` carries `Warmed`. A call
+failure is not an item either.
 
 ## Where the expected files come from
 

@@ -16,9 +16,15 @@
 //!
 //! The gate: `cargo build -p tickets-api --no-default-features --target
 //! wasm32-unknown-unknown`.
+//!
+//! 0.7 (RETURNS-9): `health` and `get` answer with exactly one item, so they
+//! say so (`-> TicketEvent`) and their client methods are `async fn`s;
+//! `list` and `watch` stream (`MethodStream`). The macro also derives the
+//! activation's aggregate, `TicketsEvent` — one variant per method, each
+//! carrying a `TicketEvent`.
 
 pub mod types;
-pub use types::{Status, Ticket, TicketsEvent};
+pub use types::{Status, Ticket, TicketEvent};
 
 // ---------------------------------------------------------------------------
 // The server half. Everything in this block is the author's own `#[cfg]` —
@@ -117,22 +123,20 @@ use futures::Stream;
 impl Tickets {
     /// Heartbeat — version and ticket count.
     #[plexus_macros::method]
-    pub async fn health(&self) -> impl Stream<Item = TicketsEvent> + Send + 'static {
-        let n = self.store.count();
-        futures::stream::iter(vec![TicketsEvent::Health {
+    pub async fn health(&self) -> TicketEvent {
+        TicketEvent::Health {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            ticket_count: n,
-        }])
+            ticket_count: self.store.count(),
+        }
     }
 
     /// Get one ticket by id.
     #[plexus_macros::method(params(id = "Ticket id, e.g. MACRO-2"))]
-    pub async fn get(&self, id: String) -> impl Stream<Item = TicketsEvent> + Send + 'static {
-        let ev = match self.store.get(&id) {
-            Some(ticket) => TicketsEvent::Ticket { ticket },
-            None => TicketsEvent::NotFound { id },
-        };
-        futures::stream::iter(vec![ev])
+    pub async fn get(&self, id: String) -> TicketEvent {
+        match self.store.get(&id) {
+            Some(ticket) => TicketEvent::Ticket { ticket },
+            None => TicketEvent::NotFound { id },
+        }
     }
 
     /// List tickets, optionally filtered by epic and/or parent.
@@ -141,12 +145,12 @@ impl Tickets {
         &self,
         epic: Option<String>,
         parent: Option<String>,
-    ) -> impl Stream<Item = TicketsEvent> + Send + 'static {
-        let out: Vec<TicketsEvent> = self
+    ) -> impl Stream<Item = TicketEvent> + Send + 'static {
+        let out: Vec<TicketEvent> = self
             .store
             .list(epic.as_deref(), parent.as_deref())
             .into_iter()
-            .map(|ticket| TicketsEvent::Ticket { ticket })
+            .map(|ticket| TicketEvent::Ticket { ticket })
             .collect();
         futures::stream::iter(out)
     }
@@ -156,12 +160,12 @@ impl Tickets {
     pub async fn watch(
         &self,
         epic: Option<String>,
-    ) -> impl Stream<Item = TicketsEvent> + Send + 'static {
-        let out: Vec<TicketsEvent> = self
+    ) -> impl Stream<Item = TicketEvent> + Send + 'static {
+        let out: Vec<TicketEvent> = self
             .store
             .list(epic.as_deref(), None)
             .into_iter()
-            .map(|ticket| TicketsEvent::Created { ticket })
+            .map(|ticket| TicketEvent::Created { ticket })
             .collect();
         futures::stream::iter(out)
     }
