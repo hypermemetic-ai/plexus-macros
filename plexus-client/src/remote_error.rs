@@ -110,6 +110,21 @@ pub enum DenyReason {
     NotAccepted,
 }
 
+impl RemoteError {
+    /// The variant's `kind` tag, as on the wire (`"method_not_found"`, …).
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            RemoteError::ActivationNotFound { .. } => "activation_not_found",
+            RemoteError::MethodNotFound { .. } => "method_not_found",
+            RemoteError::InvalidParams { .. } => "invalid_params",
+            RemoteError::Unauthenticated => "unauthenticated",
+            RemoteError::Forbidden { .. } => "forbidden",
+            RemoteError::HandleNotSupported { .. } => "handle_not_supported",
+            RemoteError::Execution { .. } => "execution",
+        }
+    }
+}
+
 /// Writes `s` with every line break folded to a space, so the line a CLI
 /// prints stays one line whatever the server put in a free-text field.
 fn one_line(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {

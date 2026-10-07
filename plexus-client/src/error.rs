@@ -90,7 +90,10 @@ pub enum ClientError {
     /// The server answered with an in-band `error` item. This is the
     /// activation or the hub saying no — the transport worked fine.
     Remote {
+        /// The error frame's `RemoteError`, as its one-line `Display`.
         message: String,
+        /// The error frame's `RemoteError` `kind` tag
+        /// (`"method_not_found"`, …).
         code: Option<String>,
         recoverable: bool,
     },

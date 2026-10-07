@@ -9,10 +9,10 @@
 //!   which emits `event: data` / `data: {"content": …}` and drops
 //!   `metadata` and `content_type`.
 //!
-//! `tests/client_envelope_compat.rs` over in `plexus-macros` closes the loop
-//! by round-tripping items serialized by plexus-core itself.
+//! `tests/client_envelope_compat.rs` over in `plexus-core` closes the loop
+//! by round-tripping items serialized by plexus-core itself, byte for byte.
 
-use plexus_client::{StreamItem, StreamMetadata};
+use plexus_client::{DenyReason, Note, RemoteError, StreamItem, StreamMetadata};
 use serde_json::json;
 
 /// The full WebSocket JSON-RPC envelope — every field present.
@@ -71,27 +71,66 @@ fn sse_shaped_data_item_deserializes_without_metadata() {
     assert!(item.metadata().is_none());
 }
 
-/// plexus-transport's `event: error` payload is `{"message", "code"}` only —
-/// `recoverable` is not on the wire and must default.
+/// The 0.7 error frame: `recoverable` and a typed `RemoteError` (RETURNS-6).
+/// Round-trips byte-for-byte when every field is present.
 #[test]
-fn sse_error_frame_has_no_recoverable_field() {
-    let item: StreamItem =
-        serde_json::from_value(json!({"type": "error", "message": "boom", "code": "E1"}))
-            .expect("deserializes");
+fn websocket_error_frame_carries_a_typed_remote_error() {
+    let wire = json!({
+        "type": "error",
+        "metadata": {"provenance": ["menger"], "plexus_hash": "h", "timestamp": 1i64},
+        "recoverable": false,
+        "error": {"kind": "forbidden", "reason": "missing_scope", "scope": "tickets:write"}
+    });
+    let item: StreamItem = serde_json::from_value(wire.clone()).expect("deserializes");
+    match &item {
+        StreamItem::Error {
+            error, recoverable, ..
+        } => {
+            assert_eq!(
+                error,
+                &RemoteError::Forbidden {
+                    reason: DenyReason::MissingScope {
+                        scope: "tickets:write".into()
+                    }
+                }
+            );
+            assert!(!recoverable);
+        }
+        other => panic!("expected error, got {other:?}"),
+    }
+    assert!(item.is_terminal());
+    assert_eq!(serde_json::to_value(&item).unwrap(), wire);
+}
+
+/// A transport that reassembles an error frame from a body with no
+/// `recoverable` (a REST unary body carries only the `RemoteError`) still
+/// reads: `recoverable` defaults to `false`.
+#[test]
+fn an_error_frame_without_recoverable_defaults_it() {
+    let item: StreamItem = serde_json::from_value(
+        json!({"type": "error", "error": {"kind": "execution", "message": "boom"}}),
+    )
+    .expect("deserializes");
     match item {
         StreamItem::Error {
-            message,
-            code,
+            error,
             recoverable,
             metadata,
         } => {
-            assert_eq!(message, "boom");
-            assert_eq!(code.as_deref(), Some("E1"));
+            assert_eq!(error, RemoteError::Execution { message: "boom".into() });
             assert!(!recoverable, "defaults to not-recoverable");
             assert!(metadata.is_none());
         }
         other => panic!("expected error, got {other:?}"),
     }
+}
+
+/// No back-compat (RETURNS-1 decision 12): a 0.6 error frame — `message` /
+/// `code`, no typed `error` — does not read.
+#[test]
+fn a_06_error_frame_does_not_read() {
+    let old = json!({"type": "error", "message": "boom", "code": "E1"});
+    assert!(serde_json::from_value::<StreamItem>(old).is_err());
 }
 
 /// plexus-transport's `event: done` payload is literally `{}`.
@@ -103,29 +142,54 @@ fn sse_done_frame_is_an_empty_object() {
     assert!(item.is_terminal());
 }
 
+/// The 0.7 progress frame: `content_type` and the method's progress value
+/// as `content` (RETURNS-6). Round-trips byte-for-byte.
 #[test]
-fn progress_percentage_is_optional_on_both_transports() {
-    let with: StreamItem =
-        serde_json::from_value(json!({"type": "progress", "message": "m", "percentage": 50.0}))
-            .unwrap();
-    assert!(matches!(
-        with,
+fn websocket_progress_frame_carries_typed_content() {
+    let wire = json!({
+        "type": "progress",
+        "metadata": {"provenance": ["menger"], "plexus_hash": "h", "timestamp": 1i64},
+        "content_type": "tickets.import",
+        "content": {"type": "chunk", "done": 0, "of": 10}
+    });
+    let item: StreamItem = serde_json::from_value(wire.clone()).expect("deserializes");
+    match &item {
         StreamItem::Progress {
-            percentage: Some(p),
+            content_type,
+            content,
             ..
-        } if (p - 50.0).abs() < f32::EPSILON
-    ));
-
-    let without: StreamItem =
-        serde_json::from_value(json!({"type": "progress", "message": "m"})).unwrap();
-    assert!(matches!(
-        without,
-        StreamItem::Progress {
-            percentage: None,
-            ..
+        } => {
+            assert_eq!(content_type.as_deref(), Some("tickets.import"));
+            assert_eq!(content["of"], 10);
         }
-    ));
-    assert!(!without.is_terminal());
+        other => panic!("expected progress, got {other:?}"),
+    }
+    assert!(!item.is_terminal());
+    assert_eq!(serde_json::to_value(&item).unwrap(), wire);
+}
+
+/// The default progress type is a `Note`, `percentage` optional; a progress
+/// frame need not carry `metadata` or `content_type`.
+#[test]
+fn progress_content_is_a_note_by_default() {
+    let item: StreamItem = serde_json::from_value(
+        json!({"type": "progress", "content": {"message": "m", "percentage": 50.0}}),
+    )
+    .unwrap();
+    match item {
+        StreamItem::Progress {
+            metadata: None,
+            content_type: None,
+            content,
+        } => {
+            let note: Note = serde_json::from_value(content).unwrap();
+            assert_eq!(note, Note::new("m").with_percentage(50.0));
+        }
+        other => panic!("expected progress, got {other:?}"),
+    }
+
+    // 0.6's `{message, percentage}` at the top level is not a 0.7 frame.
+    assert!(serde_json::from_value::<StreamItem>(json!({"type": "progress", "message": "m"})).is_err());
 }
 
 /// The `request` variant keeps its camelCase field names — it is the one
@@ -160,17 +224,16 @@ fn variant_tags_are_snake_case() {
     assert_eq!(
         tag(&StreamItem::Progress {
             metadata: None,
-            message: "m".into(),
-            percentage: None
+            content_type: None,
+            content: json!({"message": "m"}),
         }),
         "progress"
     );
     assert_eq!(
         tag(&StreamItem::Error {
             metadata: None,
-            message: "m".into(),
-            code: None,
-            recoverable: false
+            recoverable: false,
+            error: RemoteError::Unauthenticated,
         }),
         "error"
     );

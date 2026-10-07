@@ -12,10 +12,10 @@
 //! data: {"content": <event JSON>}
 //! ```
 //!
-//! — dropping `metadata` and `content_type` entirely (likewise
-//! `event: error` carries only `{"message", "code"}`, with no `recoverable`).
-//! A client type that made those fields mandatory could therefore not
-//! represent what the REST transport actually receives.
+//! — dropping `metadata` and `content_type` entirely (and a REST unary
+//! body carries an error's `RemoteError` with no `recoverable`). A client
+//! type that made those fields mandatory could therefore not represent what
+//! the REST transport actually receives.
 //!
 //! So [`StreamItem`] is deliberately the **looser** type: every field the
 //! REST bridge drops is `Option` / `#[serde(default)]`. It deserializes the
@@ -29,12 +29,21 @@
 //! reassembles *into*.)
 //!
 //! Wire compatibility with the server envelope is a regression gate, not an
-//! assumption — see `tests/client_envelope_compat.rs` in `plexus-macros`,
-//! which round-trips every `PlexusStreamItem` variant produced by
-//! `plexus-core` through this type.
+//! assumption — see `tests/client_envelope_compat.rs` in `plexus-core`,
+//! which round-trips every `PlexusStreamItem` 0.7 frame produced by
+//! `plexus-core` through this type, byte for byte.
+//!
+//! # 0.7 (RETURNS-6)
+//!
+//! The progress frame carries the method's typed progress value as
+//! `content` (beside the call's `content_type`, as a data frame does); the
+//! error frame carries a typed [`RemoteError`] in place of 0.6's stringly
+//! `message` / `code`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::remote_error::RemoteError;
 
 /// Provenance metadata the calling layer stamps onto each item.
 ///
@@ -69,27 +78,31 @@ pub enum StreamItem {
         content: Value,
     },
 
-    /// A progress report. Carries no payload; never terminates the stream.
+    /// A progress report: the method's progress value `P` as JSON
+    /// (`{"message", "percentage"}` for the default [`crate::Note`]). Never
+    /// terminates the stream.
     Progress {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<StreamMetadata>,
-        message: String,
+        /// e.g. `"tickets.import"` — the call's method, as on its data
+        /// items. Optional for the same reason `Data`'s is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        percentage: Option<f32>,
+        content_type: Option<String>,
+        content: Value,
     },
 
-    /// An **in-band** error raised by the hub or the activation — as opposed
-    /// to a [`crate::TransportError`], which is the connection failing.
-    /// Terminates the stream.
+    /// An **in-band** call failure reported by the hub — as opposed to a
+    /// [`crate::TransportError`], which is the connection failing. Typed:
+    /// its [`RemoteError`]'s `Display` is the human line. Terminates the
+    /// stream.
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<StreamMetadata>,
-        message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<String>,
-        /// The REST bridge does not emit this field; it defaults to `false`.
+        /// A REST unary body carries no `recoverable`; it defaults to
+        /// `false`.
         #[serde(default)]
         recoverable: bool,
+        error: RemoteError,
     },
 
     /// A server-to-client request (bidirectional activations). The typed

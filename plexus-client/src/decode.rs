@@ -7,10 +7,12 @@
 use crate::envelope::StreamItem;
 use crate::error::ClientError;
 use crate::event::ClientEvent;
+use crate::progress::Note;
 use crate::transport::ItemStream;
 use futures_core::Stream;
 use futures_util::{stream, StreamExt};
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use std::pin::Pin;
 
 /// A boxed stream of typed events. Mirrors [`ItemStream`]'s `Send` bound:
@@ -36,6 +38,14 @@ pub type EventStream<'a, E> = Pin<Box<dyn Stream<Item = Result<ClientEvent<E>, C
 /// | `request` | *skipped* | yes |
 /// | `done` | *nothing* | **no** |
 /// | transport failure | `Err(ClientError::Transport)` | **no** |
+///
+/// 0.7 frames, until the typed client (RETURNS-9) decodes them precisely: a
+/// progress frame whose `content` is a [`Note`] becomes its `message` /
+/// `percentage`; any other progress value becomes its JSON text as
+/// `message`, no percentage. An error frame's [`RemoteError`] becomes
+/// `message` = its `Display` line, `code` = its `kind` tag.
+///
+/// [`RemoteError`]: crate::RemoteError
 ///
 /// Both terminal errors end the stream because both mean the server will
 /// send nothing further that is meaningful: an in-band `error` is the hub's
@@ -73,29 +83,26 @@ where
                         ),
                     })
                 }
-                Ok(StreamItem::Progress {
-                    message,
-                    percentage,
-                    ..
-                }) => {
+                Ok(StreamItem::Progress { content, .. }) => {
+                    let (message, percentage) = match Note::deserialize(&content) {
+                        Ok(note) => (note.message, note.percentage),
+                        Err(_) => (content.to_string(), None),
+                    };
                     return Some((
                         Ok(ClientEvent::Progress {
                             message,
                             percentage,
                         }),
                         Some(items),
-                    ))
+                    ));
                 }
                 Ok(StreamItem::Error {
-                    message,
-                    code,
-                    recoverable,
-                    ..
+                    error, recoverable, ..
                 }) => {
                     return Some((
                         Err(ClientError::Remote {
-                            message,
-                            code,
+                            message: error.to_string(),
+                            code: Some(error.kind().to_string()),
                             recoverable,
                         }),
                         None,
