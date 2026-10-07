@@ -693,12 +693,16 @@ pub fn generate(
                     })
                     .collect::<Vec<_>>();
 
-                // Add the auto-generated schema method
+                // Add the auto-generated schema method. RETURNS-26: it states
+                // what it answers like any other method — a `SchemaResult`:
+                // this `PluginSchema`, or one `MethodSchema` when called with
+                // `{"method": "name"}` (one item either way).
                 let schema_method = #crate_path::plexus::MethodSchema::new(
                     "schema".to_string(),
                     "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.".to_string(),
                     "auto_schema".to_string(), // Fixed hash since it's auto-generated
-                );
+                )
+                .with_returns(#deps::schemars::schema_for!(#crate_path::plexus::SchemaResult));
                 methods.push(schema_method);
 
                 // IR-3: append `#[child]` method entries. Each entry's role is

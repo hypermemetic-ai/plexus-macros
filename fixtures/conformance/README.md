@@ -27,7 +27,9 @@ follows.
   `errors.jsonl`).
 - `expected/schema.json`: the `PluginSchema` the schema RPC returns: the six
   methods, then the `schema` method every activation's schema RPC lists
-  (`returns: {}`, cardinality `one`).
+  (cardinality `one`; `returns` is `schema_for!(SchemaResult)` since
+  RETURNS-26: this `PluginSchema`, or one `MethodSchema` when called with
+  `{"method": "name"}`).
 - `expected/wire/<method>[.<case>].jsonl`: the frames of one call, ending in
   its one `done`.
 - `expected/errors.jsonl`: one error frame per call failure the fixture can
@@ -102,3 +104,11 @@ as derived. One diff, in `schema.json`: the served schema lists the
 auto-generated `schema` method after the six — the macro has always put it
 in every activation's schema, and the hand derivation left it out. It is now
 in the file; no RETURNS-1 decision moved.
+
+RETURNS-26 regenerated `schema.json` from the served output: the `schema`
+method's `returns` went from `{}` (any value) to the schema of the
+`SchemaResult` it answers, so a generated client types it. Nothing else
+moved. The file keeps declaration key order: dump the served
+`plugin_schema()` with `serde_json/preserve_order` on (`cargo test -p
+conformance --features serde_json/preserve_order`), pretty-printed, two
+spaces.
