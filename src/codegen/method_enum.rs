@@ -601,7 +601,7 @@ pub fn generate(
                         if let Some(r) = filtered_returns {
                             schema = schema.with_returns(r);
                         }
-                        schema = schema.with_streaming(*is_streaming);
+                        schema = schema.with_cardinality(if *is_streaming { #crate_path::plexus::schema::Cardinality::Many } else { #crate_path::plexus::schema::Cardinality::One });
                         schema = schema.with_http_method(http_method);
 
                         // R-1 (joint AP-1): stamp the activation-declared
