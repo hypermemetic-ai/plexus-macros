@@ -576,10 +576,15 @@ pub fn generate(
     // has no meaningful finite summary list; dynamic children are discoverable
     // via `ChildRouter::list_children` at runtime.
     //
-    // The `hash` field of `ChildSummary` is populated with the empty string —
-    // the macro has no compile-time hash source for the child plugin's schema.
-    // Callers that need a populated hash hand-write `plugin_children` (which
-    // suppresses synthesis) and compute the hash from the child's schema.
+    // RETURNS-25: each `ChildSummary.hash` is the child's own schema hash —
+    // `Activation::plugin_schema(&self.child()).hash`, computed at runtime the
+    // way DynamicHub's `plugin_children` does it (it used to be `""`, so a
+    // change inside a static child reached no ancestor's hash). It rolls up
+    // into this hub's `children_hash` and `hash`, so a change anywhere below
+    // moves every ancestor's hash and the root's. A static child must
+    // therefore be an `Activation` (every `#[activation]` is). The child is
+    // built by its accessor and its schema computed on each call; a type that
+    // is its own static descendant would recurse without end.
     let plugin_children_synth = if synthesize_plugin_children {
         let static_children: Vec<&ChildMethodInfo> = child_methods
             .iter()
@@ -590,19 +595,21 @@ pub fn generate(
             .map(|c| {
                 let name = c.fn_name.to_string();
                 let desc = &c.description;
+                let fn_name = &c.fn_name;
                 quote! {
                     #crate_path::plexus::ChildSummary {
                         namespace: ::std::string::String::from(#name),
                         description: ::std::string::String::from(#desc),
-                        hash: ::std::string::String::new(),
+                        hash: #crate_path::plexus::Activation::plugin_schema(&self.#fn_name()).hash,
                     }
                 }
             })
             .collect();
         quote! {
             /// Auto-generated child summary list from `#[plexus_macros::child]`
-            /// static methods. Dynamic children are not listed here; they are
-            /// enumerable at runtime via `ChildRouter::list_children`.
+            /// static methods, each with its child's schema hash. Dynamic
+            /// children are not listed here; they are enumerable at runtime
+            /// via `ChildRouter::list_children`.
             pub fn plugin_children(&self) -> ::std::vec::Vec<#crate_path::plexus::ChildSummary> {
                 ::std::vec![
                     #(#entries,)*
