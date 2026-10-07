@@ -60,6 +60,24 @@
 //! Both features expose the same `WsTransport` type and the same
 //! `WsTransport::connect(url, hub_namespace)`, so a consumer picks the
 //! backend in `Cargo.toml` and changes no code. See [`ws`].
+//!
+//! ## The 0.7 vocabulary
+//!
+//! The types every party to a precise-returns call names — the server
+//! author, the macro, the generated client, the generators' mirrors — live
+//! here once, because this is the one crate all of them link:
+//!
+//! | Type | What it is | On the wire |
+//! |---|---|---|
+//! | [`Progress<T, P = Note>`](Progress) | a method's item when it reports progress: `Update(P)` \| `Item(T)` | never as a whole: `Update` → progress frame, `Item` → data frame |
+//! | [`Note`] | the default progress type | `{"message": …, "percentage": …}` |
+//! | [`Frame<I, P>`](Frame) | what an opted-in client stream yields: `Item(I)` \| `Progress(P)` | client-side only |
+//! | [`RemoteError`] (+ [`ParamProblem`], [`DenyReason`]) | why a call failed — typed, exhaustive | `kind`-tagged object |
+//! | [`wire_result`] | serde `with` module for a Result item | `{"ok": t}` \| `{"err": e}` |
+//!
+//! `Note` and `RemoteError` implement `schemars::JsonSchema` under the
+//! `schema` feature (off by default: a wasm32 consumer that only decodes
+//! needs none of it).
 
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
@@ -68,8 +86,12 @@ pub mod decode;
 pub mod envelope;
 pub mod error;
 pub mod event;
+pub mod frame;
 pub mod memory;
+pub mod progress;
+pub mod remote_error;
 pub mod transport;
+pub mod wire_result;
 
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub mod ws;
@@ -78,7 +100,10 @@ pub use decode::{collect_data, decode, error_stream, EventStream};
 pub use envelope::{StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};
 pub use event::ClientEvent;
+pub use frame::Frame;
 pub use memory::MemoryTransport;
+pub use progress::{Note, Progress};
+pub use remote_error::{DenyReason, ParamProblem, RemoteError};
 pub use transport::{ItemStream, MethodRef, Transport};
 
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
