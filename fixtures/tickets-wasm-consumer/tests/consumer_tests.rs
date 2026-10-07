@@ -12,8 +12,8 @@
 
 use plexus_client::{MemoryTransport, MethodRef, StreamItem, TransportError};
 use serde_json::json;
-use tickets_api::{Status, Ticket, TicketsClient, TicketsEvent};
-use tickets_wasm_consumer::{describe, mirror_epic, tickets_in_epic};
+use tickets_api::{Status, Ticket, TicketEvent, TicketsClient};
+use tickets_wasm_consumer::{describe, listed_and_watched, mirror_epic, tickets_in_epic};
 
 const LIST: MethodRef = MethodRef::new("tickets", "list");
 const WATCH: MethodRef = MethodRef::new("tickets", "watch");
@@ -34,8 +34,8 @@ async fn a_consumer_gets_typed_tickets_with_no_wire_code_of_its_own() {
     let client = TicketsClient::new(MemoryTransport::new().script_events(
         LIST,
         &[
-            TicketsEvent::Ticket { ticket: ticket("MACRO-1", None) },
-            TicketsEvent::Ticket { ticket: ticket("MACRO-2", Some("MACRO-1")) },
+            TicketEvent::Ticket { ticket: ticket("MACRO-1", None) },
+            TicketEvent::Ticket { ticket: ticket("MACRO-2", Some("MACRO-1")) },
         ],
     ));
 
@@ -60,9 +60,9 @@ async fn the_watch_mirror_folds_a_live_stream() {
     let client = TicketsClient::new(MemoryTransport::new().script_events(
         WATCH,
         &[
-            TicketsEvent::Created { ticket: ticket("MACRO-1", None) },
-            TicketsEvent::Created { ticket: ticket("MACRO-2", None) },
-            TicketsEvent::StatusChanged {
+            TicketEvent::Created { ticket: ticket("MACRO-1", None) },
+            TicketEvent::Created { ticket: ticket("MACRO-2", None) },
+            TicketEvent::StatusChanged {
                 ticket: Ticket {
                     status: Status::Complete,
                     ..ticket("MACRO-1", None)
@@ -72,7 +72,7 @@ async fn the_watch_mirror_folds_a_live_stream() {
         ],
     ));
 
-    let mirror = mirror_epic(&client, None).await.expect("ok");
+    let mirror = mirror_epic(&client, None).await.expect("ok").expect("no refusal");
     assert_eq!(mirror.len(), 2, "the status change updated in place");
     assert_eq!(mirror[0].status, Status::Complete);
 }
@@ -81,10 +81,10 @@ async fn the_watch_mirror_folds_a_live_stream() {
 async fn an_activation_error_variant_and_a_transport_failure_land_differently() {
     let in_band = TicketsClient::new(MemoryTransport::new().script_events(
         WATCH,
-        &[TicketsEvent::Error { message: "epic not found".into() }],
+        &[TicketEvent::Error { message: "epic not found".into() }],
     ));
-    let err = mirror_epic(&in_band, None).await.unwrap_err();
-    assert!(err.to_string().contains("epic not found"));
+    let refused = mirror_epic(&in_band, None).await.expect("the call itself succeeded");
+    assert_eq!(refused, Err("epic not found".to_string()));
 
     let dead = TicketsClient::new(
         MemoryTransport::new().script_failure(WATCH, TransportError::connect("refused")),
@@ -112,6 +112,33 @@ async fn a_changed_server_payload_surfaces_instead_of_vanishing() {
 
     let err = tickets_in_epic(&client, "MACRO").await.unwrap_err();
     assert!(!err.is_transport() && !err.is_remote(), "a decode error: {err:?}");
+}
+
+/// `list` and `watch` merged into one listener through the derived
+/// aggregate.
+#[tokio::test]
+async fn two_calls_merge_through_the_aggregate() {
+    let client = TicketsClient::new(
+        MemoryTransport::new()
+            .script_events(LIST, &[TicketEvent::Ticket { ticket: ticket("MACRO-1", None) }])
+            .script_events(
+                WATCH,
+                &[
+                    TicketEvent::Created { ticket: ticket("MACRO-2", None) },
+                    TicketEvent::StatusChanged {
+                        ticket: Ticket {
+                            status: Status::Complete,
+                            ..ticket("MACRO-1", None)
+                        },
+                        previous: Status::Ready,
+                    },
+                ],
+            ),
+    );
+    let mut mirror = listed_and_watched(&client, "MACRO").await.expect("ok");
+    mirror.sort_by(|a, b| a.id.cmp(&b.id));
+    let ids: Vec<&str> = mirror.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, ["MACRO-1", "MACRO-2"]);
 }
 
 #[test]

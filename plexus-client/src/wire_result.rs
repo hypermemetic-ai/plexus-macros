@@ -20,7 +20,10 @@
 //! ```
 //!
 //! or call [`serialize`] / [`deserialize`] directly with any serde
-//! (de)serializer — a `serde_json::Value` is one.
+//! (de)serializer — a `serde_json::Value` is one. [`from_value`] and
+//! [`to_value`] are those two for a data frame's `content`; `from_value` is
+//! the item decoder a generated client hands
+//! [`MethodStream`](crate::MethodStream) for a Result method.
 //!
 //! Decoding accepts exactly an object with one key, `ok` or `err`; anything
 //! else (another key, both keys, no key, a non-object) is an error whose
@@ -65,6 +68,27 @@ where
     D: Deserializer<'de>,
 {
     deserializer.deserialize_map(ResultVisitor(PhantomData))
+}
+
+/// A data frame's `content` → a Result item: `{"ok": t}` → `Ok(t)`,
+/// `{"err": e}` → `Err(e)`. As a [`Decoder`](crate::Decoder), what a
+/// generated client decodes a Result method's items with.
+pub fn from_value<T, E>(content: serde_json::Value) -> Result<Result<T, E>, serde_json::Error>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::DeserializeOwned,
+{
+    deserialize(content)
+}
+
+/// A Result item → a data frame's `content`: `Ok(t)` → `{"ok": t}`,
+/// `Err(e)` → `{"err": e}`. What a test scripts a Result method's items with.
+pub fn to_value<T, E>(item: &Result<T, E>) -> Result<serde_json::Value, serde_json::Error>
+where
+    T: Serialize,
+    E: Serialize,
+{
+    serialize(item, serde_json::value::Serializer)
 }
 
 struct ResultVisitor<T, E>(PhantomData<fn() -> (T, E)>);

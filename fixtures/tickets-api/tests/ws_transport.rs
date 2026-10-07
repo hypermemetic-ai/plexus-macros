@@ -11,9 +11,11 @@
 //! The scripted server records every frame the client sends, so each test
 //! asserts on the actual bytes.
 
-use futures::StreamExt;
-use tickets_api::{TicketsClient, TicketsEvent};
-use plexus_client::{ClientEvent, MethodRef, StreamItem, Transport, TransportErrorKind, WsTransport};
+use futures::{StreamExt, TryStreamExt};
+use tickets_api::{TicketEvent, TicketsClient};
+use plexus_client::{
+    ClientError, MethodRef, RemoteError, StreamItem, Transport, TransportErrorKind, WsTransport,
+};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -166,8 +168,9 @@ async fn a_client_call_is_one_subscribe_frame() {
     assert_eq!(transport.hub_namespace(), "menger");
     let client = TicketsClient::new(transport);
 
-    let events = client
-        .list_all(Some("MACRO".into()), None)
+    let events: Vec<TicketEvent> = client
+        .list(Some("MACRO".into()), None)
+        .try_collect()
         .await
         .expect("call completes");
     assert!(events.is_empty(), "the script sent no data items");
@@ -225,12 +228,13 @@ async fn both_notification_method_names_route_by_subscription_id() {
     let client = TicketsClient::new(transport);
 
     let ids: Vec<String> = client
-        .watch_all(None)
+        .watch(None)
+        .try_collect::<Vec<_>>()
         .await
         .expect("stream completes")
         .into_iter()
         .map(|e| match e {
-            TicketsEvent::NotFound { id } => id,
+            TicketEvent::NotFound { id } => id,
             other => panic!("unexpected event {other:?}"),
         })
         .collect();
@@ -272,7 +276,7 @@ async fn dropping_a_watch_stream_sends_call_unsub() {
     {
         let mut watch = client.watch(Some("MACRO".into()));
         let first = watch.next().await.expect("one event").expect("no error");
-        assert!(matches!(first, ClientEvent::Data(TicketsEvent::NotFound { .. })));
+        assert!(matches!(first, TicketEvent::NotFound { .. }));
         // `watch` is open-ended: the server sent no `done`, so leaving this
         // scope is a mid-stream drop.
     }
@@ -291,12 +295,21 @@ async fn dropping_a_watch_stream_sends_call_unsub() {
 /// The mirror image: a stream that ran to `done` has nothing to cancel, so
 /// no unsubscribe is sent. (Sending one would be answered with "unknown
 /// subscription" and would make every finished call log a server error.)
+///
+/// RETURNS-9: this is why a one-item call (`get` is `-> TicketEvent`) reads
+/// past its item to the `done` before it returns — returning at the item
+/// would drop a live subscription and unsubscribe a call that finished.
 #[tokio::test]
 async fn a_stream_that_reached_done_does_not_unsubscribe() {
     let hub = FakeHub::start(Arc::new(|frame: &Value| {
         let sub = json!(3);
         vec![
             Act::Send(ack(frame, sub.clone())),
+            Act::Send(notify(
+                "result",
+                sub.clone(),
+                data(json!({"type": "not_found", "id": "MACRO-6"})),
+            )),
             Act::Send(notify("result", sub, done())),
         ]
     }))
@@ -304,8 +317,8 @@ async fn a_stream_that_reached_done_does_not_unsubscribe() {
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
     let client = TicketsClient::new(transport);
-    let events = client.get_all("MACRO-6".into()).await.expect("completes");
-    assert!(events.is_empty());
+    let event = client.get("MACRO-6".into()).await.expect("completes");
+    assert_eq!(event, TicketEvent::NotFound { id: "MACRO-6".into() });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     let frames = hub.frames();
@@ -414,7 +427,8 @@ async fn a_json_rpc_error_reply_to_the_subscribe_is_a_protocol_error() {
 
 /// The typed layer keeps the two apart: the same call over the same
 /// transport reports `is_transport()` for the socket and `is_remote()` for
-/// an in-band `error` item.
+/// an in-band `error` item — which arrives typed, as the frame's
+/// `RemoteError`.
 #[tokio::test]
 async fn an_in_band_error_item_is_remote_not_transport() {
     let hub = FakeHub::start(Arc::new(|frame: &Value| {
@@ -437,11 +451,17 @@ async fn an_in_band_error_item_is_remote_not_transport() {
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
     let client = TicketsClient::new(transport);
     let err = client
-        .get_all("CY-1".into())
+        .get("CY-1".into())
         .await
         .expect_err("the hub answered error");
     assert!(err.is_remote(), "{err}");
     assert!(!err.is_transport(), "{err}");
+    assert_eq!(
+        err,
+        ClientError::Remote(RemoteError::Execution {
+            message: "cycle".into()
+        })
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -488,17 +508,21 @@ async fn two_concurrent_calls_are_independent_streams_on_one_connection() {
     // or the script's ordering is not what is being tested.
     hub.wait_for_frames(1).await;
 
-    let listed = client.list_all(None, None).await.expect("list completes");
+    let listed: Vec<TicketEvent> = client
+        .list(None, None)
+        .try_collect()
+        .await
+        .expect("list completes");
     assert_eq!(
         listed,
-        vec![TicketsEvent::NotFound {
+        vec![TicketEvent::NotFound {
             id: "TO-THE-LISTER".into()
         }],
         "the lister sees only its own items"
     );
 
     match watch.next().await {
-        Some(Ok(ClientEvent::Data(TicketsEvent::NotFound { id }))) => {
+        Some(Ok(TicketEvent::NotFound { id })) => {
             assert_eq!(id, "TO-THE-WATCHER", "the watcher sees only its own items");
         }
         other => panic!("unexpected watch event {other:?}"),
@@ -524,6 +548,11 @@ async fn dropping_the_transport_closes_the_socket() {
         let sub = json!(1);
         vec![
             Act::Send(ack(frame, sub.clone())),
+            Act::Send(notify(
+                "result",
+                sub.clone(),
+                data(json!({"type": "health", "version": "0.7.0", "ticket_count": 0})),
+            )),
             Act::Send(notify("result", sub, done())),
         ]
     }))
@@ -531,7 +560,7 @@ async fn dropping_the_transport_closes_the_socket() {
 
     let transport = WsTransport::connect(&hub.url(), "menger").await.expect("connect");
     TicketsClient::new(&transport)
-        .health_all()
+        .health()
         .await
         .expect("one call, so the connection is certainly up");
     assert!(!hub.hung_up.load(Ordering::SeqCst));
