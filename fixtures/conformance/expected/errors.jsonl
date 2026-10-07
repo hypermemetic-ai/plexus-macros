@@ -1,0 +1,3 @@
+{"type":"error","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0},"recoverable":false,"error":{"kind":"method_not_found","activation":"conformance","method":"frob"}}
+{"type":"error","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0},"recoverable":false,"error":{"kind":"invalid_params","param":"id","problem":"missing"}}
+{"type":"error","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0},"recoverable":false,"error":{"kind":"invalid_params","param":"to","problem":"malformed","detail":"invalid type: string \"three\", expected u32"}}

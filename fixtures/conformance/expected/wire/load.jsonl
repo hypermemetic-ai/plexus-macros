@@ -1,0 +1,4 @@
+{"type":"progress","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0},"content_type":"conformance.load","content":{"type":"batch","done":1,"of":2}}
+{"type":"progress","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0},"content_type":"conformance.load","content":{"type":"batch","done":2,"of":2}}
+{"type":"data","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0},"content_type":"conformance.load","content":{"ok":{"items":2}}}
+{"type":"done","metadata":{"provenance":["conformance"],"plexus_hash":"*","timestamp":0}}

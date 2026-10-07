@@ -1,0 +1,352 @@
+{
+  "namespace": "conformance",
+  "version": "0.7.0",
+  "description": "Conformance fixture: one method per signature form",
+  "self_hash": "*",
+  "hash": "*",
+  "methods": [
+    {
+      "name": "ping",
+      "description": "Always answers pong.",
+      "hash": "*",
+      "returns": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Pong",
+        "description": "What `ping` answers.",
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "cardinality": "one",
+      "bidirectional": false,
+      "http_method": "POST",
+      "role": {
+        "kind": "rpc"
+      }
+    },
+    {
+      "name": "lookup",
+      "description": "The thing with this id; the id \"missing\" is not found.",
+      "hash": "*",
+      "params": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Thing id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "returns": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Thing",
+        "description": "What `lookup` finds.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
+      "error": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "LookupError",
+        "description": "Why `lookup` says no.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "const": "not_found"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ]
+          }
+        ]
+      },
+      "cardinality": "one",
+      "bidirectional": false,
+      "http_method": "POST",
+      "role": {
+        "kind": "rpc"
+      }
+    },
+    {
+      "name": "count",
+      "description": "Ticks from 1 up to `to`.",
+      "hash": "*",
+      "params": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "description": "Last tick",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "to"
+        ]
+      },
+      "returns": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Tick",
+        "description": "One of `count`'s items.",
+        "type": "object",
+        "properties": {
+          "n": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "n"
+        ]
+      },
+      "cardinality": "many",
+      "bidirectional": false,
+      "http_method": "POST",
+      "role": {
+        "kind": "rpc"
+      }
+    },
+    {
+      "name": "scan",
+      "description": "The rows whose key starts with `prefix`, in key order.",
+      "hash": "*",
+      "params": {
+        "type": "object",
+        "properties": {
+          "prefix": {
+            "description": "Key prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prefix"
+        ]
+      },
+      "returns": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Row",
+        "description": "One of `scan`'s rows.",
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ]
+      },
+      "error": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ScanError",
+        "description": "Why `scan` could not read a row. The scan says so and carries on.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "const": "unreadable"
+              }
+            },
+            "required": [
+              "type",
+              "key"
+            ]
+          }
+        ]
+      },
+      "cardinality": "many",
+      "bidirectional": false,
+      "http_method": "POST",
+      "role": {
+        "kind": "rpc"
+      }
+    },
+    {
+      "name": "load",
+      "description": "Loads `n` batches, reporting each, then says how many items it loaded.",
+      "hash": "*",
+      "params": {
+        "type": "object",
+        "properties": {
+          "n": {
+            "description": "Batches to load, at most 3",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "n"
+        ]
+      },
+      "returns": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Loaded",
+        "description": "What `load` yields once it has loaded.",
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "error": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "LoadError",
+        "description": "Why `load` refuses.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "max": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "const": "too_many"
+              }
+            },
+            "required": [
+              "type",
+              "n",
+              "max"
+            ]
+          }
+        ]
+      },
+      "progress": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "LoadStep",
+        "description": "`load`'s typed progress.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "done": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "of": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "const": "batch"
+              }
+            },
+            "required": [
+              "type",
+              "done",
+              "of"
+            ]
+          }
+        ]
+      },
+      "cardinality": "many",
+      "bidirectional": false,
+      "http_method": "POST",
+      "role": {
+        "kind": "rpc"
+      }
+    },
+    {
+      "name": "warm",
+      "description": "Warms the cache, noting its progress, then says how many entries it holds.",
+      "hash": "*",
+      "returns": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Warmed",
+        "description": "What `warm` yields once warm.",
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "entries"
+        ]
+      },
+      "progress": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Note",
+        "description": "The default progress type: a human-readable message and, optionally, how\nfar along the work is.\n\nWire shape: `{\"message\": \"…\", \"percentage\": 50.0}`; `percentage` is\nomitted when the method cannot say (and absent decodes as `None`).",
+        "type": "object",
+        "properties": {
+          "message": {
+            "description": "What is happening, for a human.",
+            "type": "string"
+          },
+          "percentage": {
+            "description": "Completion, `0.0`–`100.0`, when the method can say.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "cardinality": "many",
+      "bidirectional": false,
+      "http_method": "POST",
+      "role": {
+        "kind": "rpc"
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{"method":"ping","event":{"message":"pong"}}
+{"method":"lookup","event":{"ok":{"id":"a1","name":"thing a1"}}}
+{"method":"lookup","event":{"err":{"type":"not_found","id":"missing"}}}
+{"method":"count","event":{"n":1}}
+{"method":"count","event":{"n":2}}
+{"method":"count","event":{"n":3}}
+{"method":"scan","event":{"ok":{"key":"a1"}}}
+{"method":"scan","event":{"err":{"type":"unreadable","key":"a2"}}}
+{"method":"scan","event":{"ok":{"key":"a3"}}}
+{"method":"load","event":{"ok":{"items":2}}}
+{"method":"warm","event":{"entries":2}}
