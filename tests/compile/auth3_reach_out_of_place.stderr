@@ -1,0 +1,13 @@
+error: `reach: Reach` must be the first parameter after `&self`, or come right after `auth`
+  --> tests/compile/auth3_reach_out_of_place.rs:12:42
+   |
+12 |     async fn list(&self, filter: String, reach: Reach) -> impl futures::stream::Stream<Item = String> + Send + 'static {
+   |                                          ^^^^^^^^^^^^
+
+warning: unused import: `plexus_core::plexus::Reach`
+ --> tests/compile/auth3_reach_out_of_place.rs:4:5
+  |
+4 | use plexus_core::plexus::Reach;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

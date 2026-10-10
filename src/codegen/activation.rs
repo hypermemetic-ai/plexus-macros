@@ -45,6 +45,8 @@ pub fn generate(
     // `generate_all`. All third-party names (jsonrpsee, serde_json, uuid,
     // async_trait, futures, tokio) are referenced relatively through it.
     deps: &syn::Ident,
+    // AUTH-3: default roles, flattened to grants.
+    roles: &[(String, Vec<String>)],
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
@@ -53,7 +55,7 @@ pub fn generate(
 
     let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type, deps);
     let help_arms = generate_help_arms(methods);
-    let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && m.activation_params.is_empty());
+    let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty());
     let rpc_trait_methods = generate_rpc_trait_methods(methods, deps);
     let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path, deps);
 
@@ -165,6 +167,43 @@ pub fn generate(
         }
     } else {
         quote! {}
+    };
+
+    // AUTH-3: `PluginSchema.roles` from `roles(...)`; nothing when none were
+    // declared, so the schema is unchanged for every existing activation.
+    let deprecation_inject = if roles.is_empty() {
+        deprecation_inject
+    } else {
+        let role_names: Vec<&str> = roles.iter().map(|(n, _)| n.as_str()).collect();
+        let role_grants: Vec<Vec<&str>> =
+            roles.iter().map(|(_, g)| g.iter().map(String::as_str).collect()).collect();
+        quote! {
+            #deprecation_inject
+            #(
+                __plugin_schema.roles.insert(
+                    ::std::string::String::from(#role_names),
+                    ::std::vec![#(::std::string::String::from(#role_grants)),*],
+                );
+            )*
+        }
+    };
+
+    // AUTH-3: under `namespace_fn` the grant follows the runtime namespace
+    // (`menger.call`, not the macro's static `plexus.call`).
+    let deprecation_inject = if namespace_fn.is_some() {
+        quote! {
+            #deprecation_inject
+            {
+                let __ns = ::std::string::ToString::to_string(self.namespace());
+                for __m in __plugin_schema.methods.iter_mut() {
+                    if __m.grant.is_some() {
+                        __m.grant = ::std::option::Option::Some(::std::format!("{}.{}", __ns, __m.name));
+                    }
+                }
+            }
+        }
+    } else {
+        deprecation_inject
     };
 
     let plugin_schema_body = match (hub, long_description) {
@@ -745,7 +784,7 @@ fn generate_rpc_trait_methods(methods: &[MethodInfo], deps: &syn::Ident) -> Vec<
         // Auth-requiring methods and methods with activation_params are dispatched through
         // Activation::call() which handles auth injection and request extraction.
         // The jsonrpsee RPC trait cannot carry auth context or raw_ctx.
-        .filter(|m| !m.requires_auth && m.activation_params.is_empty())
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty())
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -783,7 +822,7 @@ fn generate_rpc_impl_methods(
     methods
         .iter()
         // Skip auth-requiring methods and activation_param methods — they route through Activation::call()
-        .filter(|m| !m.requires_auth && m.activation_params.is_empty())
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty())
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -1003,23 +1042,33 @@ fn generate_dispatch_arms(
                 quote! {}
             };
 
+            // AUTH-2: `reach: Reach` — the gate's answer for this call, read
+            // from the dispatch's task-local scope (everywhere when no gate
+            // decided it). Passed first, or right after `auth`.
+            let reach_binding = if m.takes_reach {
+                quote! { let __plexus_reach = #crate_path::plexus::current_reach(); }
+            } else {
+                quote! {}
+            };
+            let reach_arg = if m.takes_reach { quote! { __plexus_reach, } } else { quote! {} };
+
             // Build parameter list for method call
             let activation_param_names: Vec<&syn::Ident> = m.activation_params.iter().map(|ap| &ap.param_name).collect();
             let resolver_names: Vec<&syn::Ident> = m.auth_resolvers.iter().map(|r| &r.param_name).collect();
             let method_params = if m.requires_auth && m.auth_resolvers.is_empty() {
                 // Raw auth context pass-through (legacy)
-                quote! { auth_ctx, #(#param_names),* }
+                quote! { auth_ctx, #reach_arg #(#param_names),* }
             } else if !m.activation_params.is_empty() && !m.auth_resolvers.is_empty() {
                 // Both activation_params and resolver params + regular params
-                quote! { #(#activation_param_names,)* #(#resolver_names,)* #(#param_names),* }
+                quote! { #reach_arg #(#activation_param_names,)* #(#resolver_names,)* #(#param_names),* }
             } else if !m.activation_params.is_empty() {
                 // activation_params + regular params
-                quote! { #(#activation_param_names,)* #(#param_names),* }
+                quote! { #reach_arg #(#activation_param_names,)* #(#param_names),* }
             } else if !m.auth_resolvers.is_empty() {
                 // Resolved parameters + regular params
-                quote! { #(#resolver_names,)* #(#param_names),* }
+                quote! { #reach_arg #(#resolver_names,)* #(#param_names),* }
             } else {
-                quote! { #(#param_names),* }
+                quote! { #reach_arg #(#param_names),* }
             };
 
             // Generate code based on bidirectional type
@@ -1033,6 +1082,7 @@ fn generate_dispatch_arms(
                             #(#activation_param_bindings)*
                             #(#resolver_bindings)*
                             #param_extraction
+                            #reach_binding
                             let stream = self.#fn_name(#method_params).await;
                             Ok(#crate_path::plexus::wrap_stream(
                                 stream,
@@ -1045,9 +1095,9 @@ fn generate_dispatch_arms(
                 BidirType::Standard => {
                     // Build param list for bidir - ctx comes first, then auth if needed, then regular params
                     let bidir_params = if m.requires_auth {
-                        quote! { &ctx, auth_ctx, #(#param_names),* }
+                        quote! { &ctx, auth_ctx, #reach_arg #(#param_names),* }
                     } else {
-                        quote! { &ctx, #(#param_names),* }
+                        quote! { &ctx, #reach_arg #(#param_names),* }
                     };
 
                     // StandardBidirChannel - use wrap_stream_with_bidir
@@ -1058,6 +1108,7 @@ fn generate_dispatch_arms(
                             #(#activation_param_bindings)*
                             #(#resolver_bindings)*
                             #param_extraction
+                            #reach_binding
                             // Create bidir channel and wrap stream together
                             let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
                                 #crate_path::plexus::StandardRequest,
@@ -1080,9 +1131,9 @@ fn generate_dispatch_arms(
                 BidirType::Custom { request, response } => {
                     // Build param list for bidir - ctx comes first, then auth if needed, then regular params
                     let bidir_params = if m.requires_auth {
-                        quote! { &ctx, auth_ctx, #(#param_names),* }
+                        quote! { &ctx, auth_ctx, #reach_arg #(#param_names),* }
                     } else {
-                        quote! { &ctx, #(#param_names),* }
+                        quote! { &ctx, #reach_arg #(#param_names),* }
                     };
 
                     // Custom BidirChannel - use wrap_stream_with_bidir with custom types
@@ -1095,6 +1146,7 @@ fn generate_dispatch_arms(
                             #(#activation_param_bindings)*
                             #(#resolver_bindings)*
                             #param_extraction
+                            #reach_binding
                             // Create bidir channel and wrap stream together
                             let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
                                 #req_ty,

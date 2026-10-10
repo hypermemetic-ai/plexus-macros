@@ -305,6 +305,10 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         }
     }
 
+    // AUTH-3: the activation's default roles, validated against its methods
+    // and flattened to grants (`<namespace>.<method>`).
+    let declared_roles = resolve_roles(&args.roles, &methods, &args.namespace)?;
+
     // REQ-10: validate per-method request overrides against the activation's
     // `required = [...]` lock list. If the activation has any required fields
     // and a method uses `request = ()`, emit a compile error naming the
@@ -639,6 +643,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         args.request_type.as_ref(),  // REQ-6: activation-level request type (for runtime merge)
         &deps,
         args.auth_posture, // R-1: declared posture (None = silent, pre-R-1 wire)
+        &args.namespace,   // AUTH-3: each method's grant is `<namespace>.<method>`
     );
     let activation_impl = activation::generate(
         &struct_name,
@@ -664,6 +669,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         search_method.as_ref(),
         activation_deprecation.as_ref(),
         &deps,
+        &declared_roles,
     );
 
     // MACRO-2: the typed client, when the activation opted in. Empty
@@ -713,6 +719,77 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         #server_half
         #client_impl
     })
+}
+
+/// AUTH-3: check `roles(...)` and flatten it: each role's entries are
+/// methods of this activation (by their RPC name) or roles declared before
+/// it; `admin` is built in and cannot be declared or listed. Returns each
+/// role with its grants (`<namespace>.<method>`), in declaration order.
+fn resolve_roles(
+    decls: &[crate::parse::RoleDecl],
+    methods: &[MethodInfo],
+    namespace: &str,
+) -> syn::Result<Vec<(String, Vec<String>)>> {
+    use crate::parse::RoleEntry;
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for decl in decls {
+        let name = decl.name.to_string();
+        if name == "admin" {
+            return Err(syn::Error::new(
+                decl.name.span(),
+                "`admin` is built in and holds every grant; it needs no list",
+            ));
+        }
+        if out.iter().any(|(n, _)| *n == name) {
+            return Err(syn::Error::new(decl.name.span(), format!("role `{name}` is declared twice")));
+        }
+        let mut grants: Vec<String> = Vec::new();
+        let mut push = |g: String, grants: &mut Vec<String>| {
+            if !grants.contains(&g) {
+                grants.push(g);
+            }
+        };
+        for entry in &decl.entries {
+            match entry {
+                RoleEntry::Method(lit) => {
+                    let m = lit.value();
+                    if !methods.iter().any(|mi| mi.method_name == m) {
+                        let known: Vec<&str> = methods.iter().map(|mi| mi.method_name.as_str()).collect();
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            format!(
+                                "role `{name}` lists \"{m}\", which is not a method of this activation; \
+                                 its methods are: {}",
+                                known.join(", ")
+                            ),
+                        ));
+                    }
+                    push(format!("{namespace}.{m}"), &mut grants);
+                }
+                RoleEntry::Role(ident) => {
+                    let inc = ident.to_string();
+                    let Some((_, included)) = out.iter().find(|(n, _)| *n == inc) else {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            if inc == "admin" {
+                                format!("role `{name}` cannot include `admin`, which holds every grant")
+                            } else {
+                                format!(
+                                    "role `{name}` includes `{inc}`, which is not declared before it \
+                                     (a role may include only roles listed earlier in `roles(...)`)"
+                                )
+                            },
+                        ));
+                    };
+                    for g in included.clone() {
+                        push(g, &mut grants);
+                    }
+                }
+            }
+        }
+        out.push((name, grants));
+    }
+    Ok(out)
 }
 
 /// MACRO-2: put `#[cfg(<pred>)]` on every item of an emitted token stream.

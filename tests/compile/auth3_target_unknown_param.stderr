@@ -1,0 +1,5 @@
+error: target = "ticket" names no parameter of `get`; its parameters are: id
+ --> tests/compile/auth3_target_unknown_param.rs:8:38
+  |
+8 |     #[plexus_macros::method(target = "ticket")]
+  |                                      ^^^^^^^^

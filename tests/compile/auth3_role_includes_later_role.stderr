@@ -1,0 +1,5 @@
+error: role `editor` includes `viewer`, which is not declared before it (a role may include only roles listed earlier in `roles(...)`)
+ --> tests/compile/auth3_role_includes_later_role.rs:9:21
+  |
+9 |     roles(editor = [viewer, "set"], viewer = ["get"])
+  |                     ^^^^^^

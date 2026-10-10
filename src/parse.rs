@@ -121,6 +121,10 @@ pub struct HubMethodAttrs {
     /// Each literal is validated against the AUTHZ-CORE-4 scope grammar at
     /// macro-expansion time (see [`validate_scope_literal`]).
     pub scopes: Vec<String>,
+    /// AUTH-3: `target = "param"` — the param that locates what this call
+    /// acts on. Must name one of the method's RPC params (checked in
+    /// [`MethodInfo::from_fn`]).
+    pub target: Option<syn::LitStr>,
 }
 
 /// R-1 (AUTHZ-CORE-2 acceptance criterion #3): validate a `scope = "..."`
@@ -187,6 +191,8 @@ impl Parse for HubMethodAttrs {
         let mut scopes: Vec<String> = Vec::new();
         let mut public_span: Option<proc_macro2::Span> = None;
         let mut first_scope_span: Option<proc_macro2::Span> = None;
+        // AUTH-3: `target = "param"`.
+        let mut target: Option<syn::LitStr> = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -246,6 +252,16 @@ impl Parse for HubMethodAttrs {
                                     }
                                 }
                             }
+                        } else if path.is_ident("target") {
+                            // AUTH-3: the param that locates what the call acts on.
+                            let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value else {
+                                return Err(syn::Error::new_spanned(
+                                    &path,
+                                    "target = ... expects the name of a parameter as a string, \
+                                     e.g. #[plexus_macros::method(target = \"id\")]",
+                                ));
+                            };
+                            target = Some(s);
                         } else if path.is_ident("scope") {
                             // R-1 (AUTHZ-CORE-2): explicit required scope.
                             // Repeatable — `scope = "x.y", scope = "x.z"`
@@ -367,7 +383,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes })
+        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes, target })
     }
 }
 
@@ -466,6 +482,50 @@ pub struct HubMethodsAttrs {
     pub server_cfg: Option<String>,
     /// Span of `server_cfg`, for diagnostics.
     pub server_cfg_span: Option<proc_macro2::Span>,
+    /// AUTH-3: default roles, `roles(viewer = ["get", …], editor = [viewer,
+    /// "create", …])` — each an explicit list of this activation's methods,
+    /// or roles declared before it. Validated in `generate_all` against the
+    /// methods; emitted as `PluginSchema.roles` (flattened to grants).
+    pub roles: Vec<RoleDecl>,
+}
+
+/// AUTH-3: one `name = [entry, …]` of `roles(...)`.
+pub struct RoleDecl {
+    pub name: syn::Ident,
+    pub entries: Vec<RoleEntry>,
+}
+
+/// AUTH-3: a role's entry — a method of the activation (`"get"`) or an
+/// earlier role (`viewer`).
+pub enum RoleEntry {
+    Method(syn::LitStr),
+    Role(syn::Ident),
+}
+
+impl Parse for RoleDecl {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let name: syn::Ident = input.parse()?;
+        input.parse::<Token![=]>()?;
+        let content;
+        syn::bracketed!(content in input);
+        let mut entries = Vec::new();
+        while !content.is_empty() {
+            if content.peek(syn::LitStr) {
+                entries.push(RoleEntry::Method(content.parse()?));
+            } else if content.peek(syn::Ident) {
+                entries.push(RoleEntry::Role(content.parse()?));
+            } else {
+                return Err(content.error(
+                    "a role lists methods as strings (\"get\") and earlier roles by name (viewer)",
+                ));
+            }
+            if content.is_empty() {
+                break;
+            }
+            content.parse::<Token![,]>()?;
+        }
+        Ok(RoleDecl { name, entries })
+    }
 }
 
 /// RED-6: declared auth enforcement posture for an activation.
@@ -504,6 +564,8 @@ impl Parse for HubMethodsAttrs {
         let mut client_span: Option<proc_macro2::Span> = None;
         let mut server_cfg: Option<String> = None;
         let mut server_cfg_span: Option<proc_macro2::Span> = None;
+        // AUTH-3: default roles.
+        let mut roles: Vec<RoleDecl> = Vec::new();
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -606,6 +668,12 @@ impl Parse for HubMethodsAttrs {
                         }
                         // REQ-10: required = [field_a, field_b, ...] — activation-level
                         // lock list. Methods may not drop these with `request = ()`.
+                        else if list.path.is_ident("roles") {
+                            // AUTH-3: roles(viewer = ["get"], editor = [viewer, "create"])
+                            let parser = Punctuated::<RoleDecl, Token![,]>::parse_terminated;
+                            let decls = syn::parse::Parser::parse2(parser, list.tokens.clone())?;
+                            roles.extend(decls);
+                        }
                         else if list.path.is_ident("required") {
                             let parser = Punctuated::<syn::Ident, Token![,]>::parse_terminated;
                             let idents = syn::parse::Parser::parse2(parser, list.tokens.clone())?;
@@ -645,6 +713,7 @@ impl Parse for HubMethodsAttrs {
             client_span,
             server_cfg,
             server_cfg_span,
+            roles,
         })
     }
 }
@@ -1381,6 +1450,47 @@ pub struct MethodInfo {
     /// IR-3: parsed `#[deprecated(...)]` + `#[plexus_macros::removed_in]` info
     /// folded into the emitted `MethodSchema.deprecation` field.
     pub deprecation: Option<ParsedDeprecation>,
+    /// AUTH-3: `target = "param"`, validated against `params`; emitted as
+    /// `MethodSchema.target`.
+    pub target: Option<String>,
+    /// AUTH-3: the `///` doc comment when an explicit `description = "..."`
+    /// replaced it as the description — what it says beyond the
+    /// description; emitted as `MethodSchema.long_description`.
+    pub long_description: Option<String>,
+    /// AUTH-2/AUTH-3: the method declares `reach: Reach` — the dispatch
+    /// hands it `current_reach()` (the gate's answer); stripped from the
+    /// RPC params like `auth`.
+    pub takes_reach: bool,
+}
+
+/// AUTH-3: the doc comment's text beyond `description`: the comment with a
+/// leading copy of the description (and the punctuation after it) removed;
+/// `None` when nothing is left.
+pub(crate) fn long_description_from(doc: &str, description: &str) -> Option<String> {
+    let doc = doc.trim();
+    let desc = description.trim();
+    let rest = if !desc.is_empty() && doc.starts_with(desc) {
+        doc[desc.len()..].trim_start_matches(|c: char| c == '.' || c == ':' || c == ';' || c.is_whitespace())
+    } else {
+        doc
+    };
+    let rest = rest.trim();
+    if rest.is_empty() || rest == desc {
+        None
+    } else {
+        Some(rest.to_string())
+    }
+}
+
+/// AUTH-2: is `ty` the framework's `Reach` (by its last path segment, as
+/// `AuthContext` is recognised)?
+fn is_reach_type(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty {
+        if let Some(last) = tp.path.segments.last() {
+            return last.ident == "Reach" && matches!(last.arguments, syn::PathArguments::None);
+        }
+    }
+    false
 }
 
 impl MethodInfo {
@@ -1396,9 +1506,15 @@ impl MethodInfo {
         //   2. Otherwise fall back to `///` doc comments on the method, joined with '\n'
         //      and with common leading whitespace stripped (same rule as `cargo doc`).
         //   3. If neither is present, description is the empty string.
-        let description = match hub_method_attrs.and_then(|a| a.description.clone()) {
-            Some(explicit) => explicit,
-            None => extract_doc_description(&method.attrs).unwrap_or_default(),
+        // AUTH-3: when an explicit description replaces the doc comment, the
+        // comment is kept as `long_description` (it used to be dropped).
+        let (description, long_description) = match hub_method_attrs.and_then(|a| a.description.clone()) {
+            Some(explicit) => {
+                let long = extract_doc_description(&method.attrs)
+                    .and_then(|doc| long_description_from(&doc, &explicit));
+                (explicit, long)
+            }
+            None => (extract_doc_description(&method.attrs).unwrap_or_default(), None),
         };
 
         // Get param docs and returns_variants from hub_method attrs
@@ -1434,11 +1550,34 @@ impl MethodInfo {
 
         // Extract parameters after &self
         let mut params = Vec::new();
+        // AUTH-2: `reach: Reach`, and where it sits among the typed args.
+        let mut takes_reach = false;
+        let mut typed_index = 0usize;
+        let mut auth_at: Option<usize> = None;
         for arg in &method.sig.inputs {
             if let FnArg::Typed(pat_type) = arg {
+                let this_index = typed_index;
+                typed_index += 1;
                 if let Pat::Ident(ident) = &*pat_type.pat {
                     let name = ident.ident.clone();
                     let name_str = name.to_string();
+
+                    // AUTH-2: `reach: Reach` is provided by the framework (the
+                    // gate's answer). It must come first, or right after
+                    // `auth`, because the dispatch passes the framework's
+                    // arguments ahead of the RPC params.
+                    if name_str == "reach" && is_reach_type(&pat_type.ty) {
+                        let first = this_index == 0 || auth_at == Some(this_index - 1);
+                        if !first {
+                            return Err(syn::Error::new_spanned(
+                                pat_type,
+                                "`reach: Reach` must be the first parameter after `&self`, \
+                                 or come right after `auth`",
+                            ));
+                        }
+                        takes_reach = true;
+                        continue;
+                    }
 
                     // Check for #[activation_param] attribute first
                     // e.g. #[activation_param] auth_token: String
@@ -1475,6 +1614,7 @@ impl MethodInfo {
                             // the user wrote so codegen emits the right
                             // unwrap/pass-through behavior.
                             auth_optional = matches!(shape, AuthParamShape::Optional);
+                            auth_at = Some(this_index);
                             // Don't include auth in params (it's provided by framework)
                             continue;
                         }
@@ -1559,6 +1699,27 @@ impl MethodInfo {
             .map(|a| a.scopes.clone())
             .unwrap_or_default();
 
+        // AUTH-3: `target` must name one of the RPC params.
+        let target = match hub_method_attrs.and_then(|a| a.target.as_ref()) {
+            None => None,
+            Some(lit) => {
+                let wanted = lit.value();
+                if !params.iter().any(|p: &ParamInfo| p.name == wanted.as_str()) {
+                    let known: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        format!(
+                            "target = \"{}\" names no parameter of `{}`; its parameters are: {}",
+                            wanted,
+                            fn_name,
+                            if known.is_empty() { "(none)".to_string() } else { known.join(", ") },
+                        ),
+                    ));
+                }
+                Some(wanted)
+            }
+        };
+
         Ok(MethodInfo {
             fn_name,
             method_name,
@@ -1578,6 +1739,9 @@ impl MethodInfo {
             public,
             scopes,
             deprecation,
+            target,
+            long_description,
+            takes_reach,
         })
     }
 }
@@ -2033,6 +2197,7 @@ mod tests {
             request_override: None,
             public: false,
             scopes: vec![],
+            target: None,
         };
         let info = MethodInfo::from_fn(&method, Some(&attrs)).expect("parses cleanly");
         let param = info.params.iter().find(|p| p.name == "message").unwrap();
