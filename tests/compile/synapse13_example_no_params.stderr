@@ -1,0 +1,5 @@
+error: example(...) needs params; example(...) takes note = "what it does" and params = r#"{ JSON object }"#, e.g. example(note = "set MENGER-40 to Coding", params = r#"{"id": "MENGER-40", "status": "Coding"}"#)
+ --> tests/compile/synapse13_example_no_params.rs:8:29
+  |
+8 |     #[plexus_macros::method(example(note = "nothing"))]
+  |                             ^^^^^^^

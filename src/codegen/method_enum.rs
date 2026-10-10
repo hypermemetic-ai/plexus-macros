@@ -289,6 +289,44 @@ pub fn generate(
         })
         .unzip();
 
+    // SYNAPSE-13: per-method group, examples and param values.
+    let method_groups: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| match &m.group {
+            Some(g) => quote! { ::std::option::Option::Some(#g) },
+            None => quote! { ::std::option::Option::None },
+        })
+        .collect();
+    let method_examples: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| {
+            let entries: Vec<TokenStream> = m
+                .examples
+                .iter()
+                .map(|ex| {
+                    let json = &ex.params_json;
+                    let note = match &ex.note {
+                        Some(n) => quote! { ::std::option::Option::Some(#n) },
+                        None => quote! { ::std::option::Option::None },
+                    };
+                    quote! { (#json, #note) }
+                })
+                .collect();
+            quote! { &[#(#entries),*] as &[(&str, ::std::option::Option<&str>)] }
+        })
+        .collect();
+    let method_values: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| {
+            let entries: Vec<TokenStream> = m
+                .values
+                .iter()
+                .map(|(p, vals)| quote! { (#p, &[#(#vals),*] as &[&str]) })
+                .collect();
+            quote! { &[#(#entries),*] as &[(&str, &[&str])] }
+        })
+        .collect();
+
     // IR-3: child-method schema entries. `#[child]` methods are NOT emitted as
     // RPC variants on the method enum (they don't take an RPC dispatch path),
     // but they DO contribute `MethodSchema` entries with `role = StaticChild`
@@ -517,6 +555,10 @@ pub fn generate(
                 let grants: &[&str] = &[#(#method_grants),*];
                 let targets: &[::std::option::Option<&str>] = &[#(#method_targets),*];
                 let long_descriptions: &[::std::option::Option<&str>] = &[#(#method_long_descriptions),*];
+                // SYNAPSE-13: groups, examples (params JSON, note), param values.
+                let groups: &[::std::option::Option<&str>] = &[#(#method_groups),*];
+                let examples: Vec<&[(&str, ::std::option::Option<&str>)]> = vec![#(#method_examples),*];
+                let param_values: Vec<&[(&str, &[&str])]> = vec![#(#method_values),*];
                 let activation_request_schema: Option<#deps::schemars::Schema> = #activation_request_schema_expr;
                 let activation_request_props: Option<#deps::serde_json::Map<String, #deps::serde_json::Value>> =
                     activation_request_schema
@@ -648,6 +690,24 @@ pub fn generate(
                         }
                         if let ::std::option::Option::Some(l) = long_descriptions[i] {
                             schema = schema.with_long_description(l);
+                        }
+
+                        // SYNAPSE-13: the listing group, the worked calls
+                        // (checked to be JSON objects at expansion), and the
+                        // values each param is meant to take.
+                        if let ::std::option::Option::Some(g) = groups[i] {
+                            schema = schema.with_group(g);
+                        }
+                        for (json, note) in examples[i].iter() {
+                            let params: #deps::serde_json::Value = #deps::serde_json::from_str(json)
+                                .expect("example params were checked to be JSON at expansion");
+                            schema = schema.with_example(#crate_path::plexus::MethodExample {
+                                params,
+                                note: note.map(|n| n.to_string()),
+                            });
+                        }
+                        for (param, vals) in param_values[i].iter() {
+                            schema = schema.with_param_values(param, vals.iter().copied());
                         }
 
                         // R-1: explicit `scope = "..."` requirements →
@@ -854,6 +914,23 @@ fn compute_method_hash(method: &MethodInfo) -> String {
     if let Some(t) = &method.target {
         "target".hash(&mut hasher);
         t.hash(&mut hasher);
+    }
+    // SYNAPSE-13: group, examples and values change what a client shows, so
+    // they change the hash (a cached schema is refetched); each hashed only
+    // when present, so a method without them keeps its hash.
+    if let Some(g) = &method.group {
+        "group".hash(&mut hasher);
+        g.hash(&mut hasher);
+    }
+    for ex in &method.examples {
+        "example".hash(&mut hasher);
+        ex.params_json.hash(&mut hasher);
+        ex.note.hash(&mut hasher);
+    }
+    for (p, vals) in &method.values {
+        "values".hash(&mut hasher);
+        p.hash(&mut hasher);
+        vals.hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())
 }

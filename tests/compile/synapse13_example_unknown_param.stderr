@@ -1,0 +1,5 @@
+error: example params name `state`, no parameter of `set_status`; its parameters are: id, status
+ --> tests/compile/synapse13_example_unknown_param.rs:8:46
+  |
+8 |     #[plexus_macros::method(example(params = r#"{"id": "MNG-1", "state": "Ready"}"#))]
+  |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

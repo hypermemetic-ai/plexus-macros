@@ -1,0 +1,5 @@
+error: example params are not JSON: key must be a string at line 1 column 2
+ --> tests/compile/synapse13_example_not_json.rs:8:58
+  |
+8 |     #[plexus_macros::method(example(note = "n", params = "{id: MNG-1}"))]
+  |                                                          ^^^^^^^^^^^^^

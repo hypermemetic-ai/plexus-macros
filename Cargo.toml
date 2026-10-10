@@ -29,6 +29,9 @@ proc-macro-crate = "3"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
 uuid = { version = "1.0", features = ["v5"] }
+# SYNAPSE-13: an `example(params = r#"{…}"#)` is checked to be a JSON object
+# naming the method's params at expansion time.
+serde_json = "1.0"
 
 [features]
 # Enables the no-op JsonSchema proc_macro_derive, used by plexus-schemars-compat

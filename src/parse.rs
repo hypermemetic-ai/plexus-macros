@@ -125,6 +125,105 @@ pub struct HubMethodAttrs {
     /// acts on. Must name one of the method's RPC params (checked in
     /// [`MethodInfo::from_fn`]).
     pub target: Option<syn::LitStr>,
+    /// SYNAPSE-13: `group = "write"` — the method's group in a listing
+    /// (OpenAPI's tag); emitted as `MethodSchema.group`.
+    pub group: Option<String>,
+    /// SYNAPSE-13: `example(note = "…", params = r#"{…}"#)`, repeatable —
+    /// worked calls, emitted as `MethodSchema.examples`. The params are
+    /// checked to be a JSON object here and to name only the method's
+    /// params in [`MethodInfo::from_fn`].
+    pub examples: Vec<ParsedExample>,
+    /// SYNAPSE-13: `values(status = ["Pending", "Ready"], …)` — the values a
+    /// param is meant to take, a non-enforcing hint emitted as
+    /// `x-plexus-values` on the param's property. Checked to name params in
+    /// [`MethodInfo::from_fn`].
+    pub values: Vec<(syn::Ident, Vec<String>)>,
+}
+
+/// SYNAPSE-13: one `example(note = "…", params = r#"{…}"#)` on a method.
+#[derive(Debug, Clone)]
+pub struct ParsedExample {
+    /// What the call does, in a line (optional).
+    pub note: Option<String>,
+    /// The params object, as JSON text (validated to be an object).
+    pub params_json: String,
+    /// The params object's keys, in order, to check against the method.
+    pub keys: Vec<String>,
+    /// Where the params literal is, for errors.
+    pub span: proc_macro2::Span,
+}
+
+/// SYNAPSE-13: parse `example(note = "…", params = "{…}")`'s arguments.
+fn parse_example(path: &syn::Path, tokens: proc_macro2::TokenStream) -> syn::Result<ParsedExample> {
+    let usage = "example(...) takes note = \"what it does\" and params = r#\"{ JSON object }\"#, \
+                 e.g. example(note = \"set MENGER-40 to Coding\", params = r#\"{\"id\": \"MENGER-40\", \"status\": \"Coding\"}\"#)";
+    let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
+    let nested = syn::parse::Parser::parse2(parser, tokens)
+        .map_err(|e| syn::Error::new(e.span(), format!("{e}; {usage}")))?;
+    let mut note = None;
+    let mut params: Option<syn::LitStr> = None;
+    for nv in nested {
+        let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &nv.value else {
+            return Err(syn::Error::new_spanned(&nv.value, format!("expected a string literal; {usage}")));
+        };
+        if nv.path.is_ident("note") {
+            if note.is_some() {
+                return Err(syn::Error::new_spanned(&nv.path, "example(...) takes one note"));
+            }
+            note = Some(s.value());
+        } else if nv.path.is_ident("params") {
+            if params.is_some() {
+                return Err(syn::Error::new_spanned(&nv.path, "example(...) takes one params"));
+            }
+            params = Some(s.clone());
+        } else {
+            return Err(syn::Error::new_spanned(&nv.path, format!("unknown key in example(...); {usage}")));
+        }
+    }
+    let Some(lit) = params else {
+        return Err(syn::Error::new_spanned(path, format!("example(...) needs params; {usage}")));
+    };
+    let text = lit.value();
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        syn::Error::new(lit.span(), format!("example params are not JSON: {e}"))
+    })?;
+    let serde_json::Value::Object(map) = &value else {
+        return Err(syn::Error::new(lit.span(), "example params must be a JSON object of the method's params, e.g. {\"id\": \"MENGER-40\"}"));
+    };
+    let keys = map.keys().cloned().collect();
+    Ok(ParsedExample { note, params_json: value.to_string(), keys, span: lit.span() })
+}
+
+/// SYNAPSE-13: parse `values(param = ["A", "B"], …)`'s arguments.
+fn parse_values(tokens: proc_macro2::TokenStream) -> syn::Result<Vec<(syn::Ident, Vec<String>)>> {
+    let usage = "values(...) takes param = [\"A\", \"B\", …] pairs, e.g. values(status = [\"Pending\", \"Ready\"])";
+    let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
+    let nested = syn::parse::Parser::parse2(parser, tokens)
+        .map_err(|e| syn::Error::new(e.span(), format!("{e}; {usage}")))?;
+    let mut out: Vec<(syn::Ident, Vec<String>)> = Vec::new();
+    for nv in nested {
+        let Some(ident) = nv.path.get_ident().cloned() else {
+            return Err(syn::Error::new_spanned(&nv.path, format!("expected a parameter name; {usage}")));
+        };
+        if out.iter().any(|(i, _)| *i == ident) {
+            return Err(syn::Error::new_spanned(&ident, format!("values for `{ident}` are given twice")));
+        }
+        let Expr::Array(arr) = &nv.value else {
+            return Err(syn::Error::new_spanned(&nv.value, format!("expected an array of string literals; {usage}")));
+        };
+        let mut vals = Vec::new();
+        for el in &arr.elems {
+            let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = el else {
+                return Err(syn::Error::new_spanned(el, format!("expected a string literal; {usage}")));
+            };
+            vals.push(s.value());
+        }
+        if vals.is_empty() {
+            return Err(syn::Error::new_spanned(&nv.value, format!("values for `{ident}` are empty; {usage}")));
+        }
+        out.push((ident, vals));
+    }
+    Ok(out)
 }
 
 /// R-1 (AUTHZ-CORE-2 acceptance criterion #3): validate a `scope = "..."`
@@ -193,6 +292,10 @@ impl Parse for HubMethodAttrs {
         let mut first_scope_span: Option<proc_macro2::Span> = None;
         // AUTH-3: `target = "param"`.
         let mut target: Option<syn::LitStr> = None;
+        // SYNAPSE-13: group, examples, values.
+        let mut group: Option<String> = None;
+        let mut examples: Vec<ParsedExample> = Vec::new();
+        let mut values: Vec<(syn::Ident, Vec<String>)> = Vec::new();
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -262,6 +365,20 @@ impl Parse for HubMethodAttrs {
                                 ));
                             };
                             target = Some(s);
+                        } else if path.is_ident("group") {
+                            // SYNAPSE-13: the method's group in a listing.
+                            let usage = "group = ... expects a non-empty string, e.g. \
+                                         #[plexus_macros::method(group = \"write\")]";
+                            let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value else {
+                                return Err(syn::Error::new_spanned(&path, usage));
+                            };
+                            if s.value().trim().is_empty() {
+                                return Err(syn::Error::new(s.span(), usage));
+                            }
+                            if group.is_some() {
+                                return Err(syn::Error::new(s.span(), "a method has one group"));
+                            }
+                            group = Some(s.value().trim().to_string());
                         } else if path.is_ident("scope") {
                             // R-1 (AUTHZ-CORE-2): explicit required scope.
                             // Repeatable — `scope = "x.y", scope = "x.z"`
@@ -326,6 +443,22 @@ impl Parse for HubMethodAttrs {
                                     }
                                 }
                             }
+                        } else if path.is_ident("example") {
+                            // SYNAPSE-13: a worked call, repeatable.
+                            examples.push(parse_example(&path, tokens.clone())?);
+                        } else if path.is_ident("examples") {
+                            return Err(syn::Error::new_spanned(
+                                &path,
+                                "write each example as its own example(note = \"…\", params = r#\"{…}\"#)",
+                            ));
+                        } else if path.is_ident("values") {
+                            // SYNAPSE-13: the values a param is meant to take.
+                            for (ident, vals) in parse_values(tokens.clone())? {
+                                if values.iter().any(|(i, _)| *i == ident) {
+                                    return Err(syn::Error::new_spanned(&ident, format!("values for `{ident}` are given twice")));
+                                }
+                                values.push((ident, vals));
+                            }
                         } else if path.is_ident("returns") {
                             // Parse returns(Variant1, Variant2, Error)
                             let parser = Punctuated::<syn::Ident, Token![,]>::parse_terminated;
@@ -383,7 +516,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes, target })
+        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes, target, group, examples, values })
     }
 }
 
@@ -1457,6 +1590,14 @@ pub struct MethodInfo {
     /// replaced it as the description — what it says beyond the
     /// description; emitted as `MethodSchema.long_description`.
     pub long_description: Option<String>,
+    /// SYNAPSE-13: `group = "…"`; emitted as `MethodSchema.group`.
+    pub group: Option<String>,
+    /// SYNAPSE-13: `example(...)`s, checked against `params`; emitted as
+    /// `MethodSchema.examples`.
+    pub examples: Vec<ParsedExample>,
+    /// SYNAPSE-13: `values(...)`, checked against `params`; emitted as
+    /// `x-plexus-values` on each param's property.
+    pub values: Vec<(String, Vec<String>)>,
     /// AUTH-2/AUTH-3: the method declares `reach: Reach` — the dispatch
     /// hands it `current_reach()` (the gate's answer); stripped from the
     /// RPC params like `auth`.
@@ -1720,6 +1861,40 @@ impl MethodInfo {
             }
         };
 
+        // SYNAPSE-13: values and examples name only the method's params.
+        let known_params = || -> String {
+            let known: Vec<String> = params.iter().map(|p: &ParamInfo| p.name.to_string()).collect();
+            if known.is_empty() { "(none)".to_string() } else { known.join(", ") }
+        };
+        let mut values: Vec<(String, Vec<String>)> = Vec::new();
+        for (ident, vals) in hub_method_attrs.map(|a| a.values.clone()).unwrap_or_default() {
+            if !params.iter().any(|p: &ParamInfo| p.name == ident) {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!(
+                        "values(...) names `{}`, no parameter of `{}`; its parameters are: {}",
+                        ident, fn_name, known_params(),
+                    ),
+                ));
+            }
+            values.push((ident.to_string(), vals));
+        }
+        let examples = hub_method_attrs.map(|a| a.examples.clone()).unwrap_or_default();
+        for ex in &examples {
+            for key in &ex.keys {
+                if !params.iter().any(|p: &ParamInfo| p.name == key.as_str()) {
+                    return Err(syn::Error::new(
+                        ex.span,
+                        format!(
+                            "example params name `{}`, no parameter of `{}`; its parameters are: {}",
+                            key, fn_name, known_params(),
+                        ),
+                    ));
+                }
+            }
+        }
+        let group = hub_method_attrs.and_then(|a| a.group.clone());
+
         Ok(MethodInfo {
             fn_name,
             method_name,
@@ -1741,6 +1916,9 @@ impl MethodInfo {
             deprecation,
             target,
             long_description,
+            group,
+            examples,
+            values,
             takes_reach,
         })
     }
@@ -2198,6 +2376,9 @@ mod tests {
             public: false,
             scopes: vec![],
             target: None,
+            group: None,
+            examples: vec![],
+            values: vec![],
         };
         let info = MethodInfo::from_fn(&method, Some(&attrs)).expect("parses cleanly");
         let param = info.params.iter().find(|p| p.name == "message").unwrap();

@@ -1,0 +1,5 @@
+error: expected a string literal; values(...) takes param = ["A", "B", …] pairs, e.g. values(status = ["Pending", "Ready"])
+ --> tests/compile/synapse13_values_not_strings.rs:8:46
+  |
+8 |     #[plexus_macros::method(values(status = [1, 2]))]
+  |                                              ^

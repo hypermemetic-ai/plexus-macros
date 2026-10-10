@@ -1,0 +1,5 @@
+error: values(...) names `state`, no parameter of `set_status`; its parameters are: id, status
+ --> tests/compile/synapse13_values_unknown_param.rs:8:36
+  |
+8 |     #[plexus_macros::method(values(state = ["Pending"]))]
+  |                                    ^^^^^

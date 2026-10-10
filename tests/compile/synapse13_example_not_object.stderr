@@ -1,0 +1,5 @@
+error: example params must be a JSON object of the method's params, e.g. {"id": "MENGER-40"}
+ --> tests/compile/synapse13_example_not_object.rs:8:46
+  |
+8 |     #[plexus_macros::method(example(params = r#"["MNG-1"]"#))]
+  |                                              ^^^^^^^^^^^^^^

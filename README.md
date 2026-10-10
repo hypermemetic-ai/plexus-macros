@@ -715,6 +715,9 @@ Attached to methods inside an `#[activation]` impl. Marks the method as an RPC e
 | `http_method = "..."` | string | _(none)_ | One of `GET\|POST\|PUT\|DELETE\|PATCH`. Hint for REST generators. |
 | `params(name = "doc", ...)` | key/value list | _(empty)_ | Per-parameter descriptions. Less common now that field-level `///` extraction works; retained for cases where parameters have no natural Rust doc site. |
 | `returns(Variant, ...)` | ident list | _(all variants)_ | Filter the return enum to named variants. Rare. |
+| `group = "..."` | string | _(none)_ | SYNAPSE-13: the method's group in a listing (`"read"`, `"write"`, …) — OpenAPI's tag, one per method. `MethodSchema.group`; synapse lists a group's methods together, the groups in the order they first appear. |
+| `values(param = ["A", "B"], ...)` | key / string-array list | _(none)_ | SYNAPSE-13: the values a param is meant to take — a hint, never enforced (the method may accept synonyms). Emitted as `x-plexus-values` on the param's property; synapse shows `[values: …]`. A name that is no param is a compile error. |
+| `example(note = "...", params = r#"{...}"#)` | repeatable | _(none)_ | SYNAPSE-13: a worked call — a JSON object of the method's params (checked at expansion: JSON, an object, naming only its params) and a note. `MethodSchema.examples`; synapse renders each as a command line. Use `r##"…"##` when the JSON holds `"#`. |
 | `request = ()` | tuple | _(inherits)_ | Skip activation-level request extraction for this method (public endpoint escape hatch). |
 | `request = OtherType` | type | _(inherits)_ | Reserved — per-method request type override is not yet wired end-to-end. |
 
