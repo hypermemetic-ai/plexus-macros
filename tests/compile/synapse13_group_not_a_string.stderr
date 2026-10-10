@@ -1,0 +1,5 @@
+error: group = ... expects a non-empty string, e.g. #[plexus_macros::method(group = "write")]
+ --> tests/compile/synapse13_group_not_a_string.rs:8:29
+  |
+8 |     #[plexus_macros::method(group = write)]
+  |                             ^^^^^
