@@ -1,0 +1,5 @@
+error: `admin` is built in and holds every grant; it needs no list
+ --> tests/compile/auth3_role_admin_declared.rs:6:80
+  |
+6 | #[plexus_macros::activation(namespace = "t", crate_path = "plexus_core", roles(admin = ["get"]))]
+  |                                                                                ^^^^^

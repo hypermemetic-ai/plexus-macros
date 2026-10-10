@@ -1,0 +1,5 @@
+error: role `viewer` lists "lst", which is not a method of this activation; its methods are: get, list
+ --> tests/compile/auth3_role_unknown_method.rs:6:97
+  |
+6 | #[plexus_macros::activation(namespace = "t", crate_path = "plexus_core", roles(viewer = ["get", "lst"]))]
+  |                                                                                                 ^^^^^

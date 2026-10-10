@@ -23,6 +23,9 @@ pub fn generate(
     // `with_auth_posture`; `None` (posture never declared) emits nothing so
     // posture-silent activations keep their pre-R-1 wire shape.
     auth_posture: Option<AuthPosture>,
+    // AUTH-3: the activation's namespace — each method's grant is
+    // `<namespace>.<method>`.
+    namespace: &str,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
 
@@ -117,6 +120,25 @@ pub fn generate(
 
     // Compute hashes at compile time for each method
     let method_hashes: Vec<String> = methods.iter().map(compute_method_hash).collect();
+
+    // AUTH-3: per-method grant (always), target and long description.
+    let method_grants: Vec<String> =
+        methods.iter().map(|m| format!("{}.{}", namespace, m.method_name)).collect();
+    let schema_grant = format!("{}.schema", namespace);
+    let method_targets: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| match &m.target {
+            Some(t) => quote! { ::std::option::Option::Some(#t) },
+            None => quote! { ::std::option::Option::None },
+        })
+        .collect();
+    let method_long_descriptions: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| match &m.long_description {
+            Some(t) => quote! { ::std::option::Option::Some(#t) },
+            None => quote! { ::std::option::Option::None },
+        })
+        .collect();
 
     // Generate return type schemas for each method
     // Each entry is a tuple of (full_schema, variant_filter)
@@ -491,6 +513,10 @@ pub fn generate(
                 let method_override_is_skip: &[bool] = &[#(#method_override_is_skip),*];
                 // R-1: per-method explicit-public flags (AUTHZ-CORE-2).
                 let public_flags: &[bool] = &[#(#public_flags),*];
+                // AUTH-3: grants, targets, long descriptions.
+                let grants: &[&str] = &[#(#method_grants),*];
+                let targets: &[::std::option::Option<&str>] = &[#(#method_targets),*];
+                let long_descriptions: &[::std::option::Option<&str>] = &[#(#method_long_descriptions),*];
                 let activation_request_schema: Option<#deps::schemars::Schema> = #activation_request_schema_expr;
                 let activation_request_props: Option<#deps::serde_json::Map<String, #deps::serde_json::Value>> =
                     activation_request_schema
@@ -614,6 +640,16 @@ pub fn generate(
                             schema = schema.with_public(true);
                         }
 
+                        // AUTH-3: the inherent grant; the target param; the
+                        // doc comment beyond the description.
+                        schema = schema.with_grant(grants[i]);
+                        if let ::std::option::Option::Some(t) = targets[i] {
+                            schema = schema.with_target(t);
+                        }
+                        if let ::std::option::Option::Some(l) = long_descriptions[i] {
+                            schema = schema.with_long_description(l);
+                        }
+
                         // R-1: explicit `scope = "..."` requirements →
                         // `requires_credential` (AUTHZ-CORE-2). Compile-time
                         // per-index match, same shape as the bidir calls.
@@ -691,7 +727,8 @@ pub fn generate(
                     "schema".to_string(),
                     "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.".to_string(),
                     "auto_schema".to_string(), // Fixed hash since it's auto-generated
-                );
+                )
+                .with_grant(#schema_grant);
                 methods.push(schema_method);
 
                 // IR-3: append `#[child]` method entries. Each entry's role is
@@ -812,6 +849,12 @@ fn compute_method_hash(method: &MethodInfo) -> String {
         ty_str.hash(&mut hasher);
     }
 
+    // AUTH-3: a target is part of the method's contract; hashed only when
+    // present, so every method without one keeps its hash.
+    if let Some(t) = &method.target {
+        "target".hash(&mut hasher);
+        t.hash(&mut hasher);
+    }
     format!("{:016x}", hasher.finish())
 }
 
