@@ -1182,6 +1182,21 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
             let param_name = &param.name;
             let param_str = param_name.to_string();
             let is_option = crate::codegen::method_enum::is_option_type(&param.ty);
+            // AUTH-13: a bare value (not an object) is this one param — a
+            // shortcut, except for a method with a `target`: the gate reads
+            // the target by name, and a bare value names none.
+            let bare = if m.target.is_some() {
+                quote! {
+                    return Err(#crate_path::plexus::PlexusError::InvalidParams(
+                        format!("params must be an object naming `{}`: this method's target is read by name", #param_str)
+                    ))
+                }
+            } else {
+                quote! {
+                    #deps::serde_json::from_value(params.clone())
+                        .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
+                }
+            };
 
             if is_option {
                 // For Option<T>, missing field OR explicit null = None (not an error)
@@ -1195,8 +1210,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                                 .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
                         }
                         #deps::serde_json::Value::Null => None,
-                        _ => #deps::serde_json::from_value(params.clone())
-                            .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
+                        _ => #bare,
                     };
                 }
             } else {
@@ -1213,8 +1227,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                                 ));
                             }
                         }
-                        _ => #deps::serde_json::from_value(params.clone())
-                            .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?,
+                        _ => #bare,
                     };
                 }
             }
