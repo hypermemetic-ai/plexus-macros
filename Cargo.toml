@@ -19,6 +19,10 @@ version = "0.6.0"
 edition = "2021"
 license = "MIT"
 description = "Procedural macros for Plexus RPC activations"
+repository = "https://github.com/hypermemetic-ai/plexus-macros"
+# DIST-2: the published crate is the macro alone — not the plans, design
+# notes, fixtures or hooks that live beside it in the repository.
+include = ["src/**", "README.md", "Cargo.toml"]
 
 [lib]
 proc-macro = true
