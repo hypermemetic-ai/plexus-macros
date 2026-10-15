@@ -978,12 +978,49 @@ fn generate_dispatch_arms(
 
             // Generate #[from_auth(resolver)] calls
             // Each resolver is called with &auth_ctx and produces a named binding via ?
+            //
+            // MACRO-14: the resolver's error is converted, not stringified.
+            // A `PlexusError` (a typed `Forbidden` / `Unauthenticated`)
+            // passes through unchanged, so it reaches the wire with its code
+            // and `error_kind`; any other `Display` error is
+            // `ExecutionError(e.to_string())`, as before. The choice is made
+            // by autoref dispatch on the error's concrete type: the
+            // by-reference impl for `__PlexusResolverErr<PlexusError>` is
+            // found one autoref step before the blanket `Display` impl on
+            // `&__PlexusResolverErr<E>`, so no existing resolver changes.
             let resolver_bindings: Vec<proc_macro2::TokenStream> = m.auth_resolvers.iter().map(|r| {
                 let name = &r.param_name;
                 let expr = &r.resolver_expr;
                 quote! {
-                    let #name = #expr(&auth_ctx).await
-                        .map_err(|e| #crate_path::plexus::PlexusError::ExecutionError(e.to_string()))?;
+                    let #name = match #expr(&auth_ctx).await {
+                        ::std::result::Result::Ok(v) => v,
+                        ::std::result::Result::Err(e) => {
+                            #[allow(dead_code)]
+                            struct __PlexusResolverErr<E>(::std::cell::Cell<::std::option::Option<E>>);
+                            #[allow(dead_code)]
+                            trait __PlexusResolverTyped {
+                                fn __plexus_error(&self) -> #crate_path::plexus::PlexusError;
+                            }
+                            impl __PlexusResolverTyped for __PlexusResolverErr<#crate_path::plexus::PlexusError> {
+                                fn __plexus_error(&self) -> #crate_path::plexus::PlexusError {
+                                    self.0.take().expect("resolver error taken once")
+                                }
+                            }
+                            #[allow(dead_code)]
+                            trait __PlexusResolverDisplay {
+                                fn __plexus_error(&self) -> #crate_path::plexus::PlexusError;
+                            }
+                            impl<E: ::std::fmt::Display> __PlexusResolverDisplay for &__PlexusResolverErr<E> {
+                                fn __plexus_error(&self) -> #crate_path::plexus::PlexusError {
+                                    #crate_path::plexus::PlexusError::ExecutionError(
+                                        self.0.take().expect("resolver error taken once").to_string(),
+                                    )
+                                }
+                            }
+                            let __err = __PlexusResolverErr(::std::cell::Cell::new(::std::option::Option::Some(e)));
+                            return ::std::result::Result::Err((&__err).__plexus_error());
+                        }
+                    };
                 }
             }).collect();
 

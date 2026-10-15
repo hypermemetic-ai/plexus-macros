@@ -443,6 +443,8 @@ Two ways to consume the extracted fields in methods:
    ) -> impl Stream<Item = String> + Send + 'static { /* ... */ }
    ```
 
+   The resolver's error decides the refusal (MACRO-14). A resolver returning `Result<_, PlexusError>` is answered with that error unchanged — `Forbidden { MissingGrant { … } }` reaches the wire as `-32003` with `error_kind: "forbidden"` and its `grant` / `scope` / `roles` / `held_on`, `Unauthenticated` as `-32001` — so a refusal stays typed. Any other `Display` error is `ExecutionError(e.to_string())` (`-32000`).
+
 To **opt a method out** of activation-level extraction (e.g. a public health probe), use `request = ()`:
 
 ```rust,ignore
