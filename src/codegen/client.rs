@@ -13,11 +13,13 @@
 //! Tickets`, beside the activation's own items:
 //!
 //! ```ignore
-//! pub struct TicketsClient<T> { transport: T }
+//! pub struct TicketsClient<T> { transport: T, path: &'static str }
 //!
 //! impl<T> TicketsClient<T> {
 //!     pub const NAMESPACE: &'static str = "tickets";
 //!     pub fn new(transport: T) -> Self;
+//!     pub fn at(transport: T, path: &'static str) -> Self;   // MACRO-16
+//!     pub fn path(&self) -> &'static str;
 //!     pub fn transport(&self) -> &T;
 //!     pub fn into_transport(self) -> T;
 //! }
@@ -27,6 +29,7 @@
 //!     pub fn list(&self, epic: Option<String>, ..) -> EventStream<'_, TicketsEvent>;
 //!     pub async fn list_all(&self, epic: Option<String>, ..)
 //!         -> Result<Vec<TicketsEvent>, ClientError>;
+//!     pub fn inputs(&self) -> InputsClient<&T>;   // a static #[child], MACRO-16
 //! }
 //! ```
 //!
@@ -48,7 +51,7 @@
 //! tests assert absence rather than null. A client that sent `"parent":
 //! null` would be sending a shape the server never sends.
 
-use crate::parse::{MethodInfo, ParamInfo};
+use crate::parse::{ChildMethodInfo, ChildMethodKind, MethodInfo, ParamInfo};
 use proc_macro2::{Span, TokenStream};
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote};
@@ -151,9 +154,15 @@ pub(crate) fn generate(
     struct_name: &syn::Ident,
     namespace: &str,
     methods: &[MethodInfo],
+    children: &[ChildMethodInfo],
     client_path: &syn::Path,
 ) -> syn::Result<TokenStream> {
     let client_ty = format_ident!("{}Client", struct_name);
+    let child_accessors = children
+        .iter()
+        .filter(|c| matches!(c.kind, ChildMethodKind::Static))
+        .map(|c| child_accessor(c, namespace, client_path))
+        .collect::<syn::Result<Vec<TokenStream>>>()?;
 
     let mut method_items: Vec<TokenStream> = Vec::new();
     let mut consts: Vec<TokenStream> = Vec::new();
@@ -231,7 +240,7 @@ pub(crate) fn generate(
                 #client_path::decode::<#event_ty>(
                     #client_path::Transport::call(
                         &self.transport,
-                        Self::#const_ident,
+                        Self::#const_ident.at(self.path),
                         #client_path::__rt::serde_json::Value::Object(__params),
                     )
                 )
@@ -266,6 +275,9 @@ pub(crate) fn generate(
         #[derive(Debug, Clone, Copy, Default)]
         pub struct #client_ty<T> {
             transport: T,
+            /// MACRO-16: the dotted path this activation is reached at;
+            /// `""` for a hub's top-level activation (its namespace).
+            path: &'static str,
         }
 
         impl<T> #client_ty<T> {
@@ -274,7 +286,21 @@ pub(crate) fn generate(
 
             /// Wrap a transport.
             pub fn new(transport: T) -> Self {
-                Self { transport }
+                Self { transport, path: "" }
+            }
+
+            /// Wrap a transport, for this activation mounted at `path` —
+            /// the dotted route from the hub, e.g. `"tickets.inputs"` for a
+            /// `#[child]`. A parent's child accessor builds this; `new` is
+            /// `at(transport, NAMESPACE)`.
+            pub fn at(transport: T, path: &'static str) -> Self {
+                Self { transport, path: if path == Self::NAMESPACE { "" } else { path } }
+            }
+
+            /// The dotted path this client's calls go to: the namespace,
+            /// or the child path it was built at.
+            pub fn path(&self) -> &'static str {
+                if self.path.is_empty() { Self::NAMESPACE } else { self.path }
             }
 
             /// Borrow the underlying transport — for reading a
@@ -293,6 +319,64 @@ pub(crate) fn generate(
         impl<T: #client_path::Transport> #client_ty<T> {
             #(#consts)*
             #(#method_items)*
+            #(#child_accessors)*
+        }
+    })
+}
+
+/// MACRO-16: the accessor a parent's client gets for one static `#[child]`
+/// — `fn inputs(&self) -> InputsClient<&T>`, whose calls go to
+/// `<this client's path>.inputs.<method>`, as the hub routes them.
+///
+/// The child's client is named from the accessor's return type: its last
+/// path segment with `Client` appended (`Inputs` → `InputsClient`, keeping
+/// any module path), never from the child struct itself — a struct that is
+/// server-only (`server_cfg`) does not exist in the client half. So the
+/// child must be declared with `client` too; if it is not, the name does
+/// not resolve and rustc points at the accessor's return type.
+///
+/// Dynamic children (`fn name(&self, id: &str) -> Option<Child>`) get no
+/// accessor: their route segment is a runtime name. A recorded follow-up.
+fn child_accessor(c: &ChildMethodInfo, namespace: &str, client: &syn::Path) -> syn::Result<TokenStream> {
+    let Type::Path(tp) = &c.return_ty else {
+        return Err(syn::Error::new_spanned(
+            &c.return_ty,
+            "#[plexus_macros::activation(client)]: a static #[child] must return its activation type by \
+             name (`-> Inputs`) so the client can reach it through `InputsClient`",
+        ));
+    };
+    let mut child_client = tp.path.clone();
+    let Some(last) = child_client.segments.last_mut() else {
+        return Err(syn::Error::new_spanned(&c.return_ty, "#[child]: empty return type path"));
+    };
+    let ident = format_ident!("{}Client", last.ident, span = last.ident.span());
+    last.ident = ident.clone();
+    last.arguments = syn::PathArguments::None;
+    if tp.qself.is_some() {
+        return Err(syn::Error::new_spanned(
+            &c.return_ty,
+            "#[plexus_macros::activation(client)]: a static #[child]'s return type must be a plain path",
+        ));
+    }
+
+    let fn_name = &c.fn_name;
+    let segment = fn_name.to_string();
+    let doc = if c.description.is_empty() {
+        format!("The `{segment}` child — its methods go to `{namespace}.{segment}.<method>`.")
+    } else {
+        format!(
+            "{}\n\nThe `{segment}` child — its methods go to `{namespace}.{segment}.<method>` \
+             (or beneath wherever this client is mounted).",
+            c.description
+        )
+    };
+    Ok(quote! {
+        #[doc = #doc]
+        pub fn #fn_name(&self) -> #child_client<&T> {
+            #child_client::at(
+                &self.transport,
+                #client::__rt::join_path(self.path(), #segment),
+            )
         }
     })
 }

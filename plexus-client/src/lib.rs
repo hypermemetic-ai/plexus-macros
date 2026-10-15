@@ -89,4 +89,5 @@ pub use ws::WsTransport;
 #[doc(hidden)]
 pub mod __rt {
     pub use serde_json;
+    pub use crate::transport::join_path;
 }

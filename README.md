@@ -579,6 +579,7 @@ an unresolved import in code you did not write.
 | **Transport-generic** | any `plexus_client::Transport` — in-process, WebSocket JSON-RPC, REST + SSE. The emitted code names none of them. |
 | **Two error layers** | `ClientError::Transport` (the connection failed) vs `ClientError::Remote` (the server answered `error`). An activation's *own* `Error` variant stays a data event. |
 | **Zero drift** | rename a field on an event type and every consumer of the client stops compiling. |
+| **Children** (MACRO-16) | a static `#[child] fn inputs(&self) -> Inputs` gives the parent's client `fn inputs(&self) -> InputsClient<&T>`, whose calls go to `tickets.inputs.<method>`, the path the hub routes. Accessors nest, so `client.inputs().history().tail(..)` goes to `tickets.inputs.history.tail`. The child must be declared with `client` too, or `InputsClient` does not resolve at the accessor's return type. `InputsClient::new(t)` alone still sends `inputs.<method>`. `InputsClient::at(t, "tickets.inputs")` mounts it by hand. Dynamic children (`fn x(&self, name: &str)`) get no accessor. |
 
 `Option` parameters that are `None` are **omitted** from the params object,
 not sent as `null` — matching what a server with

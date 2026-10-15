@@ -20,4 +20,7 @@ fn client_compile_fail() {
     // A method with no event type cannot be on the client, and being told so
     // beats finding it missing later.
     t.compile_fail("tests/compile/client_non_stream_method.rs");
+    // MACRO-16: a parent's child accessor names the child's client, so a
+    // child without `client` is an error at the accessor's return type.
+    t.compile_fail("tests/compile/macro16_child_without_client.rs");
 }

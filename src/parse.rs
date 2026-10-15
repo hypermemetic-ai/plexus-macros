@@ -908,6 +908,10 @@ pub struct ChildMethodInfo {
     /// IR-3: parsed `#[deprecated(...)]` + `#[plexus_macros::removed_in]` info
     /// folded into the emitted `MethodSchema.deprecation` field.
     pub deprecation: Option<ParsedDeprecation>,
+    /// MACRO-16: the declared return type — `Child` for a static child,
+    /// `Option<Child>` for a dynamic one. The client codegen names the
+    /// child's generated client from it.
+    pub return_ty: syn::Type,
 }
 
 impl ChildMethodInfo {
@@ -975,13 +979,16 @@ impl ChildMethodInfo {
         // return value (`ChildRouter + Clone + Send + Sync + 'static`) are
         // enforced by the generated code, not here — that gives better
         // error messages pointing at the user's type.
-        if matches!(method.sig.output, ReturnType::Default) {
-            return Err(syn::Error::new_spanned(
-                &method.sig,
-                "unsupported child method signature: a #[child] method must declare a return type \
-                 (either `-> Child` for a static child or `-> Option<Child>` for a dynamic child)",
-            ));
-        }
+        let return_ty = match &method.sig.output {
+            ReturnType::Type(_, ty) => (**ty).clone(),
+            ReturnType::Default => {
+                return Err(syn::Error::new_spanned(
+                    &method.sig,
+                    "unsupported child method signature: a #[child] method must declare a return type \
+                     (either `-> Child` for a static child or `-> Option<Child>` for a dynamic child)",
+                ));
+            }
+        };
 
         Ok(ChildMethodInfo {
             fn_name,
@@ -991,6 +998,7 @@ impl ChildMethodInfo {
             list_fn,
             search_fn,
             deprecation,
+            return_ty,
         })
     }
 }

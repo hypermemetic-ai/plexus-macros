@@ -1,0 +1,11 @@
+error[E0425]: cannot find type `InputsClient` in this scope
+  --> tests/compile/macro16_child_without_client.rs:20:25
+   |
+20 |     fn inputs(&self) -> Inputs {
+   |                         ^^^^^^ not found in this scope
+
+error[E0433]: cannot find type `InputsClient` in this scope
+  --> tests/compile/macro16_child_without_client.rs:20:25
+   |
+20 |     fn inputs(&self) -> Inputs {
+   |                         ^^^^^^ use of undeclared type `InputsClient`

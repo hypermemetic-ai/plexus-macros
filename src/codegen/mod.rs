@@ -677,7 +677,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let client_impl = if args.client {
         let span = args.client_span.unwrap_or_else(Span::call_site);
         let client_path = client::resolve_client_path(span)?;
-        client::generate(&struct_name, &args.namespace, &methods, &client_path)?
+        client::generate(&struct_name, &args.namespace, &methods, &child_methods, &client_path)?
     } else {
         TokenStream::new()
     };
