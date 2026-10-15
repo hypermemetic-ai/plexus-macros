@@ -1208,7 +1208,13 @@ fn generate_dispatch_arms(
         .collect()
 }
 
-/// Generate param extraction code and return the param names for the call
+/// Generate param extraction code and return the param names for the call.
+///
+/// MACRO-15: a parameter that does not deserialize is `InvalidParams`
+/// prefixed with its wire name — `id: <serde's message>` — on every path
+/// (one param or many, `Option` or required, the bare-value shortcut), so a
+/// method with two parameters of one type says which was bad. A missing
+/// field keeps `missing field: <name>`.
 fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps: &syn::Ident) -> (TokenStream, Vec<&'a syn::Ident>) {
     let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
 
@@ -1231,7 +1237,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
             } else {
                 quote! {
                     #deps::serde_json::from_value(params.clone())
-                        .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
+                        .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #param_str, e)))?
                 }
             };
 
@@ -1244,7 +1250,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                                 .filter(|v| !v.is_null())  // Treat explicit null as missing
                                 .map(|v| #deps::serde_json::from_value(v.clone()))
                                 .transpose()
-                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
+                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #param_str, e)))?
                         }
                         #deps::serde_json::Value::Null => None,
                         _ => #bare,
@@ -1257,7 +1263,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                         #deps::serde_json::Value::Object(map) => {
                             if let Some(val) = map.get(#param_str) {
                                 #deps::serde_json::from_value(val.clone())
-                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?
+                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #param_str, e)))?
                             } else {
                                 return Err(#crate_path::plexus::PlexusError::InvalidParams(
                                     format!("missing field: {}", #param_str)
@@ -1285,7 +1291,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                                 .filter(|v| !v.is_null())  // Treat explicit null as missing
                                 .map(|v| #deps::serde_json::from_value(v.clone()))
                                 .transpose()
-                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string()))?;
+                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #name_str, e)))?;
                         }
                     } else {
                         // For required fields, error on missing
@@ -1295,7 +1301,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                                     format!("missing field: {}", #name_str)
                                 ))
                                 .and_then(|v| #deps::serde_json::from_value(v.clone())
-                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(e.to_string())))?;
+                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #name_str, e))))?;
                         }
                     }
                 })
