@@ -593,6 +593,10 @@ pub struct HubMethodsAttrs {
     /// dependency. Same additive rule AUTHZ-CRED-MACRO-3 used for
     /// `plexus-auth-core`.
     pub client: bool,
+    /// MACRO-12: `typed_params` — a method parameter typed literally
+    /// `String`, `&str`, `Option<String>`, `Option<&str>` or `Vec<String>`
+    /// is a compile error on that parameter. Off by default for 0.6.
+    pub typed_params: bool,
     /// Span of the `client` flag, so a missing `plexus-client` dependency
     /// points at the flag that asked for it.
     pub client_span: Option<proc_macro2::Span>,
@@ -694,6 +698,7 @@ impl Parse for HubMethodsAttrs {
         let mut auth_posture: Option<AuthPosture> = None;
         // MACRO-2: opt-in typed-client emission.
         let mut client = false;
+        let mut typed_params = false;
         let mut client_span: Option<proc_macro2::Span> = None;
         let mut server_cfg: Option<String> = None;
         let mut server_cfg_span: Option<proc_macro2::Span> = None;
@@ -789,6 +794,9 @@ impl Parse for HubMethodsAttrs {
                             // MACRO-2: also emit the typed client.
                             client = true;
                             client_span = Some(path.span());
+                        } else if path.is_ident("typed_params") {
+                            // MACRO-12: refuse bare string parameters.
+                            typed_params = true;
                         }
                     }
                     Meta::List(list) => {
@@ -843,6 +851,7 @@ impl Parse for HubMethodsAttrs {
             required_fields_span,
             auth_posture,
             client,
+            typed_params,
             client_span,
             server_cfg,
             server_cfg_span,

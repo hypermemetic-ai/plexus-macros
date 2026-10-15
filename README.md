@@ -702,6 +702,7 @@ Attached to an `impl` block to generate the activation's `Activation` trait impl
 | `namespace_fn = "method"` | string | _(none)_ | Advanced: generate `namespace()` as a method call instead of a constant. |
 | `client` | flag | _(off)_ | Also emit the typed client — see [The typed client](#the-typed-client-client--server_cfg). Requires a `plexus-client` dependency. |
 | `server_cfg = "<pred>"` | string | _(none)_ | Compile the **server** half of the expansion only under that `cfg` (e.g. `feature = "server"`). Requires `client`. This is what makes an activation crate reachable from wasm32. |
+| `typed_params` | flag | _(off)_ | MACRO-12: a method parameter typed literally `String`, `&str`, `Option<String>`, `Option<&str>` or `Vec<String>` is a compile error on that parameter: ``` `<method>.<param>`: a bare string parameter; give it a type (typed_params) ```. Injected parameters (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`) are exempt. An alias (`type Name = String`) is not seen through. Off by default for 0.6; on by default is MACRO-8's call. |
 | `hub` | flag | _(off, deprecated)_ | Deprecated — hub mode is inferred from `#[child]` methods. Removed in 0.6. |
 | `children = [ident, ...]` | ident list | _(empty, deprecated)_ | Deprecated — use `#[child]` methods. Removed in 0.6. |
 

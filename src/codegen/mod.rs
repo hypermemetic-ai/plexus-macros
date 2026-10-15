@@ -381,6 +381,34 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         }
     }
 
+    // MACRO-12: `typed_params` refuses a bare string parameter, on the
+    // parameter's own span. `MethodInfo::params` already excludes what the
+    // server injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`,
+    // a bidirectional `ctx`), so those are exempt by construction.
+    if args.typed_params {
+        let mut errors: Option<syn::Error> = None;
+        for m in &methods {
+            for p in &m.params {
+                if is_bare_string_type(&p.ty) {
+                    let e = syn::Error::new_spanned(
+                        &p.ty,
+                        format!(
+                            "`{}.{}`: a bare string parameter; give it a type (typed_params)",
+                            m.method_name, p.name
+                        ),
+                    );
+                    match &mut errors {
+                        Some(all) => all.combine(e),
+                        None => errors = Some(e),
+                    }
+                }
+            }
+        }
+        if let Some(e) = errors {
+            return Err(e);
+        }
+    }
+
     // CHILD-3: at most one dynamic `#[child]` method per impl.
     let dynamic_children: Vec<&ChildMethodInfo> = child_methods
         .iter()
@@ -1041,4 +1069,52 @@ fn mixed_auth_warning(
             let _ = #const_name;
         }
     }
+}
+
+/// MACRO-12: `String`, `&str`, `Option<String>`, `Option<&str>` or
+/// `Vec<String>`, written literally (a `String` may be spelled
+/// `std::string::String`). An alias (`type Name = String`) is not seen
+/// through — a known limit, recorded, not worked around.
+fn is_bare_string_type(ty: &syn::Type) -> bool {
+    fn is_string(ty: &syn::Type) -> bool {
+        let syn::Type::Path(tp) = ty else { return false };
+        if tp.qself.is_some() {
+            return false;
+        }
+        let segs: Vec<String> = tp.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let bare_last = tp.path.segments.last().is_some_and(|s| s.arguments.is_empty());
+        bare_last
+            && matches!(
+                segs.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+                ["String"] | ["std", "string", "String"] | ["alloc", "string", "String"]
+            )
+    }
+    fn is_str_ref(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Reference(r) => matches!(&*r.elem, syn::Type::Path(p) if p.qself.is_none() && p.path.is_ident("str")),
+            _ => false,
+        }
+    }
+    fn wrapped<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
+        let syn::Type::Path(tp) = ty else { return None };
+        let last = tp.path.segments.last()?;
+        if tp.qself.is_some() || last.ident != wrapper {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else { return None };
+        match args.args.first() {
+            Some(syn::GenericArgument::Type(inner)) if args.args.len() == 1 => Some(inner),
+            _ => None,
+        }
+    }
+    if is_string(ty) || is_str_ref(ty) {
+        return true;
+    }
+    if let Some(inner) = wrapped(ty, "Option") {
+        return is_string(inner) || is_str_ref(inner);
+    }
+    if let Some(inner) = wrapped(ty, "Vec") {
+        return is_string(inner);
+    }
+    false
 }

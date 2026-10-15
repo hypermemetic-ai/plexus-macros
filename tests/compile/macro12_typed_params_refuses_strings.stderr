@@ -1,0 +1,43 @@
+error: `get.id`: a bare string parameter; give it a type (typed_params)
+  --> tests/compile/macro12_typed_params_refuses_strings.rs:11:29
+   |
+11 |     async fn get(&self, id: String) -> impl Stream<Item = String> + Send + 'static {
+   |                             ^^^^^^
+
+error: `list.epic`: a bare string parameter; give it a type (typed_params)
+  --> tests/compile/macro12_typed_params_refuses_strings.rs:19:15
+   |
+19 |         epic: Option<String>,
+   |               ^^^^^^^^^^^^^^
+
+error: `list.ids`: a bare string parameter; give it a type (typed_params)
+  --> tests/compile/macro12_typed_params_refuses_strings.rs:20:14
+   |
+20 |         ids: Vec<String>,
+   |              ^^^^^^^^^^^
+
+error: `list.filter`: a bare string parameter; give it a type (typed_params)
+  --> tests/compile/macro12_typed_params_refuses_strings.rs:21:17
+   |
+21 |         filter: std::string::String,
+   |                 ^^^^^^^^^^^^^^^^^^^
+
+error: `find.query`: a bare string parameter; give it a type (typed_params)
+  --> tests/compile/macro12_typed_params_refuses_strings.rs:28:33
+   |
+28 |     async fn find(&self, query: &str, near: Option<&str>) -> impl Stream<Item = String> + Send + 'static {
+   |                                 ^^^^
+
+error: `find.near`: a bare string parameter; give it a type (typed_params)
+  --> tests/compile/macro12_typed_params_refuses_strings.rs:28:45
+   |
+28 |     async fn find(&self, query: &str, near: Option<&str>) -> impl Stream<Item = String> + Send + 'static {
+   |                                             ^^^^^^^^^^^^
+
+warning: unused import: `futures::Stream`
+ --> tests/compile/macro12_typed_params_refuses_strings.rs:4:5
+  |
+4 | use futures::Stream;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
