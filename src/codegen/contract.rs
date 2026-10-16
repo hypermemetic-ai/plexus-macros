@@ -427,7 +427,22 @@ pub(crate) fn activation_trait_impl(
         quote! {
             #[allow(clippy::too_many_arguments)]
             fn #fn_ident(&self #(, #params)*) -> #box_stream<'static, #ev> {
-                let __this = ::core::clone::Clone::clone(self);
+                // The activation is cloned into the `'static` stream; a
+                // type that is not `Clone` is told so, by name.
+                #[diagnostic::on_unimplemented(
+                    message = "`{Self}` must implement `Clone` to implement its activation trait",
+                    label = "this activation is not `Clone`",
+                    note = "#[plexus_macros::activation] (MACRO-13) implements the activation's trait by cloning the activation into each method's stream, as `register` does; derive or implement `Clone` for `{Self}` (wrap its state in `Arc`)"
+                )]
+                trait __PlexusActivationClone: ::core::marker::Sized {
+                    fn __plexus_clone(&self) -> Self;
+                }
+                impl<__T: ::core::clone::Clone> __PlexusActivationClone for __T {
+                    fn __plexus_clone(&self) -> Self {
+                        ::core::clone::Clone::clone(self)
+                    }
+                }
+                let __this = __PlexusActivationClone::__plexus_clone(self);
                 ::std::boxed::Box::pin(#deps::futures::StreamExt::flatten(
                     #deps::futures::stream::once(async move {
                         #struct_name::#fn_ident(&__this #(, #names)*).await
@@ -573,7 +588,7 @@ pub(crate) fn client_trait_impl(
                 #(#inserts)*
                 #client::into_events::<#ev>(#client::decode::<#ev>(#client::owned_call(
                     ::core::clone::Clone::clone(&self.transport),
-                    Self::#const_ident,
+                    Self::#const_ident.at(self.path),
                     #client::__rt::serde_json::Value::Object(__params),
                 )))
             }

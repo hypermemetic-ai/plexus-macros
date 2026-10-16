@@ -327,3 +327,16 @@ async fn an_injected_parameter_stays_off_the_trait_and_the_client_implements_it(
     assert_eq!(got, vec![EchoEvent::Said { text: "hi, ann".into() }]);
     assert_eq!(t.params_of(greet), Some(serde_json::json!({"greeting": "hi"})));
 }
+
+/// A client mounted at a path (MACRO-16's `XClient::at`), called through the
+/// trait, goes where its inherent method goes: `host.echo.say`, not `echo.say`.
+#[test]
+fn a_mounted_client_through_the_trait_keeps_its_path() {
+    let at = EchoClient::<MemoryTransport>::METHOD_SAY.at("host.echo");
+    let t = Arc::new(MemoryTransport::new().script_events(at, &[EchoEvent::Said { text: "x".into() }]));
+    let client = EchoClient::at(t, "host.echo");
+    let inherent = futures::executor::block_on(client.say_all("x".into())).unwrap();
+    assert_eq!(inherent, vec![EchoEvent::Said { text: "x".into() }]);
+    let through: Vec<EchoEvent> = futures::executor::block_on(Echo::say(&client, "x".into()).collect());
+    assert_eq!(through, vec![EchoEvent::Said { text: "x".into() }]);
+}

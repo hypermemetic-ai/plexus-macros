@@ -32,4 +32,6 @@ fn macro13_compile_fail() {
     t.compile_fail("tests/compile/macro13_bare_trait_key.rs");
     // A contract method taking what the server injects, named.
     t.compile_fail("tests/compile/macro13_contract_injected.rs");
+    // An activation that is not `Clone`, told so by name.
+    t.compile_fail("tests/compile/macro13_activation_not_clone.rs");
 }
