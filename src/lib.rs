@@ -215,6 +215,16 @@ pub fn hub_method(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
+/// # How the child inherits its caller (MACRO-20)
+///
+/// `forward = "same_service" | "identity_only" | "pass_through" | "anonymous"`
+/// picks the policy the emitted `ChildRouter::forward_policy_for` hands
+/// the child. A static child defaults to `same_service`: the same service as
+/// its parent, it keeps the caller whole (principal stamp, session,
+/// ceiling). Write `#[plexus_macros::child(forward = "identity_only")]` for a
+/// deputy that must not see the caller's session. A dynamic child keeps the
+/// framework default (`IdentityOnly`) unless it names one.
+///
 /// Used standalone (outside an `#[activation]` block) this attribute is a
 /// no-op that returns the function unchanged.
 #[proc_macro_attribute]

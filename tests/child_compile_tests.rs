@@ -16,6 +16,9 @@ fn child_compile_pass() {
     // IR-20: generic activation with `#[child]` must compile — regression
     // for the synthesized `plugin_children()` impl block being non-generic.
     t.pass("tests/compile/ir20_generic_activation_with_child.rs");
+    // MACRO-20: every `forward = "..."` spelling, and a hand-written
+    // ChildRouter child beside them.
+    t.pass("tests/compile/macro20_child_forward_ok.rs");
 }
 
 #[test]
@@ -32,4 +35,6 @@ fn child_compile_fail() {
     t.compile_fail("tests/compile/child_search_not_found.rs");
     t.compile_fail("tests/compile/child_list_wrong_signature.rs");
     t.compile_fail("tests/compile/child_search_wrong_signature.rs");
+    // MACRO-20
+    t.compile_fail("tests/compile/macro20_child_forward_unknown.rs");
 }

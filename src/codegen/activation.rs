@@ -1,7 +1,7 @@
 //! Generate Activation trait implementation and RPC server
 
 use crate::parse::{
-    ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo, ParsedDeprecation,
+    ChildForward, ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo, ParsedDeprecation,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -552,6 +552,100 @@ pub fn generate(
         quote! {}
     };
 
+    // MACRO-20: how each child inherits its caller, and what the parent can
+    // say about its static children's schemas.
+    //
+    // `forward_policy_for`: a static child is the same service as its parent
+    // (a value built from the parent's own fields, in-process): it gets
+    // `SameService` — principal stamp, session, ceiling — unless its
+    // `#[child(forward = "...")]` says otherwise. A dynamic child keeps the
+    // framework default (`IdentityOnly`) unless it names a policy. No
+    // `#[child]` at all: the trait default, unchanged.
+    let forward_policy_impl = if child_methods.is_empty() {
+        quote! {}
+    } else {
+        let policy = |f: ChildForward| -> TokenStream {
+            let ty = match f {
+                ChildForward::SameService => quote! { #crate_path::plexus::SameService },
+                ChildForward::IdentityOnly => quote! { #crate_path::plexus::IdentityOnly },
+                ChildForward::PassThrough => quote! { #crate_path::plexus::PassThrough },
+                ChildForward::Anonymous => quote! { #crate_path::plexus::Anonymous },
+            };
+            quote! {
+                ::std::option::Option::Some(
+                    ::std::sync::Arc::new(#ty) as ::std::sync::Arc<dyn #crate_path::plexus::ForwardPolicy>
+                )
+            }
+        };
+        let static_arms: Vec<TokenStream> = child_methods
+            .iter()
+            .filter(|c| matches!(c.kind, ChildMethodKind::Static))
+            .map(|c| {
+                let name = c.fn_name.to_string();
+                let p = policy(c.forward.unwrap_or(ChildForward::SameService));
+                quote! { #name => #p, }
+            })
+            .collect();
+        let default_arm = match child_methods
+            .iter()
+            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic))
+            .and_then(|c| c.forward)
+        {
+            Some(f) => {
+                let p = policy(f);
+                quote! { _ => #p, }
+            }
+            None => quote! { _ => ::std::option::Option::None, },
+        };
+        quote! {
+            // MACRO-20: a static child inherits its caller as the same
+            // service does (SameService) unless `#[child(forward = "...")]`
+            // says otherwise.
+            fn forward_policy_for(
+                &self,
+                callee_ns: &str,
+            ) -> ::std::option::Option<::std::sync::Arc<dyn #crate_path::plexus::ForwardPolicy>> {
+                match callee_ns {
+                    #(#static_arms)*
+                    #default_arm
+                }
+            }
+        }
+    };
+
+    // `router_static_child_schemas`: each static child's own schema (when it
+    // describes itself) and its static children under its name — what a hub
+    // gates a child's method by (`<activation>.<child>.<method>`).
+    let static_child_fns: Vec<&syn::Ident> = child_methods
+        .iter()
+        .filter(|c| matches!(c.kind, ChildMethodKind::Static))
+        .map(|c| &c.fn_name)
+        .collect();
+    let static_child_strs: Vec<String> = static_child_fns.iter().map(|f| f.to_string()).collect();
+    let static_child_schemas_impl = if static_child_fns.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn router_static_child_schemas(
+                &self,
+            ) -> ::std::vec::Vec<(::std::string::String, #crate_path::plexus::PluginSchema)> {
+                let mut out = ::std::vec::Vec::new();
+                #({
+                    let child = self.#static_child_fns();
+                    if let ::std::option::Option::Some(schema) =
+                        <_ as #crate_path::plexus::ChildRouter>::router_schema(&child)
+                    {
+                        out.push((::std::string::String::from(#static_child_strs), schema));
+                    }
+                    for (path, schema) in <_ as #crate_path::plexus::ChildRouter>::router_static_child_schemas(&child) {
+                        out.push((::std::format!("{}.{}", #static_child_strs, path), schema));
+                    }
+                })*
+                out
+            }
+        }
+    };
+
     // Hub activations that use the legacy pattern (explicit `hub` flag with
     // hand-written `ChildRouter` impl, no `#[child]` methods — e.g. DynamicHub,
     // Solar-pre-migration) manage their own `ChildRouter` implementation with
@@ -604,6 +698,29 @@ pub fn generate(
 
                 #list_children_impl
                 #search_children_impl
+
+                #forward_policy_impl
+
+                // MACRO-20: this activation describes itself to its parent.
+                fn router_schema(&self) -> ::std::option::Option<#crate_path::plexus::PluginSchema> {
+                    ::std::option::Option::Some(<Self as #crate_path::plexus::Activation>::plugin_schema(self))
+                }
+
+                #static_child_schemas_impl
+            }
+        }
+    };
+
+    // MACRO-20: the hub's registry holds `Activation`s; it reaches the static
+    // children through this (the same list as the ChildRouter method).
+    let activation_static_children_impl = if static_child_fns.is_empty() || (hub_explicit && child_methods.is_empty()) {
+        quote! {}
+    } else {
+        quote! {
+            fn static_child_schemas(
+                &self,
+            ) -> ::std::vec::Vec<(::std::string::String, #crate_path::plexus::PluginSchema)> {
+                <Self as #crate_path::plexus::ChildRouter>::router_static_child_schemas(self)
             }
         }
     };
@@ -772,6 +889,8 @@ pub fn generate(
             fn plugin_schema(&self) -> #crate_path::plexus::PluginSchema {
                 #plugin_schema_body
             }
+
+            #activation_static_children_impl
 
             #resolve_handle_impl
         }

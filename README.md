@@ -730,7 +730,7 @@ Attached to methods inside an `#[activation]` impl. Marks the method as an RPC e
 - `#[activation_param]` — inject a field from the activation-level request struct; name + type must match.
 - `#[from_auth(expr)]` — call `expr(&auth_context)` and bind the result; useful for validated user types.
 
-### `#[plexus_macros::child]` / `#[plexus_macros::child(list = "...", search = "...")]`
+### `#[plexus_macros::child]` / `#[plexus_macros::child(list = "...", search = "...", forward = "...")]`
 
 Attached to methods inside an `#[activation]` impl to register them in the generated `ChildRouter`. Two accepted shapes:
 
@@ -749,6 +749,17 @@ Optional arguments on dynamic `#[child]`:
 Sibling methods are validated at macro-expansion time — typos in `list = "..."` or a wrong signature become compile errors pointing at the attribute.
 
 `#[child]` methods do **not** appear as RPC endpoints in the schema; they contribute to routing only. The presence of any `#[child]` method flips the activation into hub mode (replacing the deprecated `hub` flag).
+
+**How a child inherits its caller (MACRO-20).** A call routed into a child gets a context derived by a forward policy, emitted as `ChildRouter::forward_policy_for`. A **static** child is the same service as its parent (a value built from the parent's own fields, in-process), so by default it gets `SameService`: the caller whole, with the verified user, the session, and the metadata that holds the principal stamp, the session key and expiry, and the gate's ceiling. Under login, that's what lets a child's `#[from_auth]` / `Access::verify` see who called and keeps a ceilinged session from widening inside the child. A child that must not see the caller's session says so:
+
+| `forward = …` | the child keeps |
+|---|---|
+| `"same_service"` (a static child's default) | everything (`plexus_core::plexus::SameService`) |
+| `"identity_only"` | the user id and session id only; the metadata (principal stamp, session, ceiling) is dropped (`IdentityOnly`) |
+| `"pass_through"` | everything, named as a pass-through (`PassThrough`) |
+| `"anonymous"` | nothing (`Anonymous`) |
+
+A dynamic child keeps the framework default (`IdentityOnly`) unless it names a policy. The parent also describes its static children (`ChildRouter::router_static_child_schemas`, `Activation::static_child_schemas`), so a `DynamicHub` gates a child's method by its whole path (`tickets.commits.link`, with the child's own `target`), seeds the child's `roles(...)` qualified by that path in `declared_roles`, and lists the methods in `auth.requires` and the caller's view (plexus-core `plexus::children`).
 
 ### `#[plexus_macros::removed_in("X")]`
 

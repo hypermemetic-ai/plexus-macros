@@ -1,0 +1,5 @@
+error: unknown forward policy "everything" on #[plexus_macros::child]; expected "same_service", "identity_only", "pass_through" or "anonymous"
+  --> tests/compile/macro20_child_forward_unknown.rs:28:38
+   |
+28 |     #[plexus_macros::child(forward = "everything")]
+   |                                      ^^^^^^^^^^^^

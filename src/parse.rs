@@ -893,6 +893,39 @@ pub enum ChildMethodKind {
     Dynamic,
 }
 
+/// MACRO-20: the forward policy a `#[child(forward = "...")]` names — what
+/// the child's call context keeps of its caller's
+/// (`ChildRouter::forward_policy_for`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildForward {
+    /// `"same_service"` — everything: principal stamp, session, ceiling
+    /// (`plexus_core::plexus::SameService`). A static child's default.
+    SameService,
+    /// `"identity_only"` — the verified user id and session id only; the
+    /// metadata (principal stamp, session key and expiry, ceiling) dropped
+    /// (`IdentityOnly`). For a deputy that must not see the caller's session.
+    IdentityOnly,
+    /// `"pass_through"` — everything, named as an explicit pass-through.
+    PassThrough,
+    /// `"anonymous"` — nothing: the child runs as anonymous.
+    Anonymous,
+}
+
+impl ChildForward {
+    /// The spellings `forward = "..."` takes.
+    pub const SPELLINGS: &'static str = "\"same_service\", \"identity_only\", \"pass_through\" or \"anonymous\"";
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "same_service" => Some(Self::SameService),
+            "identity_only" => Some(Self::IdentityOnly),
+            "pass_through" => Some(Self::PassThrough),
+            "anonymous" => Some(Self::Anonymous),
+            _ => None,
+        }
+    }
+}
+
 /// Information extracted from a `#[plexus_macros::child]`-annotated method.
 #[derive(Debug, Clone)]
 pub struct ChildMethodInfo {
@@ -917,6 +950,11 @@ pub struct ChildMethodInfo {
     /// IR-3: parsed `#[deprecated(...)]` + `#[plexus_macros::removed_in]` info
     /// folded into the emitted `MethodSchema.deprecation` field.
     pub deprecation: Option<ParsedDeprecation>,
+    /// MACRO-20: `#[child(forward = "...")]` — how the child inherits its
+    /// caller. `None` when not written: a static child is then
+    /// [`ChildForward::SameService`], a dynamic one the framework's default
+    /// (`IdentityOnly`).
+    pub forward: Option<ChildForward>,
     /// MACRO-16: the declared return type — `Child` for a static child,
     /// `Option<Child>` for a dynamic one. The client codegen names the
     /// child's generated client from it.
@@ -935,7 +973,7 @@ impl ChildMethodInfo {
         // CHILD-4: parse `list = "method"` / `search = "method"` args off the
         // `#[child(...)]` attribute. The attribute itself is the sole carrier
         // of these args — no other attribute recognizes them.
-        let (list_fn, search_fn) = parse_child_attr_args(&method.attrs)?;
+        let (list_fn, search_fn, forward) = parse_child_attr_args(&method.attrs)?;
 
         // IR-3: capture deprecation metadata from `#[deprecated(...)]` +
         // `#[plexus_macros::removed_in("X")]` on this child method.
@@ -1007,6 +1045,7 @@ impl ChildMethodInfo {
             list_fn,
             search_fn,
             deprecation,
+            forward,
             return_ty,
         })
     }
@@ -1017,14 +1056,17 @@ impl ChildMethodInfo {
 ///
 /// - `list = "method_name"` — links a sibling list method for CHILD-4
 /// - `search = "method_name"` — links a sibling search method for CHILD-4
+/// - `forward = "same_service" | "identity_only" | "pass_through" | "anonymous"`
+///   — MACRO-20: how the child inherits its caller
 ///
-/// If the attribute is bare (`#[child]`) both returned values are `None`.
+/// If the attribute is bare (`#[child]`) every returned value is `None`.
 /// Unknown args are rejected so typos surface early.
 fn parse_child_attr_args(
     attrs: &[syn::Attribute],
-) -> syn::Result<(Option<syn::Ident>, Option<syn::Ident>)> {
+) -> syn::Result<(Option<syn::Ident>, Option<syn::Ident>, Option<ChildForward>)> {
     let mut list_fn: Option<syn::Ident> = None;
     let mut search_fn: Option<syn::Ident> = None;
+    let mut forward: Option<ChildForward> = None;
 
     for attr in attrs {
         let path = attr.path();
@@ -1050,7 +1092,7 @@ fn parse_child_attr_args(
                                     return Err(syn::Error::new_spanned(
                                         &path,
                                         "unknown argument to #[plexus_macros::child]; \
-                                         expected `list = \"method\"` or `search = \"method\"`",
+                                         expected `list = \"method\"`, `search = \"method\"` or `forward = \"policy\"`",
                                     ));
                                 }
                             };
@@ -1066,6 +1108,25 @@ fn parse_child_attr_args(
                                     ));
                                 }
                             };
+                            if ident_key == "forward" {
+                                if forward.is_some() {
+                                    return Err(syn::Error::new_spanned(
+                                        &s,
+                                        "duplicate `forward = \"...\"` argument on #[plexus_macros::child]",
+                                    ));
+                                }
+                                forward = Some(ChildForward::parse(&s.value()).ok_or_else(|| {
+                                    syn::Error::new_spanned(
+                                        &s,
+                                        format!(
+                                            "unknown forward policy \"{}\" on #[plexus_macros::child]; expected {}",
+                                            s.value(),
+                                            ChildForward::SPELLINGS
+                                        ),
+                                    )
+                                })?);
+                                continue;
+                            }
                             let method_ident = syn::Ident::new(&s.value(), s.span());
                             match ident_key.as_str() {
                                 "list" => {
@@ -1091,7 +1152,7 @@ fn parse_child_attr_args(
                                         &path,
                                         format!(
                                             "unknown argument `{}` to #[plexus_macros::child]; \
-                                             expected `list = \"method\"` or `search = \"method\"`",
+                                             expected `list = \"method\"`, `search = \"method\"` or `forward = \"policy\"`",
                                             other
                                         ),
                                     ));
@@ -1102,7 +1163,7 @@ fn parse_child_attr_args(
                             return Err(syn::Error::new_spanned(
                                 other,
                                 "unknown argument to #[plexus_macros::child]; \
-                                 expected `list = \"method\"` or `search = \"method\"`",
+                                 expected `list = \"method\"`, `search = \"method\"` or `forward = \"policy\"`",
                             ));
                         }
                     }
@@ -1118,7 +1179,7 @@ fn parse_child_attr_args(
         }
     }
 
-    Ok((list_fn, search_fn))
+    Ok((list_fn, search_fn, forward))
 }
 
 /// The stream-return shape of a sibling `list` / `search` method referenced by
