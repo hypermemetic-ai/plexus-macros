@@ -1,0 +1,19 @@
+error: `greet` takes an `auth` parameter, which the server injects; a contract's methods are what its implementor is called with, so they take only what a caller passes.
+ --> tests/compile/macro13_contract_injected.rs:9:18
+  |
+9 |     pub async fn greet(&self, auth: &AuthContext, greeting: String) -> impl Stream<Item = String> + Send + 'static;
+  |                  ^^^^^
+
+warning: unused import: `futures::Stream`
+ --> tests/compile/macro13_contract_injected.rs:4:5
+  |
+4 | use futures::Stream;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `plexus_core::plexus::AuthContext`
+ --> tests/compile/macro13_contract_injected.rs:5:5
+  |
+5 | use plexus_core::plexus::AuthContext;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

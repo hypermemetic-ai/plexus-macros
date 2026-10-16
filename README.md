@@ -531,6 +531,41 @@ If a value would be the same for every method call in a request, it belongs in t
 
 ---
 
+## `#[activation]` needs nothing (MACRO-13)
+
+On `impl FooActivation` the stem `Foo` names the namespace (`foo`), the
+trait (`trait Foo`) and the client (`FooClient<T>`); descriptions come from
+`///` (and `/** … */` before a parameter); plexus-core is found in the
+manifest. Every key below is an override, and none is needed:
+
+```rust
+/// A deploy driver: describe, trigger, watch.
+#[plexus_macros::activation]
+impl DriverActivation {
+    /// What this driver can do.
+    pub async fn describe(&self) -> impl Stream<Item = DriverEvent> + Send + 'static { /* … */ }
+    /// Start an action on a target.
+    pub async fn trigger(&self, /** what to act on */ target: Target) -> impl Stream<Item = DriverEvent> + Send + 'static { /* … */ }
+    pub fn new() -> Self { /* … */ }      // not a `pub async fn` on `&self` returning a stream: a plain method
+}
+// emitted:
+//   pub trait Driver: Send + Sync + 'static { fn describe(&self) -> BoxStream<'static, DriverEvent>; … }
+//   impl Driver for DriverActivation                     (the server half)
+//   pub struct DriverClient<T>; impl<T: Transport + Clone + Send + Sync + 'static> Driver for DriverClient<T>
+```
+
+| rule | |
+|---|---|
+| the trait, always | every activation has one; a type not named `…Activation` names it with `trait = "Bar"` (which also names the client `BarClient` and, absent `namespace`, the namespace `bar`). Without either it does not compile — except an activation written before MACRO-13, which says its `namespace`: it expands as it did, with a deprecation warning asking for the rename |
+| wire methods | every `pub async fn` on `&self` returning `impl Stream<Item = E>`, no `#[method]` needed (it stays for its overrides); a `pub async fn` on `&self` returning anything else is a compile error; `methods = marked` restores the `#[method]`-only rule |
+| one event type | the trait's methods yield one `E` across the activation |
+| the client | emitted whenever the crate depends on `plexus-client`, no flag (`client` is accepted with a deprecation warning); its trait impl yields a `ClientError` as `E::from_client_error(err)` and ends, so `E: plexus_client::FromClientError` (`String` has it) |
+| injected parameters | a method taking `auth`, `reach`, `#[from_auth]`, `#[activation_param]` or a bidirectional `ctx` is on the trait with what a caller passes; the client implements the trait and the activation does not (it has no caller to take them from) |
+| the `server` feature | a crate whose manifest declares `server` gets the server half under `#[cfg(feature = "server")]`; `server_cfg` overrides; the trait and the client are never gated |
+| a contract | every wire method bodiless (`pub async fn f(&self) -> impl Stream<…>;`) and no struct written: the macro emits `pub struct FooActivation<D: Foo>(Arc<D>)`, delegating, and `Foo::server(self)`, so `hub.register(Local::new().server())` serves an implementation and `hub.register(FooClient::new(t).server())` a remote one as a proxy. A mix of bodied and bodiless is refused at the first bodiless method |
+
+---
+
 ## The typed client (`client` + `server_cfg`)
 
 The macro sees every method's wire name, its parameters and its
@@ -691,7 +726,9 @@ Attached to an `impl` block to generate the activation's `Activation` trait impl
 
 | Arg | Type | Default | Notes |
 |---|---|---|---|
-| `namespace = "..."` | string | _(required)_ | Activation namespace. Appears as `plugin_schema.namespace`. |
+| `namespace = "..."` | string | the stem of `impl FooActivation`, snake_case | Activation namespace. Appears as `plugin_schema.namespace`. MACRO-13: an override. |
+| `trait = "..."` | string | the stem | MACRO-13: names the trait and the client whatever the type is called. |
+| `methods = marked` | word | every `pub async fn` on `&self` returning a stream | MACRO-13: only `#[method]`s are on the wire. |
 | `version = "..."` | string | `CARGO_PKG_VERSION` | Semver; used by handles and deprecation schemas. |
 | `description = "..."` | string | _(none)_ | Max **15 words** — macro errors on overflow. Use `long_description` for more. |
 | `long_description = "..."` | string | _(none)_ | Unbounded documentation; projected into `PluginSchema`. |
@@ -700,8 +737,8 @@ Attached to an `impl` block to generate the activation's `Activation` trait impl
 | `crate_path = "..."` | string | auto (via `proc-macro-crate`) | Override the `plexus-core` import path. Rarely needed after CHILD-6. |
 | `plugin_id = "UUID"` | string | deterministic UUIDv5 from namespace | Explicit plugin UUID. Must parse as a UUID. |
 | `namespace_fn = "method"` | string | _(none)_ | Advanced: generate `namespace()` as a method call instead of a constant. |
-| `client` | flag | _(off)_ | Also emit the typed client — see [The typed client](#the-typed-client-client--server_cfg). Requires a `plexus-client` dependency. |
-| `server_cfg = "<pred>"` | string | _(none)_ | Compile the **server** half of the expansion only under that `cfg` (e.g. `feature = "server"`). Requires `client`. This is what makes an activation crate reachable from wasm32. |
+| `client` | flag | _(off)_ | Also emit the typed client — see [The typed client](#the-typed-client-client--server_cfg). Requires a `plexus-client` dependency. MACRO-13: under the name rule the client is emitted whenever `plexus-client` is a dependency, and `client` is ignored with a deprecation warning. |
+| `server_cfg = "<pred>"` | string | _(none)_ | Compile the **server** half of the expansion only under that `cfg` (e.g. `feature = "server"`). Requires `client` (MACRO-13: not under the name rule, where `feature = "server"` is the default when the crate declares it). This is what makes an activation crate reachable from wasm32. |
 | `typed_params` | flag | _(off)_ | MACRO-12: a method parameter typed literally `String`, `&str`, `Option<String>`, `Option<&str>` or `Vec<String>` is a compile error on that parameter: ``` `<method>.<param>`: a bare string parameter; give it a type (typed_params) ```. Injected parameters (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`) are exempt. An alias (`type Name = String`) is not seen through. Off by default for 0.6; on by default is MACRO-8's call. |
 | `hub` | flag | _(off, deprecated)_ | Deprecated — hub mode is inferred from `#[child]` methods. Removed in 0.6. |
 | `children = [ident, ...]` | ident list | _(empty, deprecated)_ | Deprecated — use `#[child]` methods. Removed in 0.6. |

@@ -64,6 +64,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
 
+pub mod contract;
 pub mod decode;
 pub mod envelope;
 pub mod error;
@@ -74,6 +75,7 @@ pub mod transport;
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub mod ws;
 
+pub use contract::{error_events, into_events, owned_call, BoxStream, FromClientError};
 pub use decode::{collect_data, decode, error_stream, EventStream};
 pub use envelope::{StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};

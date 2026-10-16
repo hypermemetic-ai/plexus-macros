@@ -1,0 +1,13 @@
+error: `promised` has no body, but other wire methods of this activation do: a contract has no bodies and a server has all of them. Give `promised` a body, or remove the bodies of the others.
+  --> tests/compile/macro13_mixed_bodies.rs:15:18
+   |
+15 |     pub async fn promised(&self) -> impl Stream<Item = String> + Send + 'static;
+   |                  ^^^^^^^^
+
+warning: unused import: `futures::Stream`
+ --> tests/compile/macro13_mixed_bodies.rs:4:5
+  |
+4 | use futures::Stream;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

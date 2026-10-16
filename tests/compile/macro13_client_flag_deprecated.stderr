@@ -1,0 +1,11 @@
+error: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_CLIENT_FLAG_EchoActivation`: plexus-macros (MACRO-13): the `client` flag is ignored — the client is emitted whenever the crate depends on plexus-client. Remove `client` from the attribute; it will be refused in a later release.
+  --> tests/compile/macro13_client_flag_deprecated.rs:12:29
+   |
+12 | #[plexus_macros::activation(client)]
+   |                             ^^^^^^
+   |
+note: the lint level is defined here
+  --> tests/compile/macro13_client_flag_deprecated.rs:5:9
+   |
+ 5 | #![deny(deprecated)]
+   |         ^^^^^^^^^^

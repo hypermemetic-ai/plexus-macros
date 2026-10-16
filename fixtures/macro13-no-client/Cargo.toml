@@ -1,0 +1,18 @@
+[package]
+name = "macro13-no-client"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "MACRO-13 fixture: an activation crate that does not depend on plexus-client gets no client, and no error"
+
+[dependencies]
+plexus-macros = { path = "../.." }
+plexus-core = { path = "../../../plexus-core" }
+serde = { version = "1.0", features = ["derive"] }
+futures = "0.3"
+schemars = { version = "1.1", features = ["derive"] }
+async-trait = "0.1"
+jsonrpsee = { version = "0.26", features = ["server", "macros"] }
+tokio = { version = "1.0", features = ["full"] }
+uuid = { version = "1.0", features = ["v4", "v5"] }
+serde_json = "1.0"

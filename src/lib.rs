@@ -436,7 +436,8 @@ fn generate_schema_fn(
 ///
 /// # Attributes
 ///
-/// - `namespace = "..."` (required) - The activation namespace
+/// - `namespace = "..."` - The activation namespace (the name rule below
+///   gives it from `impl FooActivation`)
 /// - `version = "..."` (optional, default: "1.0.0") - Version string
 /// - `description = "..."` (optional) - Activation description
 /// - `crate_path = "..."` (optional, default: "crate") - Path to substrate crate
@@ -509,6 +510,64 @@ fn generate_schema_fn(
 ///
 /// Both flags are opt-in: an activation that names neither expands exactly
 /// as it did before.
+///
+/// # `#[activation]` needs nothing — MACRO-13
+///
+/// On `impl FooActivation` the stem `Foo` names everything, every key is an
+/// override, and the trait is always emitted (the owner's `always`):
+///
+/// ```ignore
+/// /// A deploy driver.                      // the activation's description
+/// #[plexus_macros::activation]
+/// impl DriverActivation {
+///     /// What this driver can do.          // the method's description
+///     pub async fn describe(&self) -> impl Stream<Item = DriverEvent> + Send + 'static { .. }
+///     pub fn new() -> Self { .. }           // not async: a plain method
+///     async fn helper(&self) -> u32 { .. }  // not pub: a plain method
+/// }
+/// // namespace "driver"; `pub trait Driver: Send + Sync + 'static` with
+/// // `fn describe(&self) -> BoxStream<'static, DriverEvent>`;
+/// // `impl Driver for DriverActivation`; `DriverClient<T>`, and
+/// // `impl<T: Transport + Clone + Send + Sync + 'static> Driver for DriverClient<T>`.
+/// ```
+///
+/// - **The name rule.** The namespace defaults to the stem in snake_case
+///   (`TicketsApiActivation` → `tickets_api`); the client is `FooClient<T>`.
+///   `trait = "Bar"` names the trait and the client (and, absent
+///   `namespace`, the namespace `bar`) whatever the type is called. A type
+///   not named `…Activation`, without `trait = "…"` or `namespace`, does not
+///   compile.
+/// - **The trait, always.** Each wire method is on it with the parameters a
+///   caller passes. Each event type must implement
+///   `plexus_client::FromClientError` when there is a client: the client's
+///   implementation yields an `Err(ClientError)` as
+///   `E::from_client_error(err)` and ends (`String` has it). The activation
+///   implements its own trait by cloning itself into each stream (`register`
+///   already asks for `Clone`) — unless a wire method takes what the server
+///   injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`, a
+///   bidirectional `ctx`): then only the client implements it.
+/// - **Every public method a wire method.** Every `pub async fn` on `&self`
+///   returning `impl Stream<Item = E>` is on the wire with no `#[method]`
+///   (which stays for its overrides); one returning anything else is a
+///   compile error; `methods = marked` restores the `#[method]`-only rule.
+/// - **The client without a flag**, whenever the crate depends on
+///   `plexus-client`; `client` is accepted with a deprecation warning.
+/// - **The `server` feature default.** A crate whose manifest declares a
+///   `server` feature gets its server half under `#[cfg(feature =
+///   "server")]`; `server_cfg` overrides. The trait and the client are never
+///   gated.
+/// - **A bodiless activation is a contract.** When every wire method is
+///   bodiless (`pub async fn f(&self, ..) -> impl Stream<..>;`), the macro
+///   emits `pub struct FooActivation<D: Foo>(Arc<D>)` delegating to `D`,
+///   `impl<D: Foo> Foo for FooActivation<D>`, and `Foo::server(self)`:
+///   `hub.register(Local::new().server())`, or
+///   `hub.register(FooClient::new(transport).server())` for a proxy.
+///
+/// **Before the renames land.** An activation written before MACRO-13 — a
+/// type not named `…Activation`, no `trait = "…"`, its `namespace` given —
+/// expands exactly as it did (no trait; the client on the `client` flag;
+/// only `#[method]`s on the wire) with a deprecation warning asking for the
+/// rename. A later release refuses it.
 #[proc_macro_attribute]
 pub fn activation(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as HubMethodsAttrs);

@@ -1,0 +1,13 @@
+error: the trait is always emitted, named from `impl FooActivation`'s stem; write `trait = "Name"` to name it otherwise
+ --> tests/compile/macro13_bare_trait_key.rs:9:29
+  |
+9 | #[plexus_macros::activation(trait)]
+  |                             ^^^^^
+
+warning: unused import: `futures::Stream`
+ --> tests/compile/macro13_bare_trait_key.rs:4:5
+  |
+4 | use futures::Stream;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

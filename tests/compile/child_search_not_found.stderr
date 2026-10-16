@@ -3,3 +3,11 @@ error: method `never_declared` referenced by #[plexus_macros::child(search = "ne
    |
 36 |     #[plexus_macros::child(search = "never_declared")]
    |                                     ^^^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_Leaf`: plexus-macros (MACRO-13): `Leaf` does not end in `Activation`, so no trait is emitted for it and its client is `LeafClient`. Rename it `LeafActivation` (or write `trait = "…"`); then `namespace`, `client`, `crate_path`, `server_cfg` and `#[method]` may all go. A later release refuses it.
+  --> tests/compile/child_search_not_found.rs:16:6
+   |
+16 | impl Leaf {
+   |      ^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default

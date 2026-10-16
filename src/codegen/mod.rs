@@ -1,7 +1,8 @@
 //! Code generation for Plexus RPC macros
 
 mod activation;
-mod client;
+pub(crate) mod client;
+mod contract;
 mod method_enum;
 
 use crate::parse::{
@@ -190,9 +191,19 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         _ => return Err(syn::Error::new_spanned(&input_impl.self_ty, "Expected struct type")),
     };
 
-    // Get full self type (with generics) and impl generics for trait impl
-    let self_ty = &input_impl.self_ty;
-    let (impl_generics, _, where_clause) = input_impl.generics.split_for_impl();
+    // MACRO-13: the name rule — on `impl FooActivation` (or with `trait` in
+    // the attribute) the stem names the namespace, the trait and the client.
+    let names = contract::Names::resolve(&args, &struct_name)?;
+    let namespace = names.namespace.clone();
+
+    // MACRO-13: a bodiless method (`pub async fn f(&self) -> …;`) arrives as
+    // verbatim tokens; give it a placeholder body and remember it.
+    let bodiless = contract::take_bodiless(&mut input_impl);
+
+    // MACRO-13: under the name rule every `pub async fn` on `&self`
+    // returning `impl Stream<Item = E>` is a wire method, unless the
+    // activation says `methods = marked`.
+    let all_public_methods = names.new_form && !args.methods_marked;
 
     // Extract all #[method] / #[hub_method] functions and all #[child] functions.
     let mut methods: Vec<MethodInfo> = Vec::new();
@@ -247,7 +258,14 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                     Meta::NameValue(_) => None,
                 };
                 methods.push(MethodInfo::from_fn(method, hub_method_attrs.as_ref())?);
+            } else if all_public_methods && contract::is_wire_shape(method)? {
+                // MACRO-13: unmarked, and on the wire by its shape.
+                methods.push(MethodInfo::from_fn(method, None)?);
+            } else {
+                continue;
+            }
 
+            {
                 // Strip #[plexus_macros::removed_in(...)] companion — rustc
                 // doesn't know what to do with it, and the macro has already
                 // folded its value into the `MethodInfo.deprecation` struct.
@@ -283,6 +301,74 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         }
     }
 
+    // MACRO-13: a bodiless activation is a contract — every wire method
+    // bodiless, none bodied — and a bodiless method must be on the wire.
+    let contract_mode = !bodiless.is_empty();
+    if contract_mode {
+        if let Some(f) = bodiless.iter().find(|b| !methods.iter().any(|m| &m.fn_name == *b)) {
+            return Err(syn::Error::new(
+                f.span(),
+                format!(
+                    "`{f}` has no body, and is not a wire method; only a wire method may be \
+                     bodiless (a bodiless activation is a contract its implementor fills)"
+                ),
+            ));
+        }
+        if methods.iter().any(|m| !bodiless.contains(&m.fn_name)) {
+            let first = &bodiless[0];
+            return Err(syn::Error::new(
+                first.span(),
+                format!(
+                    "`{first}` has no body, but other wire methods of this activation do: a \
+                     contract has no bodies and a server has all of them. Give `{first}` a body, \
+                     or remove the bodies of the others."
+                ),
+            ));
+        }
+    }
+    // MACRO-13 (`always`): every activation the name rule names has its
+    // trait; a contract needs one, so one written before MACRO-13 (no trait
+    // to name) cannot be a contract.
+    if contract_mode && names.trait_ident.is_none() {
+        return Err(syn::Error::new(
+            struct_name.span(),
+            format!(
+                "`{struct_name}` is bodiless, so it is a contract, and a contract is its trait; \
+                 but `{struct_name}` does not end in `Activation`, so the trait cannot be named. \
+                 Name the type `{struct_name}Activation`, or write `trait = \"…\"` in the attribute."
+            ),
+        ));
+    }
+    let trait_ident: Option<syn::Ident> = names.trait_ident.clone();
+    let self_callable = match &trait_ident {
+        Some(t) => contract::check_trait_methods(&methods, t)?,
+        None => true,
+    };
+    if contract_mode && !self_callable {
+        let m = methods.iter().find(|m| contract::injected(m).is_some()).unwrap();
+        return Err(syn::Error::new(
+            m.fn_name.span(),
+            format!(
+                "`{}` takes {}, which the server injects; a contract's methods are what its \
+                 implementor is called with, so they take only what a caller passes.",
+                m.fn_name,
+                contract::injected(m).unwrap()
+            ),
+        ));
+    }
+    if contract_mode {
+        contract::rewrite_contract_impl(
+            &mut input_impl,
+            &struct_name,
+            trait_ident.as_ref().unwrap(),
+            &methods,
+        )?;
+    }
+
+    // Get full self type (with generics) and impl generics for trait impl
+    let self_ty = &input_impl.self_ty;
+    let (impl_generics, _, where_clause) = input_impl.generics.split_for_impl();
+
     // RED-3: reject `#[from_auth(...)]` on any method when the activation
     // has no `request = SomeType` declaration. Auth extraction requires
     // AuthContext to be populated by the activation-level PlexusRequest
@@ -307,7 +393,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
 
     // AUTH-3: the activation's default roles, validated against its methods
     // and flattened to grants (`<namespace>.<method>`).
-    let declared_roles = resolve_roles(&args.roles, &methods, &args.namespace)?;
+    let declared_roles = resolve_roles(&args.roles, &methods, &namespace)?;
 
     // REQ-10: validate per-method request overrides against the activation's
     // `required = [...]` lock list. If the activation has any required fields
@@ -671,14 +757,14 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         args.request_type.as_ref(),  // REQ-6: activation-level request type (for runtime merge)
         &deps,
         args.auth_posture, // R-1: declared posture (None = silent, pre-R-1 wire)
-        &args.namespace,   // AUTH-3: each method's grant is `<namespace>.<method>`
+        &namespace,        // AUTH-3: each method's grant is `<namespace>.<method>`
     );
     let activation_impl = activation::generate(
         &struct_name,
         self_ty,
         &impl_generics,
         where_clause,
-        &args.namespace,
+        &namespace,
         args.version.as_deref(),
         &resolved_description,
         args.long_description.as_deref(),
@@ -700,36 +786,39 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &declared_roles,
     );
 
-    // MACRO-2: the typed client, when the activation opted in. Empty
-    // otherwise, so a non-opted-in expansion is byte-identical to before.
-    let client_impl = if args.client {
+    // MACRO-2 / MACRO-13: the typed client. Under the name rule it is
+    // emitted whenever the crate depends on plexus-client, and the `client`
+    // flag is ignored with a warning; otherwise (an activation the rule does
+    // not apply to) the flag asks for it, as before.
+    let client_path: Option<syn::Path> = if names.new_form {
+        client::resolve_client_path(Span::call_site()).ok()
+    } else if args.client {
         let span = args.client_span.unwrap_or_else(Span::call_site);
-        let client_path = client::resolve_client_path(span)?;
-        client::generate(&struct_name, &args.namespace, &methods, &child_methods, &client_path)?
+        Some(client::resolve_client_path(span)?)
+    } else {
+        None
+    };
+    let client_flag_warning = if names.new_form && args.client {
+        contract::client_flag_warning(args.client_span.unwrap_or_else(Span::call_site), &struct_name)
+    } else if !names.new_form {
+        // MACRO-13: an activation the name rule cannot name, written before
+        // it, builds as it did and asks for the rename.
+        contract::legacy_name_warning(&struct_name)
     } else {
         TokenStream::new()
     };
-
-    // MACRO-2: everything above this line is the SERVER half. When
-    // `server_cfg = "..."` is set it is emitted under that cfg, so a build
-    // that does not satisfy the predicate gets the client and nothing else —
-    // which is how an activation crate becomes reachable from wasm32.
-    let server_half = quote! {
-        #deps_shim_mod
-        #input_impl
-        #method_enum
-        #activation_impl
-        #hub_deprecation_warning
-        #children_deprecation_warning
-        #mixed_auth_warning
-        #required_posture_optional_auth_warning
+    let client_impl = match &client_path {
+        Some(path) => client::generate(&names.client_ident, &namespace, &methods, &child_methods, path, names.new_form)?,
+        None => TokenStream::new(),
     };
 
-    let server_half = match &args.server_cfg {
-        None => server_half,
+    // MACRO-2 / MACRO-13: the cfg the server half is gated on — `server_cfg`
+    // when given; under the name rule, `feature = "server"` when the crate
+    // declares that feature; otherwise none.
+    let server_gate: Option<syn::Meta> = match &args.server_cfg {
         Some(pred) => {
             let span = args.server_cfg_span.unwrap_or_else(Span::call_site);
-            if !args.client {
+            if !names.new_form && !args.client {
                 return Err(syn::Error::new(
                     span,
                     "#[plexus_macros::activation]: `server_cfg = \"...\"` suppresses the \
@@ -739,13 +828,86 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                      module instead.",
                 ));
             }
-            cfg_gate(server_half, pred, span)?
+            Some(contract::parse_gate(pred, span)?)
         }
+        None if names.new_form && contract::manifest_declares_server_feature() => {
+            Some(syn::parse_quote!(feature = "server"))
+        }
+        None => None,
+    };
+
+    // MACRO-13: the trait, its implementations, and a contract's struct.
+    let mut trait_server_items = TokenStream::new();
+    let mut trait_items = TokenStream::new();
+    if let Some(trait_ident) = &trait_ident {
+        let box_stream = contract::box_stream_path(
+            client_path.as_ref(),
+            args.trait_span.unwrap_or_else(Span::call_site),
+        )?;
+        trait_items.extend(contract::trait_def(
+            trait_ident,
+            &struct_name,
+            &resolved_description,
+            &methods,
+            &box_stream,
+            contract_mode,
+            server_gate.as_ref(),
+        ));
+        if contract_mode {
+            trait_server_items.extend(contract::contract_items(
+                trait_ident,
+                &struct_name,
+                &methods,
+                &box_stream,
+            ));
+        } else if self_callable {
+            trait_server_items.extend(contract::activation_trait_impl(
+                trait_ident,
+                &struct_name,
+                self_ty,
+                &impl_generics,
+                where_clause,
+                &methods,
+                &box_stream,
+                &deps,
+            ));
+        }
+        if let Some(path) = &client_path {
+            trait_items.extend(contract::client_trait_impl(
+                trait_ident,
+                &names.client_ident,
+                &methods,
+                path,
+            ));
+        }
+    }
+
+    // MACRO-2: everything above this line is the SERVER half. When gated it
+    // is emitted under that cfg, so a build that does not satisfy the
+    // predicate gets the client (and the trait) and nothing else — which is
+    // how an activation crate becomes reachable from wasm32.
+    let server_half = quote! {
+        #deps_shim_mod
+        #trait_server_items
+        #input_impl
+        #method_enum
+        #activation_impl
+        #hub_deprecation_warning
+        #children_deprecation_warning
+        #mixed_auth_warning
+        #required_posture_optional_auth_warning
+    };
+
+    let server_half = match &server_gate {
+        None => server_half,
+        Some(meta) => cfg_gate(server_half, meta, Span::call_site())?,
     };
 
     Ok(quote! {
         #server_half
+        #trait_items
         #client_impl
+        #client_flag_warning
     })
 }
 
@@ -826,17 +988,7 @@ fn resolve_roles(
 /// re-parsed as a `syn::File` and each item is re-emitted with the attribute
 /// prepended. The round trip is safe because the input is our own output —
 /// already valid Rust, spans preserved by syn.
-fn cfg_gate(items: TokenStream, predicate: &str, span: Span) -> syn::Result<TokenStream> {
-    let meta: syn::Meta = syn::parse_str(predicate).map_err(|e| {
-        syn::Error::new(
-            span,
-            format!(
-                "server_cfg = \"...\" must be a `cfg` predicate, e.g. \
-                 `feature = \"server\"` or `not(target_arch = \"wasm32\")` ({e})"
-            ),
-        )
-    })?;
-
+fn cfg_gate(items: TokenStream, meta: &syn::Meta, span: Span) -> syn::Result<TokenStream> {
     let file: syn::File = syn::parse2(items).map_err(|e| {
         syn::Error::new(
             span,

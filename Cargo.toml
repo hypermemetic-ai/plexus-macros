@@ -11,6 +11,11 @@ members = [
     # dependency line. Not published.
     "fixtures/tickets-api",
     "fixtures/tickets-wasm-consumer",
+    # MACRO-13: the `server` feature default (gated with no `server_cfg`
+    # written; `--no-default-features` has no plexus-core), and a crate with
+    # no plexus-client, which gets no client and no error.
+    "fixtures/macro13-echo",
+    "fixtures/macro13-no-client",
 ]
 
 [package]

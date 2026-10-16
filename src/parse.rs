@@ -520,12 +520,29 @@ impl Parse for HubMethodAttrs {
     }
 }
 
+/// MACRO-13: what the `trait` key is called once the keyword is renamed.
+const TRAIT_KEY: &str = "__plexus_trait";
+
 /// Maximum word count for description
 const MAX_DESCRIPTION_WORDS: usize = 15;
 
 /// Parsed attributes for #[hub_methods]
 pub struct HubMethodsAttrs {
-    pub namespace: String,
+    /// `namespace = "..."`. MACRO-13: optional — when absent, the stem of
+    /// `impl FooActivation` (or the trait's name) in snake_case.
+    pub namespace: Option<String>,
+    /// MACRO-13: `trait = "Bar"` — names the activation's trait (and its
+    /// client, and absent `namespace` its namespace) whatever the type is
+    /// called. Without it the trait is named from the stem of
+    /// `impl FooActivation`; it is always emitted.
+    pub trait_attr: Option<syn::LitStr>,
+    /// Span of the `trait` key, for diagnostics.
+    pub trait_span: Option<proc_macro2::Span>,
+    /// MACRO-13: `methods = marked` — only `#[method]`s are on the wire (the
+    /// rule before MACRO-13). `false` (the default for an activation the name
+    /// rule applies to): every `pub async fn` on `&self` returning
+    /// `impl Stream<Item = E>` is.
+    pub methods_marked: bool,
     /// Explicit version string, or None to use CARGO_PKG_VERSION at compile time
     pub version: Option<String>,
     /// Short description (max 15 words)
@@ -678,7 +695,10 @@ pub enum AuthPosture {
 
 impl Parse for HubMethodsAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut namespace = String::new();
+        let mut namespace: Option<String> = None;
+        let mut trait_attr: Option<syn::LitStr> = None;
+        let mut trait_span: Option<proc_macro2::Span> = None;
+        let mut methods_marked = false;
         let mut version: Option<String> = None;
         let mut description = None;
         let mut long_description = None;
@@ -706,7 +726,22 @@ impl Parse for HubMethodsAttrs {
         let mut roles: Vec<RoleDecl> = Vec::new();
 
         if !input.is_empty() {
-            let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
+            // MACRO-13: `trait` is a keyword, which a `Meta` path refuses;
+            // a top-level `trait` key is renamed before the parse.
+            let tokens: proc_macro2::TokenStream = input.parse()?;
+            let tokens: proc_macro2::TokenStream = tokens
+                .into_iter()
+                .map(|tt| match tt {
+                    proc_macro2::TokenTree::Ident(id) if id == "trait" => {
+                        proc_macro2::TokenTree::Ident(syn::Ident::new(TRAIT_KEY, id.span()))
+                    }
+                    other => other,
+                })
+                .collect();
+            let metas = syn::parse::Parser::parse2(
+                Punctuated::<Meta, Token![,]>::parse_terminated,
+                tokens,
+            )?;
 
             for meta in metas {
                 match meta {
@@ -723,9 +758,43 @@ impl Parse for HubMethodsAttrs {
                             continue;
                         }
 
+                        // MACRO-13: `methods = marked` (or `"marked"`), `methods = all`.
+                        if path.is_ident("methods") {
+                            let word = match &value {
+                                Expr::Path(p) if p.path.get_ident().is_some() => {
+                                    p.path.get_ident().unwrap().to_string()
+                                }
+                                Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => s.value(),
+                                _ => String::new(),
+                            };
+                            methods_marked = match word.as_str() {
+                                "marked" => true,
+                                "all" => false,
+                                _ => {
+                                    return Err(syn::Error::new_spanned(
+                                        &value,
+                                        "methods = marked (only #[plexus_macros::method]s are on the wire) \
+                                         or methods = all (every `pub async fn` on `&self` returning \
+                                         `impl Stream<Item = E>`, the default)",
+                                    ))
+                                }
+                            };
+                            continue;
+                        }
+
                         if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
-                            if path.is_ident("namespace") {
-                                namespace = s.value();
+                            if path.is_ident(TRAIT_KEY) {
+                                // MACRO-13: `trait = "Bar"` names the trait and the client.
+                                if syn::parse_str::<syn::Ident>(&s.value()).is_err() {
+                                    return Err(syn::Error::new(
+                                        s.span(),
+                                        format!("trait = \"{}\" must be an identifier, e.g. trait = \"Driver\"", s.value()),
+                                    ));
+                                }
+                                trait_span = Some(path.span());
+                                trait_attr = Some(s);
+                            } else if path.is_ident("namespace") {
+                                namespace = Some(s.value());
                             } else if path.is_ident("version") {
                                 version = Some(s.value());
                             } else if path.is_ident("description") {
@@ -790,6 +859,14 @@ impl Parse for HubMethodsAttrs {
                         } else if path.is_ident("hub") {
                             hub = true;
                             hub_span = Some(path.span());
+                        } else if path.is_ident(TRAIT_KEY) {
+                            // MACRO-13 (`always`): the trait is emitted for
+                            // every activation; a bare `trait` asks nothing.
+                            return Err(syn::Error::new(
+                                path.span(),
+                                "the trait is always emitted, named from `impl FooActivation`'s \
+                                 stem; write `trait = \"Name\"` to name it otherwise",
+                            ));
                         } else if path.is_ident("client") {
                             // MACRO-2: also emit the typed client.
                             client = true;
@@ -826,15 +903,17 @@ impl Parse for HubMethodsAttrs {
             }
         }
 
-        if namespace.is_empty() {
-            return Err(syn::Error::new(
-                input.span(),
-                "hub_methods requires namespace = \"...\" attribute",
-            ));
+        // MACRO-13: a missing namespace is resolved (from the stem) or
+        // refused in `generate_all`, which knows the type's name.
+        if namespace.as_deref() == Some("") {
+            return Err(syn::Error::new(input.span(), "namespace = \"\" names nothing"));
         }
 
         Ok(HubMethodsAttrs {
             namespace,
+            trait_attr,
+            trait_span,
+            methods_marked,
             version,
             description,
             long_description,
@@ -2216,7 +2295,7 @@ fn type_to_string(ty: &Type) -> String {
 }
 
 /// Extract Item type from `impl Stream<Item = T>`
-fn extract_stream_item_type(ty: &Type) -> Option<Type> {
+pub(crate) fn extract_stream_item_type(ty: &Type) -> Option<Type> {
     if let Type::ImplTrait(impl_trait) = ty {
         for bound in &impl_trait.bounds {
             if let syn::TypeParamBound::Trait(trait_bound) = bound {

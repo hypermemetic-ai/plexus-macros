@@ -1,0 +1,11 @@
+error: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_Echo`: plexus-macros (MACRO-13): `Echo` does not end in `Activation`, so no trait is emitted for it and its client is `EchoClient`. Rename it `EchoActivation` (or write `trait = "…"`); then `namespace`, `client`, `crate_path`, `server_cfg` and `#[method]` may all go. A later release refuses it.
+  --> tests/compile/macro13_unnamed_activation_deprecated.rs:13:6
+   |
+13 | impl Echo {
+   |      ^^^^
+   |
+note: the lint level is defined here
+  --> tests/compile/macro13_unnamed_activation_deprecated.rs:5:9
+   |
+ 5 | #![deny(deprecated)]
+   |         ^^^^^^^^^^

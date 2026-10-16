@@ -103,8 +103,25 @@ fn is_option_type(ty: &Type) -> bool {
 
 /// The statement that puts one parameter into the params object.
 fn param_insert(param: &ParamInfo, client: &syn::Path) -> TokenStream {
+    param_insert_with(param, client, |err| quote! { return #client::error_stream(#err); })
+}
+
+/// [`param_insert`], with what to do when the parameter will not serialize
+/// given by the caller (MACRO-13: a trait method returns a stream of events,
+/// not of `Result`s, so it answers differently).
+pub(crate) fn param_insert_with(
+    param: &ParamInfo,
+    client: &syn::Path,
+    on_err: impl Fn(TokenStream) -> TokenStream,
+) -> TokenStream {
     let ident = &param.name;
     let wire_name = param.name.to_string();
+    let fail = on_err(quote! {
+        #client::ClientError::Encode {
+            param: #wire_name,
+            message: __e.to_string(),
+        }
+    });
 
     if is_option_type(&param.ty) {
         // Omitted when None — see the module docs.
@@ -115,10 +132,7 @@ fn param_insert(param: &ParamInfo, client: &syn::Path) -> TokenStream {
                         __params.insert(#wire_name.to_string(), __json);
                     }
                     ::core::result::Result::Err(__e) => {
-                        return #client::error_stream(#client::ClientError::Encode {
-                            param: #wire_name,
-                            message: __e.to_string(),
-                        });
+                        #fail
                     }
                 }
             }
@@ -130,10 +144,7 @@ fn param_insert(param: &ParamInfo, client: &syn::Path) -> TokenStream {
                     __params.insert(#wire_name.to_string(), __json);
                 }
                 ::core::result::Result::Err(__e) => {
-                    return #client::error_stream(#client::ClientError::Encode {
-                        param: #wire_name,
-                        message: __e.to_string(),
-                    });
+                    #fail
                 }
             }
         }
@@ -142,7 +153,7 @@ fn param_insert(param: &ParamInfo, client: &syn::Path) -> TokenStream {
 
 /// `METHOD_LIST`, `METHOD_SET_STATUS`, … — the const `MethodRef` a client
 /// method hands the transport.
-fn method_const_ident(m: &MethodInfo) -> syn::Ident {
+pub(crate) fn method_const_ident(m: &MethodInfo) -> syn::Ident {
     format_ident!("METHOD_{}", m.method_name.to_uppercase().replace(['.', '-'], "_"))
 }
 
@@ -151,13 +162,14 @@ fn method_const_ident(m: &MethodInfo) -> syn::Ident {
 /// Returns an empty token stream when the activation did not opt in, so a
 /// non-opted-in expansion is byte-identical to before this build.
 pub(crate) fn generate(
-    struct_name: &syn::Ident,
+    client_ty: &syn::Ident,
     namespace: &str,
     methods: &[MethodInfo],
     children: &[ChildMethodInfo],
     client_path: &syn::Path,
+    // MACRO-13: the client came from the manifest, not from a `client` flag.
+    unflagged: bool,
 ) -> syn::Result<TokenStream> {
-    let client_ty = format_ident!("{}Client", struct_name);
     let child_accessors = children
         .iter()
         .filter(|c| matches!(c.kind, ChildMethodKind::Static))
@@ -173,6 +185,18 @@ pub(crate) fn generate(
         // would recreate exactly the drift this ticket removes — a consumer
         // would find the method missing and hand-write it again.
         let Some(event_ty) = &m.stream_item_type else {
+            if unflagged {
+                return Err(syn::Error::new(
+                    m.fn_name.span(),
+                    format!(
+                        "#[plexus_macros::activation]: method `{}` does not return \
+                         `impl Stream<Item = ..>`, so the client (emitted because this crate \
+                         depends on plexus-client) has no event type for it. Give it a stream \
+                         return type.",
+                        m.method_name
+                    ),
+                ));
+            }
             return Err(syn::Error::new(
                 m.fn_name.span(),
                 format!(
@@ -349,7 +373,11 @@ fn child_accessor(c: &ChildMethodInfo, namespace: &str, client: &syn::Path) -> s
     let Some(last) = child_client.segments.last_mut() else {
         return Err(syn::Error::new_spanned(&c.return_ty, "#[child]: empty return type path"));
     };
-    let ident = format_ident!("{}Client", last.ident, span = last.ident.span());
+    // MACRO-13: a child named `…Activation` has its client named from the
+    // stem (`InputsActivation` → `InputsClient`), as its own expansion names it.
+    let child_name = last.ident.to_string();
+    let stem = crate::codegen::contract::stem_of(&child_name).unwrap_or(&child_name);
+    let ident = format_ident!("{}Client", stem, span = last.ident.span());
     last.ident = ident.clone();
     last.arguments = syn::PathArguments::None;
     if tp.qself.is_some() {

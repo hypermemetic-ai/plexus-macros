@@ -1,3 +1,11 @@
+warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_TestHub`: plexus-macros (MACRO-13): `TestHub` does not end in `Activation`, so no trait is emitted for it and its client is `TestHubClient`. Rename it `TestHubActivation` (or write `trait = "…"`); then `namespace`, `client`, `crate_path`, `server_cfg` and `#[method]` may all go. A later release refuses it.
+  --> tests/compile/activation_request_field_type_mismatch.rs:17:6
+   |
+17 | impl TestHub {
+   |      ^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
 error[E0308]: mismatched types
   --> tests/compile/activation_request_field_type_mismatch.rs:16:1
    |

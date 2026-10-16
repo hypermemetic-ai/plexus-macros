@@ -1,0 +1,25 @@
+error[E0277]: `EchoEvent` does not implement `plexus_client::FromClientError`
+  --> tests/compile/macro13_event_without_from_client_error.rs:17:65
+   |
+17 |     pub async fn say(&self, text: String) -> impl Stream<Item = EchoEvent> + Send + 'static {
+   |                                                                 ^^^^^^^^^ the event type of a trait emitted by `#[plexus_macros::activation]` must implement `plexus_client::FromClientError`
+   |
+help: the trait `FromClientError` is not implemented for `EchoEvent`
+  --> tests/compile/macro13_event_without_from_client_error.rs:8:1
+   |
+ 8 | pub enum EchoEvent {
+   | ^^^^^^^^^^^^^^^^^^
+   = note: the client's implementation of the trait yields a client failure as `EchoEvent::from_client_error(err)`; implement `plexus_client::FromClientError` for `EchoEvent` (usually its in-band `Error { message }` variant)
+help: the trait `FromClientError` is implemented for `std::string::String`
+  --> plexus-client/src/contract.rs
+   |
+   | impl FromClientError for String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `error_events`
+  --> plexus-client/src/contract.rs
+   |
+   | pub fn error_events<'a, E>(error: ClientError) -> BoxStream<'a, E>
+   |        ------------ required by a bound in this function
+   | where
+   |     E: FromClientError + 'a,
+   |        ^^^^^^^^^^^^^^^ required by this bound in `error_events`
