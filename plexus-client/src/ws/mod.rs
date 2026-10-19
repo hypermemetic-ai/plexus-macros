@@ -163,6 +163,25 @@ impl WsTransport {
         })
     }
 
+    /// [`connect`](Self::connect), with headers on the upgrade request — an
+    /// `Authorization: Bearer <key proof>` for a server under login, as
+    /// synapse signs in. `ws-native` only: a browser's socket takes no
+    /// headers (it carries its cookies).
+    #[cfg(feature = "ws-native")]
+    pub async fn connect_with_headers(
+        url: &str,
+        hub_namespace: &str,
+        headers: &[(String, String)],
+    ) -> Result<Self, TransportError> {
+        let registry = Arc::new(Registry::new(Arc::from(hub_namespace)));
+        let conn = backend::connect_with_headers(url, headers, registry.clone()).await?;
+        Ok(Self {
+            _closer: Arc::new(Closer { conn: conn.clone() }),
+            conn,
+            registry,
+        })
+    }
+
     /// The hub namespace this transport prefixes `call` / `call_unsub` with.
     pub fn hub_namespace(&self) -> &str {
         self.registry.hub_namespace()

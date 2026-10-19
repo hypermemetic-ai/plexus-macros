@@ -47,7 +47,31 @@ impl Conn {
 }
 
 pub(crate) async fn connect(url: &str, registry: Arc<Registry>) -> Result<Conn, TransportError> {
-    let (socket, _response) = tokio_tungstenite::connect_async(url)
+    connect_with_headers(url, &[], registry).await
+}
+
+/// [`connect`], with headers on the upgrade request (an `Authorization`
+/// carrying a key proof, as synapse signs in).
+pub(crate) async fn connect_with_headers(
+    url: &str,
+    headers: &[(String, String)],
+    registry: Arc<Registry>,
+) -> Result<Conn, TransportError> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
+
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| TransportError::connect(format!("{url}: {e}")))?;
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| TransportError::connect(format!("header {name}: {e}")))?;
+        // The value is never said back: it may be a credential.
+        let value = HeaderValue::from_str(value)
+            .map_err(|_| TransportError::connect(format!("header {name}: not a header value")))?;
+        request.headers_mut().insert(name, value);
+    }
+    let (socket, _response) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(|e| TransportError::connect(format!("{url}: {e}")))?;
 

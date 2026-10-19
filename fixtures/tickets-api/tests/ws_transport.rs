@@ -553,3 +553,46 @@ async fn connecting_to_nothing_is_a_connect_error() {
         .expect_err("nothing is listening");
     assert_eq!(err.kind, TransportErrorKind::Connect, "{err}");
 }
+
+/// TETHER-9: `connect_with_headers` puts its headers on the upgrade request
+/// — how a native client signs in to a server under login (an
+/// `Authorization: Bearer <key proof>`, as synapse does) — and the socket
+/// then carries calls as `connect`'s does.
+#[tokio::test]
+async fn connect_with_headers_sends_them_on_the_upgrade() {
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("accept");
+        let mut tx = Some(tx);
+        let ws = tokio_tungstenite::accept_hdr_async(tcp, |req: &Request, resp: Response| {
+            let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).map(String::from);
+            let _ = tx.take().unwrap().send(auth);
+            Ok(resp)
+        })
+        .await
+        .expect("handshake");
+        let (mut out, mut inbound) = ws.split();
+        while let Some(Ok(Message::Text(text))) = inbound.next().await {
+            let frame: Value = serde_json::from_str(text.as_str()).unwrap();
+            use futures::SinkExt;
+            let _ = out.send(Message::text(ack(&frame, json!(3)))).await;
+            let _ = out.send(Message::text(notify("result", json!(3), done()))).await;
+        }
+    });
+
+    let headers = vec![("Authorization".to_string(), "Bearer proof-123".to_string())];
+    let t = WsTransport::connect_with_headers(&format!("ws://{addr}"), "menger", &headers).await.expect("connects");
+    assert_eq!(rx.await.unwrap().as_deref(), Some("Bearer proof-123"));
+    let items: Vec<_> = t.call(MethodRef::new("tickets", "health"), json!({})).collect().await;
+    assert!(items.iter().any(|i| matches!(i, Ok(StreamItem::Done { .. }))), "{items:?}");
+
+    // A value that is no header value is refused, and not said back.
+    let bad = vec![("Authorization".to_string(), "line\nbreak secret".to_string())];
+    let err = WsTransport::connect_with_headers(&format!("ws://{addr}"), "menger", &bad).await.expect_err("refused");
+    assert_eq!(err.kind, TransportErrorKind::Connect);
+    assert!(!err.to_string().contains("secret"), "{err}");
+}
