@@ -1,6 +1,6 @@
 [package]
 name = "plexus-client"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 license = "MIT"
 description = "wasm-safe client runtime for Plexus RPC: the wire envelope, the Transport trait, and typed event decoding"
