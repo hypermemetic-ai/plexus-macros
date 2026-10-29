@@ -132,6 +132,14 @@ pub fn generate(
             None => quote! { ::std::option::Option::None },
         })
         .collect();
+    // BIDIR-8: who may answer each method's questions (absent: the caller).
+    let method_answer_bys: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| match &m.answer_by {
+            Some(a) => quote! { ::std::option::Option::Some(#a) },
+            None => quote! { ::std::option::Option::None },
+        })
+        .collect();
     let method_long_descriptions: Vec<TokenStream> = methods
         .iter()
         .map(|m| match &m.long_description {
@@ -554,6 +562,7 @@ pub fn generate(
                 // AUTH-3: grants, targets, long descriptions.
                 let grants: &[&str] = &[#(#method_grants),*];
                 let targets: &[::std::option::Option<&str>] = &[#(#method_targets),*];
+                let answer_bys: &[::std::option::Option<&str>] = &[#(#method_answer_bys),*];
                 let long_descriptions: &[::std::option::Option<&str>] = &[#(#method_long_descriptions),*];
                 // SYNAPSE-13: groups, examples (params JSON, note), param values.
                 let groups: &[::std::option::Option<&str>] = &[#(#method_groups),*];
@@ -687,6 +696,10 @@ pub fn generate(
                         schema = schema.with_grant(grants[i]);
                         if let ::std::option::Option::Some(t) = targets[i] {
                             schema = schema.with_target(t);
+                        }
+                        // BIDIR-8: who may answer (only when declared).
+                        if let ::std::option::Option::Some(a) = answer_bys[i] {
+                            schema = schema.with_answer_by(a);
                         }
                         if let ::std::option::Option::Some(l) = long_descriptions[i] {
                             schema = schema.with_long_description(l);
