@@ -1,0 +1,5 @@
+error: answer_by = "anyone" on `approve`: who may answer is one of `caller` (the default), `person`, or `grant:<activation.method>`
+ --> tests/compile/bidir_answer_by_unknown.rs:8:41
+  |
+8 |     #[plexus_macros::method(answer_by = "anyone")]
+  |                                         ^^^^^^^^

@@ -125,6 +125,10 @@ pub struct HubMethodAttrs {
     /// acts on. Must name one of the method's RPC params (checked in
     /// [`MethodInfo::from_fn`]).
     pub target: Option<syn::LitStr>,
+    /// BIDIR-8: `answer_by = "caller" | "person" | "grant:<g>"` — who may
+    /// answer a question the method asks mid-call. Checked in
+    /// [`MethodInfo::from_fn`] (the error names the method).
+    pub answer_by: Option<syn::LitStr>,
     /// SYNAPSE-13: `group = "write"` — the method's group in a listing
     /// (OpenAPI's tag); emitted as `MethodSchema.group`.
     pub group: Option<String>,
@@ -292,6 +296,8 @@ impl Parse for HubMethodAttrs {
         let mut first_scope_span: Option<proc_macro2::Span> = None;
         // AUTH-3: `target = "param"`.
         let mut target: Option<syn::LitStr> = None;
+        // BIDIR-8: `answer_by = "…"`.
+        let mut answer_by: Option<syn::LitStr> = None;
         // SYNAPSE-13: group, examples, values.
         let mut group: Option<String> = None;
         let mut examples: Vec<ParsedExample> = Vec::new();
@@ -365,6 +371,17 @@ impl Parse for HubMethodAttrs {
                                 ));
                             };
                             target = Some(s);
+                        } else if path.is_ident("answer_by") {
+                            // BIDIR-8: who may answer the method's questions.
+                            let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value else {
+                                return Err(syn::Error::new_spanned(
+                                    &path,
+                                    "answer_by = ... expects a string: `caller` (the default), `person`, \
+                                     or `grant:<activation.method>`, e.g. \
+                                     #[plexus_macros::method(answer_by = \"person\")]",
+                                ));
+                            };
+                            answer_by = Some(s);
                         } else if path.is_ident("group") {
                             // SYNAPSE-13: the method's group in a listing.
                             let usage = "group = ... expects a non-empty string, e.g. \
@@ -516,7 +533,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes, target, group, examples, values })
+        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes, target, answer_by, group, examples, values })
     }
 }
 
@@ -1743,6 +1760,10 @@ pub struct MethodInfo {
     /// AUTH-3: `target = "param"`, validated against `params`; emitted as
     /// `MethodSchema.target`.
     pub target: Option<String>,
+    /// BIDIR-8: `answer_by`, checked; `None` for the default (`caller`),
+    /// so the schema of a method without it is unchanged. Emitted as
+    /// `MethodSchema.answer_by`.
+    pub answer_by: Option<String>,
     /// AUTH-3: the `///` doc comment when an explicit `description = "..."`
     /// replaced it as the description — what it says beyond the
     /// description; emitted as `MethodSchema.long_description`.
@@ -2018,6 +2039,26 @@ impl MethodInfo {
             }
         };
 
+        // BIDIR-8: `answer_by` is one of three spellings (plexus-auth-core's
+        // `Answerer::parse` reads the same; the default is left unset).
+        let answer_by = match hub_method_attrs.and_then(|a| a.answer_by.as_ref()) {
+            None => None,
+            Some(lit) => match answer_by_declared(&lit.value()) {
+                Ok(declared) => declared,
+                Err(()) => {
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        format!(
+                            "answer_by = \"{}\" on `{}`: who may answer is one of `caller` (the default), \
+                             `person`, or `grant:<activation.method>`",
+                            lit.value(),
+                            fn_name,
+                        ),
+                    ))
+                }
+            },
+        };
+
         // SYNAPSE-13: values and examples name only the method's params.
         let known_params = || -> String {
             let known: Vec<String> = params.iter().map(|p: &ParamInfo| p.name.to_string()).collect();
@@ -2072,6 +2113,7 @@ impl MethodInfo {
             scopes,
             deprecation,
             target,
+            answer_by,
             long_description,
             group,
             examples,
@@ -2402,6 +2444,22 @@ fn is_result_plexus_stream(ty: &Type) -> bool {
     false
 }
 
+
+/// BIDIR-8: an `answer_by` declaration, as plexus-auth-core's
+/// `Answerer::parse` reads it — `Ok(None)` for the default (`caller`),
+/// `Ok(Some(spelling))` for `person` / `grant:<activation.method>`, `Err` for
+/// anything else.
+fn answer_by_declared(text: &str) -> Result<Option<String>, ()> {
+    match text.trim() {
+        "caller" => Ok(None),
+        "person" => Ok(Some("person".into())),
+        t => match t.strip_prefix("grant:") {
+            Some(g) if g.contains('.') && !g.contains(char::is_whitespace) => Ok(Some(format!("grant:{g}"))),
+            _ => Err(()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2533,6 +2591,7 @@ mod tests {
             public: false,
             scopes: vec![],
             target: None,
+            answer_by: None,
             group: None,
             examples: vec![],
             values: vec![],
