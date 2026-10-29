@@ -52,4 +52,9 @@ ws-web = ["dep:futures-channel", "dep:wasm-bindgen", "dep:web-sys"]
 
 [dev-dependencies]
 futures = "0.3"
-tokio = { version = "1.0", features = ["macros", "rt"] }
+tokio = { version = "1.0", features = ["macros", "rt", "time"] }
+
+# RETURNS-38: watch((a, b, c)) against a running menger (a live check).
+[[example]]
+name = "watch_live"
+required-features = ["ws-native"]

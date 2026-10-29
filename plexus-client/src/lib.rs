@@ -57,6 +57,13 @@
 //! | `ws-native` | `tokio-tungstenite` | native |
 //! | `ws-web` | `web_sys::WebSocket` | `wasm32-unknown-unknown` |
 //!
+//! ## Many streams as one
+//!
+//! [`watch`] merges a tuple of method streams into one whose item is exactly
+//! the union of theirs — `watch((tickets, chats, deployments))` yields
+//! `Watched3<A, B, C>`, and dropping it drops (on a `WsTransport`:
+//! unsubscribes) each (RETURNS-38). See [`watch`](mod@watch).
+//!
 //! Both features expose the same `WsTransport` type and the same
 //! `WsTransport::connect(url, hub_namespace)`, so a consumer picks the
 //! backend in `Cargo.toml` and changes no code. See [`ws`].
@@ -71,6 +78,7 @@ pub mod error;
 pub mod event;
 pub mod memory;
 pub mod transport;
+pub mod watch;
 
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub mod ws;
@@ -82,6 +90,11 @@ pub use error::{ClientError, TransportError, TransportErrorKind};
 pub use event::ClientEvent;
 pub use memory::MemoryTransport;
 pub use transport::{ItemStream, MethodRef, Transport};
+pub use watch::{
+    watch, watch_with, Errors, Fallible, StopOnError, Watch, Watched10, Watched11, Watched12, Watched2, Watched3,
+    Watched4, Watched5, Watched6, Watched7, Watched8, Watched9, Watching10, Watching11, Watching12, Watching2,
+    Watching3, Watching4, Watching5, Watching6, Watching7, Watching8, Watching9,
+};
 
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub use ws::WsTransport;
