@@ -795,13 +795,13 @@ pub fn generate(
                     })
                     .collect::<Vec<_>>();
 
-                // Add the auto-generated schema method
-                let schema_method = #crate_path::plexus::MethodSchema::new(
-                    "schema".to_string(),
-                    "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.".to_string(),
-                    "auto_schema".to_string(), // Fixed hash since it's auto-generated
-                )
-                .with_grant(#schema_grant);
+                // Add the auto-generated schema method. SYNAPSE-CC-9 (as
+                // RETURNS-26 on 0.7): it declares its params `{method?:
+                // string}` and its return, a `SchemaResult` — this
+                // `PluginSchema`, or one `MethodSchema` when called with
+                // `{"method": …}`.
+                let schema_method = #crate_path::plexus::MethodSchema::auto_schema()
+                    .with_grant(#schema_grant);
                 methods.push(schema_method);
 
                 // IR-3: append `#[child]` method entries. Each entry's role is
