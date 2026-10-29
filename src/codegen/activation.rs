@@ -47,15 +47,24 @@ pub fn generate(
     deps: &syn::Ident,
     // AUTH-3: default roles, flattened to grants.
     roles: &[(String, Vec<String>)],
+    // PLX-91: the `ActivationIr` accessors, emitted into the inherent impl.
+    activation_ir_fns: &TokenStream,
+    // PLX-91: the handler table, emitted into the inherent impl.
+    handler_table_fn: &TokenStream,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
+    let owned_wrapper_name = format_ident!("__PlexusOwnedChild{}", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
     let rpc_server_name = format_ident!("{}RpcServer", struct_name);
     let method_names: Vec<&str> = methods.iter().map(|m| m.method_name.as_str()).collect();
 
-    let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type, deps);
+    // PLX-91 (the switchover): the only dispatch arms that survive are the
+    // bidirectional ones. See `codegen::handlers` for why that construct alone
+    // could not move onto the turn runtime, and why keeping it on its existing
+    // path is the opposite of a silent semantic change.
+    let dispatch_arms = generate_bidir_arms(methods, namespace, crate_path, request_type, deps);
     let help_arms = generate_help_arms(methods);
-    let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty());
+    let has_public_rpc_methods = methods.iter().any(|m| on_legacy_rpc_surface(m));
     let rpc_trait_methods = generate_rpc_trait_methods(methods, deps);
     let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path, deps);
 
@@ -115,14 +124,8 @@ pub fn generate(
                     let cargo_toml = std::path::Path::new(&dir).join("Cargo.toml");
                     std::fs::read_to_string(cargo_toml).ok()
                 })
-                .and_then(|content| {
-                    // Simple parse: find version = "x.y.z"
-                    content.lines()
-                        .find(|line| line.trim().starts_with("version"))
-                        .and_then(|line| {
-                            line.split('"').nth(1).map(|s| s.to_string())
-                        })
-                })
+                .as_deref()
+                .and_then(package_version_from_cargo_toml)
                 .unwrap_or_else(|| "0.0.0".to_string())
         });
 
@@ -370,8 +373,13 @@ pub fn generate(
                 // Static child methods have shape `fn NAME(&self) -> Child`
                 // which we always call synchronously. (Making static child
                 // methods async would just force an unnecessary `.await`.)
+                // PLX-91: the child is handed over OWNED, wrapped so that
+                // `router_call` can reach `Activation::call_arc`. See
+                // `owned_router_wrapper` for why the wrapper has to exist.
                 quote! {
-                    Some(Box::new(self.#fn_name()) as Box<dyn #crate_path::plexus::ChildRouter>)
+                    Some(::std::boxed::Box::new(#owned_wrapper_name(
+                        ::std::sync::Arc::new(self.#fn_name())
+                    )) as Box<dyn #crate_path::plexus::ChildRouter>)
                 }
             })
             .collect();
@@ -387,7 +395,8 @@ pub fn generate(
                 _ => self
                     .#fn_name(_name)
                     #await_tok
-                    .map(|c| Box::new(c) as Box<dyn #crate_path::plexus::ChildRouter>),
+                    .map(|c| ::std::boxed::Box::new(#owned_wrapper_name(::std::sync::Arc::new(c)))
+                        as Box<dyn #crate_path::plexus::ChildRouter>),
             }
         } else {
             quote! { _ => None, }
@@ -405,7 +414,8 @@ pub fn generate(
                 self
                     .#fn_name(_name)
                     #await_tok
-                    .map(|c| Box::new(c) as Box<dyn #crate_path::plexus::ChildRouter>)
+                    .map(|c| ::std::boxed::Box::new(#owned_wrapper_name(::std::sync::Arc::new(c)))
+                        as Box<dyn #crate_path::plexus::ChildRouter>)
             }
         } else {
             quote! {
@@ -425,7 +435,9 @@ pub fn generate(
         quote! {
             match _name {
                 #(
-                    #child_names => Some(Box::new(self.#child_fields.clone())),
+                    #child_names => Some(::std::boxed::Box::new(#owned_wrapper_name(
+                        ::std::sync::Arc::new(self.#child_fields.clone())
+                    )) as Box<dyn #crate_path::plexus::ChildRouter>),
                 )*
                 _ => None,
             }
@@ -768,7 +780,67 @@ pub fn generate(
         quote! {}
     };
 
+    // PLX-91: children are handed to `route_to_child` as `Box<dyn ChildRouter>`
+    // and dispatched through `ChildRouter::router_call(&self, ..)` — a
+    // *borrowed* seam, in plexus-core, which is read-only for this build. A
+    // turn-native child needs an OWNED handle (PLX-97), so the box has to
+    // contain something that already holds one. This wrapper is that thing: a
+    // local generic newtype over `Arc<C>` whose `router_call` reaches
+    // `Activation::call_arc`. It is local because coherence requires it —
+    // `impl ChildRouter for Arc<C>` is an orphan impl (`Arc` is not
+    // `#[fundamental]`), so a newtype is the only legal spelling. Every other
+    // `ChildRouter` method forwards, so listing, searching, capabilities and
+    // grandchild descent behave exactly as before.
+    let owned_child_wrapper = quote! {
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub struct #owned_wrapper_name<C>(pub ::std::sync::Arc<C>);
+
+        #[#deps::async_trait::async_trait]
+        impl<C> #crate_path::plexus::ChildRouter for #owned_wrapper_name<C>
+        where
+            C: #crate_path::plexus::Activation
+                + #crate_path::plexus::ChildRouter
+                + ::core::marker::Sized,
+        {
+            fn router_namespace(&self) -> &str {
+                #crate_path::plexus::ChildRouter::router_namespace(&*self.0)
+            }
+
+            async fn router_call(
+                &self,
+                method: &str,
+                params: #deps::serde_json::Value,
+                auth: Option<&#crate_path::plexus::AuthContext>,
+                raw_ctx: Option<&#crate_path::request::RawRequestContext>,
+            ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
+                <C as #crate_path::plexus::Activation>::call_arc(
+                    ::std::sync::Arc::clone(&self.0), method, params, auth, raw_ctx,
+                ).await
+            }
+
+            async fn get_child(&self, _name: &str) -> Option<Box<dyn #crate_path::plexus::ChildRouter>> {
+                #crate_path::plexus::ChildRouter::get_child(&*self.0, _name).await
+            }
+
+            #[allow(deprecated)]
+            fn capabilities(&self) -> #crate_path::plexus::ChildCapabilities {
+                #crate_path::plexus::ChildRouter::capabilities(&*self.0)
+            }
+
+            async fn list_children(&self) -> Option<#deps::futures::stream::BoxStream<'_, ::std::string::String>> {
+                #crate_path::plexus::ChildRouter::list_children(&*self.0).await
+            }
+
+            async fn search_children(&self, query: &str) -> Option<#deps::futures::stream::BoxStream<'_, ::std::string::String>> {
+                #crate_path::plexus::ChildRouter::search_children(&*self.0, query).await
+            }
+        }
+    };
+
     quote! {
+        #owned_child_wrapper
+
         impl #impl_generics #self_ty #where_clause {
             pub const NAMESPACE: &'static str = #namespace;
             /// Stable plugin instance ID for handle routing
@@ -779,7 +851,55 @@ pub fn generate(
                 Self::PLUGIN_ID
             }
 
+            /// PLX-91: hand this activation to a parent as an **owned** child
+            /// router.
+            ///
+            /// `ChildRouter::router_call` takes `&self`, but a turn-native
+            /// method needs an owned handle — the turn's stream outlives the
+            /// borrow (PLX-97). `Box::new(self)` therefore no longer suffices
+            /// for a macro-generated activation; this is the one-call
+            /// replacement, and the macro's own generated `get_child` uses it
+            /// for every `#[child]` edge. A hand-written `ChildRouter` should
+            /// return `Some(Child.into_child_router())` where it used to
+            /// return `Some(Box::new(Child))`.
+            #[allow(dead_code)]
+            pub fn into_child_router(self) -> ::std::boxed::Box<dyn #crate_path::plexus::ChildRouter>
+            where
+                Self: ::core::marker::Sized,
+            {
+                ::std::boxed::Box::new(#owned_wrapper_name(::std::sync::Arc::new(self)))
+            }
+
             #plugin_children_synth
+
+            #activation_ir_fns
+
+            #handler_table_fn
+
+            /// PLX-146: this activation's live turns, so a callback it issues
+            /// can actually be answered.
+            ///
+            /// `call_arc` used to pass `live: None` to
+            /// `turn_stream_to_plexus_stream`, which dropped the turn's
+            /// `TurnControl` on the floor. The callback was still projected
+            /// onto the wire as a `PlexusStreamItem::Request`, so from the
+            /// outside it looked like the mechanism worked — but nothing held a
+            /// control keyed by turn id, so no answer could ever be routed back
+            /// and the handler's `client.*_async(..).await` never resolved.
+            /// A generated activation could declare a callback and could never
+            /// answer one.
+            ///
+            /// The registry is keyed by `TurnId`, which is a v4 UUID, so the
+            /// `static` being per-monomorphization rather than per-instance
+            /// cannot collide across activations. Entries are removed by the
+            /// projection's terminal arm, so a resolved turn does not leak.
+            #[doc(hidden)]
+            #[allow(dead_code)]
+            pub fn __plexus_live_turns() -> &'static #crate_path::runtime::LiveTurns {
+                static __LIVE: ::std::sync::OnceLock<#crate_path::runtime::LiveTurns>
+                    = ::std::sync::OnceLock::new();
+                __LIVE.get_or_init(#crate_path::runtime::LiveTurns::new)
+            }
         }
 
         #rpc_block
@@ -807,6 +927,14 @@ pub fn generate(
                 }
             }
 
+            /// PLX-91: the borrowed entry point.
+            ///
+            /// `.schema`, child routing and the surviving bidirectional arms
+            /// are served here, because none of them needs an owned handle on
+            /// the activation. A turn-native `#[method]` does — the turn's
+            /// stream outlives this borrow (PLX-97) — so it is served by
+            /// [`Activation::call_arc`], which `DynamicHub` and the generated
+            /// `ChildRouter` both route through.
             async fn call(
                 &self,
                 method: &str,
@@ -814,30 +942,15 @@ pub fn generate(
                 auth: Option<&#crate_path::plexus::AuthContext>,
                 raw_ctx: Option<&#crate_path::request::RawRequestContext>,
             ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
-                // Try local methods first
                 match method {
                     #(#dispatch_arms)*
                     "schema" => {
-                        // Check if a specific method was requested
-                        let method_name: Option<String> = params.get("method")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-
-                        let plugin_schema = self.plugin_schema();
-
-                        let result = if let Some(ref name) = method_name {
-                            // Find the specific method
-                            plugin_schema.methods.iter()
-                                .find(|m| m.name == *name)
-                                .map(|m| #crate_path::plexus::SchemaResult::Method(m.clone()))
-                                .ok_or_else(|| #crate_path::plexus::PlexusError::MethodNotFound {
-                                    activation: #namespace.to_string(),
-                                    method: name.clone(),
-                                })?
-                        } else {
-                            // Return full plugin schema
-                            #crate_path::plexus::SchemaResult::Plugin(plugin_schema)
-                        };
+                        // PROT schema unification (PLX-13): `.schema` always yields the
+                        // single unified PluginSchema. Per-method detail is read from
+                        // `PluginSchema::methods`; there is no `SchemaResult::Method`
+                        // variant and no `method`-param branch. An old client that still
+                        // sends `{"method": ...}` gets the full plugin schema.
+                        let result = #crate_path::plexus::SchemaResult::Plugin(self.plugin_schema());
 
                         Ok(#crate_path::plexus::wrap_stream(
                             #deps::futures::stream::once(async move { result }),
@@ -846,40 +959,78 @@ pub fn generate(
                         ))
                     }
                     _ => {
-                        // Check for {method}.schema pattern (e.g., "echo.schema")
-                        // Only if the prefix is an actual local user method (NOT a
-                        // child-role entry). Child-role methods are listed in
-                        // `plugin_schema.methods` with `role = StaticChild` or
-                        // `DynamicChild { .. }` (CHILD-8 / IR-10); matching them
-                        // here would return a `SchemaResult::Method` when the
-                        // caller actually wants the child's `PluginSchema` via
-                        // `route_to_child` (HF-AUDIT-3 / HF-AUDIT-4).
-                        if let Some(method_name) = method.strip_suffix(".schema") {
-                            let plugin_schema = self.plugin_schema();
-                            if let Some(m) = plugin_schema.methods.iter().find(|m| {
-                                m.name == method_name
-                                    && !matches!(
-                                        m.role,
-                                        #crate_path::plexus::MethodRole::StaticChild
-                                            | #crate_path::plexus::MethodRole::DynamicChild { .. }
-                                    )
-                            }) {
-                                let result = #crate_path::plexus::SchemaResult::Method(m.clone());
-                                return Ok(#crate_path::plexus::wrap_stream(
-                                    #deps::futures::stream::once(async move { result }),
-                                    concat!(#namespace, ".method_schema"),
-                                    vec![#namespace.into()]
-                                ));
-                            }
-                            // Not a local user method (child-role entry or no
-                            // match) - fall through to child routing.
+                        if Self::__plexus_handler_table().contains(method) {
+                            return Err(#crate_path::plexus::PlexusError::ExecutionError(
+                                format!(
+                                    "PLX-91: `{}.{}` is a turn-native method and must be \
+                                     dispatched through `Activation::call_arc(Arc<Self>, ..)`. \
+                                     `call(&self, ..)` lends a borrow the turn's stream \
+                                     outlives, so no owned handle exists to run the handler \
+                                     with. `DynamicHub` and the generated `ChildRouter` \
+                                     already route through `call_arc`.",
+                                    #namespace, method,
+                                )
+                            ));
                         }
-
-                        // For hubs: try routing to child plugin via ChildRouter trait
-                        // For leaves: return MethodNotFound
+                        // PROT schema unification (PLX-13): the `{method}.schema`
+                        // strip-suffix shortcut (and the HF-AUDIT-4 child-role guard
+                        // that fenced it) is deleted. `<name>.schema` is no longer a
+                        // per-method result path — it resolves to a child plugin's own
+                        // `.schema` via child routing, or is method-not-found.
                         #call_fallback
                     }
                 }
+            }
+
+            /// PLX-91 / PLX-97: **the** switched dispatch path.
+            ///
+            /// Three lines of actual work: look the method up in the
+            /// `ActivationIr`, build the handler table, hand both plus the
+            /// owned `Arc<Self>` to `runtime::entry_with_state`. Auth
+            /// injection, capability pre-flight, the update/terminal split and
+            /// the exactly-one-terminal guarantee all happen inside `entry` —
+            /// there is no generated template for any of them.
+            async fn call_arc(
+                self: ::std::sync::Arc<Self>,
+                method: &str,
+                params: #deps::serde_json::Value,
+                auth: Option<&#crate_path::plexus::AuthContext>,
+                raw_ctx: Option<&#crate_path::request::RawRequestContext>,
+            ) -> Result<#crate_path::plexus::PlexusStream, #crate_path::plexus::PlexusError> {
+                let __handlers = Self::__plexus_handler_table();
+                if __handlers.contains(method) {
+                    let __ir = Self::__plexus_activation_ir_cached()
+                        .map_err(#crate_path::plexus::PlexusError::ExecutionError)?;
+                    let __dotted = __ir
+                        .method(method)
+                        .map(|m| m.dotted_id.clone())
+                        .unwrap_or_else(|| format!("{}.{}", #namespace, method));
+                    let __request = #crate_path::runtime::TurnRequest {
+                        method: method.to_string(),
+                        params,
+                        auth: auth.cloned(),
+                        raw_ctx: raw_ctx.cloned(),
+                        peer: #crate_path::runtime::PeerCapabilities::all(),
+                    };
+                    let __handle = #crate_path::runtime::entry_with_state(
+                        __ir, &__handlers, self, __request,
+                    )?;
+                    // PLX-146: register BEFORE the stream is handed back. The
+                    // callback event can be observed by the peer as soon as the
+                    // stream is polled, so a control registered afterwards
+                    // would race a fast responder.
+                    let __live = Self::__plexus_live_turns();
+                    __live.register(&__handle);
+                    return Ok(#crate_path::runtime::turn_stream_to_plexus_stream(
+                        __dotted,
+                        ::std::vec![#namespace.to_string()],
+                        __handle,
+                        ::core::option::Option::Some(::std::clone::Clone::clone(__live)),
+                    ));
+                }
+                <Self as #crate_path::plexus::Activation>::call(
+                    &*self, method, params, auth, raw_ctx,
+                ).await
             }
 
             fn into_rpc_methods(self) -> #deps::jsonrpsee::core::server::Methods {
@@ -897,13 +1048,34 @@ pub fn generate(
     }
 }
 
+/// Whether a method appears on the legacy jsonrpsee surface.
+///
+/// This predicate had **three** copies — the `has_public_rpc_methods` guard,
+/// the trait's method declarations, and the impl's method bodies — which is
+/// exactly one copy per place PLX-146 had to change it, and the reason the
+/// first attempt compiled the impl but not the trait (`E0046: not all trait
+/// items implemented`). It is one function now, so the three cannot drift.
+///
+/// Excluded, all for the same reason — the legacy surface has no turn behind
+/// it, so it cannot supply what the method needs, and `Activation::call`'s `_`
+/// arm routes the caller to `call_arc` by name:
+///
+/// - `requires_auth`: no `AuthContext` here.
+/// - `activation_params`: no request struct to extract from here.
+/// - `capability_client` (PLX-146): no `TurnContext` to mint a `Client<C>`
+///   from. An `unwired()` handle would compile and then fail at runtime on the
+///   first callback with `CallbackError::NotWired`; routing is honest instead.
+fn on_legacy_rpc_surface(m: &MethodInfo) -> bool {
+    !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.capability_client.is_none()
+}
+
 fn generate_rpc_trait_methods(methods: &[MethodInfo], deps: &syn::Ident) -> Vec<TokenStream> {
     methods
         .iter()
         // Auth-requiring methods and methods with activation_params are dispatched through
         // Activation::call() which handles auth injection and request extraction.
         // The jsonrpsee RPC trait cannot carry auth context or raw_ctx.
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty())
+        .filter(|m| on_legacy_rpc_surface(m))
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -941,7 +1113,7 @@ fn generate_rpc_impl_methods(
     methods
         .iter()
         // Skip auth-requiring methods and activation_param methods — they route through Activation::call()
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty())
+        .filter(|m| on_legacy_rpc_surface(m))
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -1003,6 +1175,110 @@ fn generate_rpc_impl_methods(
             // All methods use wrap_stream for consistent streaming pattern
             let content_type = format!("{}.{}", namespace, method_name_str);
 
+            // PLX-110: the SECOND site that has to branch on the return shape.
+            //
+            // The ticket names `codegen/handlers.rs`, and that is where the
+            // turn-native dispatch lives — but the probe's four compile errors
+            // pointed at `plexus-core/src/plexus/streaming.rs:55` as well as at
+            // the handler table, because this legacy jsonrpsee subscription
+            // impl feeds the method's return value straight into
+            // `wrap_stream<T: Serialize>(impl Stream<Item = T>, ..)`. A unary
+            // method that only fixed `handlers.rs` would still not compile.
+            //
+            // What a unary method looks like on THIS surface: a subscription
+            // has no terminal channel — it has Data items and a Done — so the
+            // `Ok` value arrives as one Data item and then Done, and the `Err`
+            // arrives as one Data item carrying the serialized `TurnError`
+            // envelope. That is lossier than the turn projection (a consumer
+            // must read the envelope to see it failed), and it is a residual
+            // recorded rather than hidden: this surface predates the turn model
+            // and PLX-91 kept it deliberately. Both arms unify at
+            // `PlexusStream`, and `wrap_stream` still does the serialization,
+            // so `Credential<T>` capture (AUTHZ-CRED-CORE-2) keeps working on
+            // the Ok path.
+            let wrapped_stream = {
+                use crate::ir_parse::signature::DispatchShape;
+                // PLX-112: this site goes through `IntoTurnStop` too, for the
+                // same reason PLX-110 had to touch it at all — a refusal type
+                // that only implements `IntoTurnStop` does not satisfy
+                // `Into<TurnError>`, so fixing only `handlers.rs` would have
+                // made the whole activation fail to compile. The macro still
+                // guesses nothing here: it delegates to the same trait.
+                //
+                // This surface has no terminal and therefore no `StopReason`,
+                // so it cannot express the kind at all — a `Refused` arrives as
+                // one Data item carrying the `StopDetail`, exactly as a
+                // `Failed` arrives as one Data item carrying the `TurnError`.
+                // That is the *same* pre-existing lossiness PLX-110 recorded
+                // for the error arm, not a new one, and it is why the turn
+                // projection is the surface the RFC constrains.
+                let once_err = quote! {
+                    ::core::result::Result::Err(__e) => {
+                        match #crate_path::runtime::IntoTurnStop::into_turn_stop(__e) {
+                            #crate_path::runtime::TurnStop::Failed(__te) => {
+                                #crate_path::plexus::wrap_stream(
+                                    #deps::futures::stream::once(async move { __te }),
+                                    #content_type,
+                                    vec![#namespace.into()]
+                                )
+                            }
+                            #crate_path::runtime::TurnStop::Refused(__d)
+                            | #crate_path::runtime::TurnStop::Limited(__d) => {
+                                #crate_path::plexus::wrap_stream(
+                                    #deps::futures::stream::once(async move { __d }),
+                                    #content_type,
+                                    vec![#namespace.into()]
+                                )
+                            }
+                        }
+                    }
+                };
+                match m.dispatch {
+                    // Byte-for-byte the pre-PLX-110 emission.
+                    DispatchShape::Stream | DispatchShape::Other => quote! {
+                        let stream = #method_call;
+                        let wrapped = #crate_path::plexus::wrap_stream(
+                            stream,
+                            #content_type,
+                            vec![#namespace.into()]
+                        );
+                    },
+                    DispatchShape::ResultStream => quote! {
+                        let wrapped = match #method_call {
+                            ::core::result::Result::Ok(__s) => #crate_path::plexus::wrap_stream(
+                                __s,
+                                #content_type,
+                                vec![#namespace.into()]
+                            ),
+                            #once_err
+                        };
+                    },
+                    DispatchShape::UnaryValue => quote! {
+                        let wrapped = match #method_call {
+                            ::core::result::Result::Ok(__v) => #crate_path::plexus::wrap_stream(
+                                #deps::futures::stream::once(async move { __v }),
+                                #content_type,
+                                vec![#namespace.into()]
+                            ),
+                            #once_err
+                        };
+                    },
+                    // `Result<(), E>`: no value to send, so the subscription is
+                    // just Done — the closest this surface gets to "a terminal
+                    // with no value" (RFC 002 §6.4).
+                    DispatchShape::UnaryUnit => quote! {
+                        let wrapped = match #method_call {
+                            ::core::result::Result::Ok(_) => #crate_path::plexus::wrap_stream(
+                                #deps::futures::stream::empty::<#deps::serde_json::Value>(),
+                                #content_type,
+                                vec![#namespace.into()]
+                            ),
+                            #once_err
+                        };
+                    },
+                }
+            };
+
             quote! {
                 async fn #method_name(
                     &self,
@@ -1013,12 +1289,7 @@ fn generate_rpc_impl_methods(
 
                     let sink = pending.accept().await?;
                     #bidir_setup
-                    let stream = #method_call;
-                    let wrapped = #crate_path::plexus::wrap_stream(
-                        stream,
-                        #content_type,
-                        vec![#namespace.into()]
-                    );
+                    #wrapped_stream
 
                     #deps::tokio::spawn(async move {
                         let mut stream = wrapped;
@@ -1048,7 +1319,17 @@ fn generate_rpc_impl_methods(
         .collect()
 }
 
-fn generate_dispatch_arms(
+/// PLX-91: the residue of `generate_dispatch_arms`.
+///
+/// Before the switchover this function produced one arm per `#[method]`, each
+/// re-emitting auth injection, request extraction, param decode and
+/// wrap/terminal plumbing. All four now live once, in
+/// `plexus_core::runtime::entry`, and the arm list is empty for every method
+/// the handler table serves. What is left is the `BidirType::{Standard,
+/// Custom}` pair, which `codegen::handlers`' module docs explain cannot move
+/// without inventing a capability type per request/response pair — and which
+/// ACP depends on, so it is kept working rather than deleted.
+fn generate_bidir_arms(
     methods: &[MethodInfo],
     namespace: &str,
     crate_path: &syn::Path,
@@ -1059,6 +1340,7 @@ fn generate_dispatch_arms(
 
     methods
         .iter()
+        .filter(|m| !crate::codegen::handlers::is_switched(m))
         .map(|m| {
             let method_name = &m.method_name;
             let fn_name = &m.fn_name;
@@ -1448,4 +1730,156 @@ fn generate_help_arms(methods: &[MethodInfo]) -> Vec<TokenStream> {
             quote! { #name => Some(#desc.to_string()), }
         })
         .collect()
+}
+
+/// PLX-92: resolve the *package* version from a `Cargo.toml`'s text.
+///
+/// The previous implementation took the first line whose trimmed form started
+/// with `version` and read the first quoted token off it. That is wrong for any
+/// manifest whose `[dependencies]` (or `[build-dependencies]`, or a
+/// `[dependencies.foo]` sub-table) precedes `[package]`, or whose `[package]`
+/// section is not first in the file — it happily returned a *dependency's*
+/// version and baked it into the activation UUID.
+///
+/// This scan is section-aware: it tracks the current TOML table header and only
+/// accepts a `version = "..."` key while inside `[package]`. When `[package]`
+/// inherits from the workspace (`version.workspace = true`, which has no string
+/// literal), it falls back to `[workspace.package]`.
+///
+/// Still deliberately a line scanner, not a TOML parser — proc-macro crates pay
+/// for every dependency, and a manifest's `[package] version` is a one-line key
+/// in every manifest rustc itself will accept.
+fn package_version_from_cargo_toml(content: &str) -> Option<String> {
+    let mut package_version: Option<String> = None;
+    let mut workspace_package_version: Option<String> = None;
+    let mut section = String::new();
+
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            // Table header. `[[bin]]` array-of-table headers land here too and
+            // simply set a section name that never matches.
+            if let Some(end) = line.find(']') {
+                section = line[1..end].trim().trim_matches('"').to_string();
+            }
+            continue;
+        }
+        if section != "package" && section != "workspace.package" {
+            continue;
+        }
+        // Split off the key. `version.workspace = true` has key
+        // `version.workspace`, which must NOT match.
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "version" {
+            continue;
+        }
+        // Take the first quoted token from the value side only, so a trailing
+        // `# comment "1.0.0"` cannot win.
+        let value = value.split('#').next().unwrap_or(value);
+        let Some(v) = value.split('"').nth(1) else {
+            continue;
+        };
+        if section == "package" {
+            if package_version.is_none() {
+                package_version = Some(v.to_string());
+            }
+        } else if workspace_package_version.is_none() {
+            workspace_package_version = Some(v.to_string());
+        }
+    }
+
+    package_version.or(workspace_package_version)
+}
+
+#[cfg(test)]
+mod version_scan_tests {
+    use super::package_version_from_cargo_toml;
+
+    /// The PLX-92 acceptance case: `[dependencies]` precedes `[package]`, so the
+    /// first `version =` line in the file belongs to a dependency. The naive
+    /// scan returned "9.9.9"; the section-aware scan must return "1.2.3".
+    #[test]
+    fn dependencies_section_before_package_does_not_win() {
+        let manifest = r#"
+[dependencies]
+serde = { version = "9.9.9", features = ["derive"] }
+
+[dependencies.tokio]
+version = "8.8.8"
+
+[package]
+name = "my-activation"
+version = "1.2.3"
+edition = "2021"
+"#;
+        assert_eq!(
+            package_version_from_cargo_toml(manifest).as_deref(),
+            Some("1.2.3"),
+            "the [package] version must win over any dependency's version"
+        );
+    }
+
+    #[test]
+    fn package_first_still_resolves() {
+        let manifest = r#"
+[package]
+name = "my-activation"
+version = "0.6.0"
+
+[dependencies]
+serde = { version = "1.0.200" }
+"#;
+        assert_eq!(
+            package_version_from_cargo_toml(manifest).as_deref(),
+            Some("0.6.0")
+        );
+    }
+
+    #[test]
+    fn workspace_inherited_version_falls_back_to_workspace_package() {
+        let manifest = r#"
+[dependencies]
+serde = { version = "9.9.9" }
+
+[package]
+name = "my-activation"
+version.workspace = true
+
+[workspace.package]
+version = "2.1.0"
+"#;
+        assert_eq!(
+            package_version_from_cargo_toml(manifest).as_deref(),
+            Some("2.1.0"),
+            "`version.workspace = true` must not match, and the workspace value must be used"
+        );
+    }
+
+    #[test]
+    fn commented_out_version_is_ignored() {
+        let manifest = r#"
+[package]
+name = "my-activation"
+# version = "6.6.6"
+version = "3.0.1"  # not "7.7.7"
+"#;
+        assert_eq!(
+            package_version_from_cargo_toml(manifest).as_deref(),
+            Some("3.0.1")
+        );
+    }
+
+    #[test]
+    fn no_package_version_yields_none() {
+        let manifest = r#"
+[dependencies]
+serde = { version = "1.0" }
+"#;
+        assert_eq!(package_version_from_cargo_toml(manifest), None);
+    }
 }

@@ -150,34 +150,141 @@ fn resolve_crate_path(explicit: Option<&str>, err_span: Span) -> syn::Result<syn
     }
 }
 
-/// Resolve the path to `plexus-auth-core` for AUTHZ-CRED-MACRO-3's
-/// credentials-registry call site. Unlike `resolve_crate_path`, absence is
-/// **not** an error — consuming crates that don't depend on
-/// `plexus-auth-core` (e.g., plexus-substrate today) simply skip the
-/// credentials wiring, leaving `MethodSchema.credentials` at its empty
-/// default. This preserves behavior for all pre-AUTHZ-CRED-MACRO-3 callers
-/// and lets new callers opt in by adding the dep.
+/// PLX-91 — the switchover's first half: every `#[activation]` now carries its
+/// own `ActivationIr`.
 ///
-/// Returns `Some(path)` when `plexus-auth-core` is reachable; `None`
-/// otherwise. The path respects user renaming (e.g.,
-/// `plexus_auth_core = { package = "plexus-auth-core" }`).
-pub(crate) fn resolve_auth_core_path(err_span: Span) -> Option<syn::Path> {
-    match crate_name("plexus-auth-core") {
-        Ok(FoundCrate::Itself) => syn::parse_str("crate").ok(),
-        Ok(FoundCrate::Name(name)) => {
-            let ident = syn::Ident::new(&name, err_span);
-            Some(syn::parse_quote!(::#ident))
+/// The IR is produced by PLX-79/90's parser, read in
+/// [`Mode::Legacy`](crate::ir_parse::attrs::Mode::Legacy) so the existing
+/// `#[method(...)]` grammar (`public`, `scope`, `streaming`, `request = ()`)
+/// still parses, and then *corrected* against the legacy
+/// [`MethodInfo`](crate::parse::MethodInfo) on the one axis where the two
+/// disagree by construction: **auth**.
+///
+/// `AuthRequirementSpec` defaults to `Required` (AUTHZ-CORE-2 default-deny),
+/// but a legacy method with no `auth:` parameter dispatches unauthenticated
+/// today. Emitting `Required` for it would make `runtime::entry` reject every
+/// such call — the single largest parity break available. So the posture is
+/// taken from what the legacy parser decided, which is the same decision the
+/// generated dispatch has always made:
+///
+/// | legacy `MethodInfo` | `AuthRequirementIr` |
+/// |---|---|
+/// | `requires_auth && auth_optional` | `Optional` |
+/// | `requires_auth` (incl. `#[from_auth]`) | `Required` |
+/// | otherwise (incl. `#[method(public)]`) | `Public` |
+fn activation_ir_fn(
+    namespace: &str,
+    args: &HubMethodsAttrs,
+    pristine_impl: &ItemImpl,
+    methods: &[MethodInfo],
+    resolved_description: &str,
+    version: Option<&str>,
+    crate_path: &syn::Path,
+) -> syn::Result<TokenStream> {
+    use crate::ir_parse::attrs::Mode;
+    use crate::ir_parse::{emit, ActivationIrSpec};
+
+    let mut spec = ActivationIrSpec::from_impl_with_mode(
+        namespace,
+        version.unwrap_or("0.0.0"),
+        // PLX-113 — the §3.3 root facts, previously hard-`None` here, which is
+        // why every macro-produced Connectome carried the §3.3 and §7.6
+        // advisories while `activation_ir!` did not. They are *declarations*,
+        // so they are passed through verbatim; whether this node ends up being
+        // a root or an embedded child is not decided here. `recompute_hashes`
+        // strips them from every non-root position (§3.3), and §4.6 keeps them
+        // out of the activation preimage entirely, so passing them cannot move
+        // a node or method hash.
+        args.backend_name.clone(),
+        args.respond_method.clone(),
+        Some(resolved_description.to_string()),
+        args.request_type.clone(),
+        pristine_impl,
+        Mode::Legacy,
+    )?;
+
+    for m in &mut spec.methods {
+        if let Some(legacy) = methods.iter().find(|l| l.method_name == m.name) {
+            m.auth = legacy_auth_posture(legacy);
         }
-        // Z2H-2: umbrella fallback — plexus-rpc always bundles auth-core, so
-        // an umbrella-only consumer gets the credentials wiring through the
-        // re-export instead of silently skipping it.
-        Err(_) => umbrella_crate(err_span)
-            .map(|umbrella| syn::parse_quote!(::#umbrella::auth_core)),
+    }
+
+    let paths = emit::Paths::with_core(crate_path.clone());
+    let core = &paths.core;
+    let body = emit::activation_expr(&paths, &spec);
+    let child_ir_fn = syn::Ident::new(emit::CHILD_IR_FN, Span::call_site());
+
+    Ok(quote! {
+        /// PLX-91: this activation's `ActivationIr` — the data the vNext
+        /// runtime dispatches from. Also the child-subtree hook a parent's
+        /// `#[child]` edge embeds.
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        pub fn #child_ir_fn() -> ::core::result::Result<
+            #core::ir::ActivationIr,
+            #core::ir::SchemaRefError,
+        > {
+            #body
+        }
+
+        /// PLX-91: this activation's `ActivationIr`, built once and cached.
+        ///
+        /// The `Result` is cached too, not just the success: `SchemaRef::new`
+        /// is fallible by design (PLX-75) — a parameter whose type resolves to
+        /// an uninformative schema is an error, not a degraded value — and the
+        /// dispatch path must be able to *report* that rather than panic or
+        /// rebuild every schema on every call. The error is flattened to a
+        /// `String` because that is what a cached, shareable failure can be.
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub fn __plexus_activation_ir_cached()
+            -> ::core::result::Result<&'static #core::ir::ActivationIr, ::std::string::String>
+        {
+            static __IR: ::std::sync::OnceLock<
+                ::core::result::Result<#core::ir::ActivationIr, ::std::string::String>
+            > = ::std::sync::OnceLock::new();
+            __IR.get_or_init(|| {
+                Self::#child_ir_fn().map_err(|e| ::std::string::ToString::to_string(&e))
+            })
+            .as_ref()
+            .map_err(::std::clone::Clone::clone)
+        }
+
+        /// PLX-91: this activation's `ActivationIr`.
+        ///
+        /// Panics if the IR cannot be built — the ergonomic accessor for
+        /// tests and tooling. Dispatch uses
+        /// [`Self::__plexus_activation_ir_cached`], which reports instead.
+        #[allow(dead_code)]
+        pub fn activation_ir() -> &'static #core::ir::ActivationIr {
+            Self::__plexus_activation_ir_cached().expect(
+                "PLX-91: this activation's ActivationIr could not be built; \
+                 a parameter, update or terminal type resolves to a schema \
+                 that carries no type information (PLX-75)"
+            )
+        }
+    })
+}
+
+/// The auth posture the legacy dispatch path actually enforces.
+fn legacy_auth_posture(m: &MethodInfo) -> crate::ir_parse::spec::AuthRequirementSpec {
+    use crate::ir_parse::spec::AuthRequirementSpec as A;
+    if m.requires_auth {
+        if m.auth_optional && m.auth_resolvers.is_empty() {
+            A::Optional
+        } else {
+            A::Required
+        }
+    } else {
+        A::Public
     }
 }
 
 /// Generate all code from a #[hub_methods] impl block
 pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Result<TokenStream> {
+    // PLX-91: the IR is parsed from the block as the author wrote it, before
+    // the attribute-stripping below rewrites it for re-emission.
+    let pristine_impl = input_impl.clone();
     let crate_path: syn::Path =
         resolve_crate_path(args.crate_path.as_deref(), Span::call_site())?;
 
@@ -734,13 +841,6 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         !matches!(effective_auth_posture, crate::parse::AuthPosture::Optional);
     let mixed_auth_warning = mixed_auth_warning(&methods, suppress_mixed_warning, &struct_name);
 
-    // AUTHZ-CRED-MACRO-3: resolve the optional `plexus-auth-core` path used by
-    // the credentials-registry call site in `compute_method_schemas`. None
-    // means the consuming crate doesn't depend on `plexus-auth-core` and so
-    // the macro should emit empty credential metadata (preserving pre-ticket
-    // behavior).
-    let auth_core_path = resolve_auth_core_path(Span::call_site());
-
     // Z2H-2: per-expansion dependency shim. Every third-party name in the
     // emitted code resolves relatively through this module; whether it
     // re-exports `::plexus_rpc::__deps::*` (umbrella consumer) or the extern
@@ -754,12 +854,29 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &methods,
         &schema_child_methods,
         &crate_path,
-        auth_core_path.as_ref(),
         args.request_type.as_ref(),  // REQ-6: activation-level request type (for runtime merge)
         &deps,
         args.auth_posture, // R-1: declared posture (None = silent, pre-R-1 wire)
         &namespace,        // AUTH-3: each method's grant is `<namespace>.<method>`
     );
+    // PLX-91: the handler table — one erased closure per method.
+    let handler_table_tokens = handlers::generate_handler_table(
+        &methods,
+        &crate_path,
+        args.request_type.as_ref(),
+        &deps,
+    );
+
+    // PLX-91: the ActivationIr literal.
+    let activation_ir_fn_tokens = activation_ir_fn(
+        &namespace,
+        &args,
+        &pristine_impl,
+        &methods,
+        &resolved_description,
+        args.version.as_deref(),
+        &crate_path,
+    )?;
     let activation_impl = activation::generate(
         &struct_name,
         self_ty,
@@ -785,6 +902,8 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         activation_deprecation.as_ref(),
         &deps,
         &declared_roles,
+        &activation_ir_fn_tokens,
+        &handler_table_tokens,
     );
 
     // MACRO-2 / MACRO-13: the typed client. Under the name rule it is

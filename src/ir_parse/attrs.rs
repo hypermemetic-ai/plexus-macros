@@ -72,6 +72,12 @@ const LEGACY_ONLY_KEYS: &[&str] = &[
     "bidirectional",
     "returns",
     "override_call",
+    // BIDIR-4: the keys main's macro gained after July (AUTH-3, SYNAPSE-13);
+    // read by crate::parse, ignored by the IR until it learns them.
+    "target",
+    "group",
+    "example",
+    "values",
 ];
 
 /// Keys whose surface vNext removed or relocated, with where to go instead.

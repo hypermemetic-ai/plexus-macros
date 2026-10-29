@@ -140,6 +140,14 @@ fn handler_entry(
 
     let (param_extraction, param_names) = param_extraction(m, crate_path, deps);
     let call_args = call_args(m, &param_names);
+    // BIDIR-4: AUTH-2. NB: current_reach() is the gate's task-local; a turn
+    // runs its handler in a spawned task, so this reads it only if the turn
+    // runtime carries the scope across the spawn (it does not today).
+    let reach_binding = if m.takes_reach {
+        quote! { let __plexus_reach = #crate_path::plexus::current_reach(); }
+    } else {
+        quote! {}
+    };
     let body = handler_body(m, crate_path, deps, &call_args);
 
     quote! {
@@ -155,6 +163,7 @@ fn handler_entry(
                     #(#activation_param_bindings)*
                     #(#resolver_bindings)*
                     #param_extraction
+                    #reach_binding
 
                     #body
                 }
@@ -422,17 +431,20 @@ fn call_args(m: &MethodInfo, param_names: &[&syn::Ident]) -> TokenStream {
         param_names.insert(at, &cc.param_name);
     }
     let param_names = &param_names;
+    // BIDIR-4: AUTH-2's reach, in main's order (after a raw auth context,
+    // before everything else).
+    let r = if m.takes_reach { quote! { __plexus_reach, } } else { quote! {} };
 
     if m.requires_auth && m.auth_resolvers.is_empty() {
-        quote! { __auth_ctx, #(#param_names),* }
+        quote! { __auth_ctx, #r #(#param_names),* }
     } else if !m.activation_params.is_empty() && !m.auth_resolvers.is_empty() {
-        quote! { #(#activation_param_names,)* #(#resolver_names,)* #(#param_names),* }
+        quote! { #r #(#activation_param_names,)* #(#resolver_names,)* #(#param_names),* }
     } else if !m.activation_params.is_empty() {
-        quote! { #(#activation_param_names,)* #(#param_names),* }
+        quote! { #r #(#activation_param_names,)* #(#param_names),* }
     } else if !m.auth_resolvers.is_empty() {
-        quote! { #(#resolver_names,)* #(#param_names),* }
+        quote! { #r #(#resolver_names,)* #(#param_names),* }
     } else {
-        quote! { #(#param_names),* }
+        quote! { #r #(#param_names),* }
     }
 }
 

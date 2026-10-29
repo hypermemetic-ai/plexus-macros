@@ -56,9 +56,16 @@
 //! | `#[derive(PlexusRequest)]` | Typed extraction from `RawRequestContext`. |
 //! | `#[derive(HandleEnum)]` | Type-safe handle enums for an activation. |
 //!
-//! Deprecated surfaces kept through 0.5.x (removed in 0.6): `#[hub_methods]`,
-//! `#[hub_method]`, `#[derive(StreamEvent)]`, the `hub` and `children = [...]`
-//! flags on `#[activation]`. See the migration section of the README.
+//! Deprecated surfaces kept through 0.5.x: `#[hub_methods]`, `#[hub_method]`,
+//! the `hub` and `children = [...]` flags on `#[activation]`. See the migration
+//! section of the README.
+//!
+//! PLX-92 retired `#[derive(Credentials)]` and `#[derive(StreamEvent)]`, which
+//! the fresh consumer census found had zero call sites in plexus-core,
+//! plexus-transport, plexus-substrate, plexus-idp, plexus-codegen, hyperforge
+//! or connectome-hs. The `#[hub_methods]` / `#[hub_method]` aliases survived
+//! that pass only because `plexus-core/src/lib.rs` still `pub use`s them; they
+//! go when that re-export does.
 //!
 //! ## Crate version (UMB-2)
 //!
@@ -74,7 +81,11 @@ mod credential;
 mod handle_enum;
 mod parse;
 mod request;
-mod stream_event;
+
+/// PLX-93 / M1-T3 — the sealed-seam assertion, run against the real
+/// `#[activation]` expansion. Test-only.
+#[cfg(test)]
+mod plx93_seam_tests;
 
 
 use codegen::generate_all;
@@ -445,6 +456,19 @@ fn generate_schema_fn(
 /// - `client` (optional flag) - also emit the typed client (MACRO-2, below)
 /// - `server_cfg = "<cfg predicate>"` (optional) - compile the server half
 ///   only under that `cfg` (MACRO-2, below)
+/// - `backend_name = "..."` (optional) - RFC 002 §3.3 **root fact**: the
+///   document's backend identity. Declaring it is what lets a client skip the
+///   separate identity probe. Same spelling as `activation_ir!`.
+/// - `respond_method = "..."` (optional) - RFC 002 §3.3/§7.6 **root fact**: the
+///   name of the method a client calls to answer a callback this document
+///   declares. §3.3 makes it MUST as soon as any method declares a callback,
+///   because §7.6 requires a consumer to be able to tell *before invoking*
+///   whether it can serve one. Same spelling as `activation_ir!`.
+///
+/// Both root facts belong to the *document*, not the node: `recompute_hashes`
+/// strips them from every embedded child (§3.3), and §4.6 keeps them out of the
+/// activation preimage, so declaring them changes no activation or method hash.
+/// Neither may be the empty string (§3.5).
 ///
 /// # Example
 ///
@@ -587,105 +611,6 @@ pub fn hub_methods(attr: TokenStream, item: TokenStream) -> TokenStream {
     activation(attr, item)
 }
 
-/// Derive macro for declaring credential-bearing fields on a return-type
-/// struct or enum (per `AUTHZ-CRED-MACRO-1`).
-///
-/// Apply `#[derive(Credentials)]` to a struct or enum. Within the item,
-/// annotate each credential-bearing field with the helper attribute
-/// `#[credential(kind = "...", attach_as = "...", ...)]` carrying the
-/// per-field metadata. The field's type must be `Credential<T>` (the sealed
-/// wrapper from `plexus_auth_core`); any other type produces a compile
-/// error citing the wrapper requirement.
-///
-/// **Why a derive macro and not a freestanding attribute macro?** Stable Rust
-/// proc-macros cannot intercept attribute macros applied directly to struct
-/// fields; only derive-helper attributes can appear there. See
-/// `plans/AUTHZ/AUTHZ-CRED-MACRO-1-RUN-NOTES.md` for the rationale.
-///
-/// # Example
-///
-/// ```ignore
-/// use plexus_auth_core::{
-///     AttachmentSite, Credential, CredentialKind, CredentialScheme,
-///     HeaderName, MethodPath, Scope,
-/// };
-///
-/// // `CredentialFieldMarker` lands in plexus-auth-core in a follow-up; for
-/// // now the macro emits code that references it by name and consumers
-/// // provide the definition (see run-notes).
-///
-/// #[derive(plexus_macros::Credentials, serde::Serialize)]
-/// pub struct LoginEvent {
-///     pub user_id: String,
-///
-///     #[credential(
-///         kind = "bearer",
-///         attach_as = "header:authorization",
-///         scheme = "Bearer ",
-///     )]
-///     pub session: Credential<String>,
-/// }
-/// ```
-///
-/// # Clauses
-///
-/// | Clause | Required? | Notes |
-/// |---|---|---|
-/// | `kind = "<name>"` | required | Closed enum: `"bearer"`, `"cookie"`, `"oauth_access"`, `"oauth_refresh"`, `"oidc_id"`, `"aws_sts"`, `"macaroon"`. The escape valve `kind(other = "<name>")` carries a backend-specific kind. |
-/// | `attach_as = "<spec>"` | required | One of `"header:<name>"`, `"cookie:<name>"`, `"first_frame:<setup-method>:<param>"`, `"in_rpc_param:<name>"`. |
-/// | `scheme = "<prefix>"` | optional | E.g. `"Bearer "` (trailing space significant). |
-/// | `scopes = ["a.b", ...]` | optional, default empty | List of scope identifiers. |
-/// | `refresh_via = "<method-path>"` | optional | E.g. `"auth.refresh"`. |
-/// | `revoke_via = "<method-path>"` | optional | E.g. `"auth.logout"`. |
-/// | `sensitive` | optional flag | Accepted for clarity; credentials are always sensitive. |
-///
-/// # Emitted artifacts
-///
-/// The macro emits two free functions in the same module:
-///
-/// - `fn __plexus_credential_marker_for_<TypeIdent>() -> Vec<CredentialFieldMarker>`
-/// - `fn __plexus_sensitive_fields_for_<TypeIdent>() -> Vec<(Option<&'static str>, &'static str)>`
-///
-/// The consumer (per `AUTHZ-CRED-CORE-3`) calls the first function during
-/// schema build; the second mirrors the implicit `#[sensitive]` rule for the
-/// redaction pipeline (per `AUTHZ-PRIVACY-2`).
-///
-/// The emitted code requires `CredentialFieldMarker`, `CredentialKind`,
-/// `AttachmentSite`, `CredentialScheme`, `Scope`, `MethodPath`, `HeaderName`,
-/// `CookieName`, `ParamName`, and `CredentialKindName` to be in scope at the
-/// emission site. Importing `plexus_auth_core::*` (or the equivalent named
-/// imports) at the top of the consuming module satisfies all but
-/// `CredentialFieldMarker`, which lands in `plexus_auth_core` in a follow-up.
-#[proc_macro_derive(Credentials, attributes(credential))]
-pub fn credentials_derive(input: TokenStream) -> TokenStream {
-    credential::expand_credentials_derive(input)
-}
-
-/// **DEPRECATED**: This derive macro is no longer needed.
-///
-/// With the caller-wraps streaming architecture, event types no longer need to
-/// implement `ActivationStreamItem`. Just use plain domain types with standard
-/// derives:
-///
-/// ```ignore
-/// #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-/// #[serde(tag = "event", rename_all = "snake_case")]
-/// pub enum MyEvent {
-///     Data { value: String },
-///     Complete { result: i32 },
-/// }
-/// ```
-///
-/// The wrapping happens at the call site via `wrap_stream()`.
-#[deprecated(
-    since = "0.2.0",
-    note = "No longer needed - use plain domain types with Serialize/Deserialize"
-)]
-#[proc_macro_derive(StreamEvent, attributes(stream_event, terminal))]
-pub fn stream_event_derive(input: TokenStream) -> TokenStream {
-    stream_event::derive(input)
-}
-
 /// Derive macro for type-safe handle creation and parsing.
 ///
 /// Generates:
@@ -799,4 +724,83 @@ pub fn json_schema_noop_derive(_input: TokenStream) -> TokenStream {
     // Intentionally produces no output.
     // PlexusRequest already generates impl JsonSchema with x-plexus-source extensions.
     TokenStream::new()
+}
+
+// ===========================================================================
+// PLX-79 (M1·B) — the vNext parser, additive
+// ===========================================================================
+//
+// These two entry points are the ONLY registration the vNext parser adds. They
+// do not touch `#[activation]`, `#[method]`, or anything those emit: the
+// existing path is byte-for-byte unchanged, and build F performs the
+// switchover by calling `ir_parse::{method_ir_expr, activation_ir_expr}`
+// directly from `#[activation]` instead of through these macros.
+
+/// Build a `plexus_core::ir::MethodIr` from one `#[method(...)]`-annotated
+/// signature (PLX-79 / M1·B).
+///
+/// Expands to an expression of type
+/// `Result<plexus_core::ir::MethodIr, plexus_core::ir::SchemaRefError>`. It is
+/// a `Result` because `SchemaRef::new` is fallible by design (PLX-75): a type
+/// whose JSON Schema carries no information cannot be silently degraded, and a
+/// generated path must not `.expect()` it away.
+///
+/// ```ignore
+/// let ir = plexus_macros::method_ir! {
+///     namespace = "claudecode",
+///     /// Send a prompt.
+///     #[method(http_method = "POST", ext(acp_role = "prompt"))]
+///     async fn chat(&self, prompt: String, client: Client<(Permission, FsRead)>)
+///         -> impl Stream<Item = Update>;
+/// }.unwrap();
+///
+/// assert_eq!(ir.dotted_id, "claudecode.chat");
+/// assert!(ir.is_streaming());
+/// // `client` is not a parameter — it is the callback declaration.
+/// assert_eq!(ir.params.len(), 1);
+/// assert_eq!(ir.callbacks, Client::<(Permission, FsRead)>::callbacks());
+/// ```
+///
+/// Unknown keys inside `#[method(...)]` are **errors** naming the key; use
+/// `ext(...)` for open metadata.
+#[proc_macro]
+pub fn method_ir(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as ir_parse::MethodIrInput);
+    match ir_parse::method_ir_expr(parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Build a `plexus_core::ir::ActivationIr` from an `#[activation]`-shaped impl
+/// block — every `#[method]` plus a child edge per `#[child]` (PLX-79 / M1·B).
+///
+/// Expands to an expression of type
+/// `Result<plexus_core::ir::ActivationIr, plexus_core::ir::SchemaRefError>`
+/// with every Merkle hash already computed.
+///
+/// ```ignore
+/// let ir = plexus_macros::activation_ir! {
+///     namespace = "claudecode",
+///     version = "1.0.0",
+///     backend_name = "substrate",
+///     impl ClaudeCode {
+///         #[method]
+///         async fn list(&self) -> Result<Vec<String>, Error>;
+///
+///         #[child(list = "list")]
+///         fn session(&self) -> Session;
+///     }
+/// }.unwrap();
+/// ```
+///
+/// A `#[child]` edge embeds the child's own document, obtained from the child
+/// type's `__plexus_activation_ir()` associated function.
+#[proc_macro]
+pub fn activation_ir(input: TokenStream) -> TokenStream {
+    let parsed = parse_macro_input!(input as ir_parse::ActivationIrInput);
+    match ir_parse::activation_ir_expr(parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
 }

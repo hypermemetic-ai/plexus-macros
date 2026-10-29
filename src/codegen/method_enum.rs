@@ -5,14 +5,50 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use syn::{GenericArgument, PathArguments, Type};
+
+/// PLX-71: reconstruct a parsed `serde_json::Value` extension value into tokens
+/// that rebuild the same value at runtime, resolving `serde_json` through the
+/// per-expansion dependency shim (`deps`). The `#[method(ext(...))]` parser
+/// only produces string / integer / bool values; other JSON shapes fall back to
+/// a general `from_str` reconstruction so nothing is silently dropped.
+fn ext_value_tokens(value: &serde_json::Value, deps: &syn::Ident) -> TokenStream {
+    match value {
+        serde_json::Value::String(s) => {
+            quote! { #deps::serde_json::Value::String(#s.to_string()) }
+        }
+        serde_json::Value::Bool(b) => {
+            quote! { #deps::serde_json::Value::Bool(#b) }
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                let lit = proc_macro2::Literal::u64_unsuffixed(u);
+                quote! { #deps::serde_json::json!(#lit) }
+            } else if let Some(i) = n.as_i64() {
+                let lit = proc_macro2::Literal::i64_unsuffixed(i);
+                quote! { #deps::serde_json::json!(#lit) }
+            } else {
+                let f = n.as_f64().unwrap_or(0.0);
+                let lit = proc_macro2::Literal::f64_unsuffixed(f);
+                quote! { #deps::serde_json::json!(#lit) }
+            }
+        }
+        other => {
+            // Forward-compat safety net for any non-literal value the parser
+            // might accept in future: rebuild it from its JSON text.
+            let json = other.to_string();
+            quote! {
+                #deps::serde_json::from_str::<#deps::serde_json::Value>(#json)
+                    .expect("PLX-71: extension value must be valid JSON")
+            }
+        }
+    }
+}
 
 pub fn generate(
     struct_name: &syn::Ident,
     methods: &[MethodInfo],
     child_methods: &[ChildMethodInfo],
     crate_path: &syn::Path,
-    auth_core_path: Option<&syn::Path>,
     activation_request_type: Option<&syn::Type>,
     // Z2H-2: ident of the per-expansion dependency shim module. serde /
     // serde_json / schemars references in the emitted enum + schema code
@@ -146,7 +182,16 @@ pub fn generate(
     let return_schema_entries: Vec<TokenStream> = methods
         .iter()
         .map(|m| {
-            if let Some(item_ty) = &m.stream_item_type {
+            // PLX-110: a unary `-> Result<T, E>` method has no stream item, so
+            // without this fallback its `MethodSchema.returns` would be `None`
+            // and the new shape would silently advertise no return schema at
+            // all. This is additive in the strict sense: `terminal_type` is
+            // `None` for every shape that could compile before PLX-110, so no
+            // existing method's schema moves. It does NOT touch
+            // `MethodSchema.streaming` — the flag PLX-107 pinned as the
+            // author's transport decision, and the one thing plexus-transport
+            // reads to choose SSE over JSON.
+            if let Some(item_ty) = m.stream_item_type.as_ref().or(m.terminal_type.as_ref()) {
                 if m.returns_variants.is_empty() {
                     // No filtering - return full schema
                     quote! { (Some(#deps::schemars::schema_for!(#item_ty)), Vec::<&str>::new()) }
@@ -161,83 +206,60 @@ pub fn generate(
         })
         .collect();
 
-    // AUTHZ-CRED-MACRO-3: per-method credential-decl-vector expression.
-    //
-    // For each method, derive the "credential probe type" (the inner success
-    // / yielded type of the return signature), then emit a call site that
-    // walks the macro-emitted marker registry through the autoref-specialized
-    // `CredentialsRegistryProbe`. Types that derive `#[derive(Credentials)]`
-    // produce a populated `Vec<CredentialFieldDecl>`; types that don't,
-    // produce an empty vec via the trait-default fallback.
-    //
-    // When `auth_core_path` is `None`, the consuming crate does not depend on
-    // `plexus-auth-core`, so we skip emitting the call site — the runtime
-    // match falls through to the `_ => Vec::new()` arm and the schema's
-    // `credentials` field is unchanged (pre-ticket behavior preserved).
-    let (credential_decls_indices, credential_decls_exprs): (Vec<_>, Vec<_>) = methods
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, m)| {
-            let auth_path = auth_core_path?;
-            let probe_ty = effective_credential_probe_type(m)?;
-            let idx_lit = proc_macro2::Literal::usize_suffixed(idx);
-            let method_name = &m.method_name;
-            // Build the issuer placeholder. At schema-build time we don't
-            // know the runtime origin URL, so we synthesize origin "plexus"
-            // plus the method's name as the MethodPath. The runtime can
-            // re-stamp these at mint time; for schema introspection (IR,
-            // CLI, codegen) the issuer is descriptive, not authoritative.
-            //
-            // `MethodPath::try_new` enforces "namespace.method" grammar
-            // (>= 2 dot-separated segments). The method name alone often
-            // fails that grammar (e.g. "echo" has no dot), so we fall back
-            // to "plexus.<name>" — never panics, always at least 2
-            // segments. Activation-level namespace prefixing is a follow-up
-            // (see RUN-NOTES "schema issuer fidelity").
-            let expr = quote! {
-                {
-                    // Bring the `CredentialsRegistryFallback` trait into
-                    // scope so its empty-slice `marker_slice` resolves via
-                    // autoref when the return type does NOT implement
-                    // `HasCredentialMarkers`. For return types that DO
-                    // implement `HasCredentialMarkers` (via the macro-emitted
-                    // `impl` from `#[derive(Credentials)]`), the specialized
-                    // inherent `marker_slice` on
-                    // `CredentialsRegistryProbe<T: HasCredentialMarkers>`
-                    // wins via inherent-first method resolution.
-                    use #auth_path::CredentialsRegistryFallback as _;
-                    // Autoref-specialization call site (per
-                    // AUTHZ-CRED-MACRO-3): the inherent `marker_slice`
-                    // emitted by `#[derive(Credentials)]` wins over the
-                    // blanket trait default for types that derive, and
-                    // falls back to `&[]` otherwise.
-                    let __plexus_markers: &'static [#auth_path::CredentialFieldMarker] =
-                        (&#auth_path::CredentialsRegistryProbe::<#probe_ty>::new())
-                            .marker_slice();
-                    let __plexus_method_path = #auth_path::MethodPath::try_new(#method_name)
-                        .or_else(|_| #auth_path::MethodPath::try_new(
-                            concat!("plexus.", #method_name)
-                        ))
-                        .unwrap_or_else(|_| #auth_path::MethodPath::try_new("plexus.unknown")
-                            .expect("placeholder MethodPath always parses"));
-                    let __plexus_issuer = #auth_path::CredentialIssuer::new(
-                        #auth_path::Origin::new("plexus"),
-                        __plexus_method_path,
-                    );
-                    __plexus_markers
-                        .iter()
-                        .map(|m| #crate_path::plexus::schema::CredentialFieldDecl::from_marker(
-                            m, &[], __plexus_issuer.clone()
-                        ))
-                        .collect::<::std::vec::Vec<#crate_path::plexus::schema::CredentialFieldDecl>>()
-                }
-            };
-            Some((quote! { #idx_lit }, expr))
-        })
-        .unzip();
+    // AUTHZ-CRED-MACRO-3 (PLX-103): the per-method credential-decl probe is
+    // deleted. PLX-92 retired `#[derive(Credentials)]`, which was the only
+    // emitter of `impl HasCredentialMarkers`. With no implementor reachable,
+    // `CredentialsRegistryProbe::<T>::marker_slice()` always resolved through
+    // the `CredentialsRegistryFallback` empty-slice default, so every method
+    // produced an empty `Vec<CredentialFieldDecl>` and `MethodSchema.credentials`
+    // was provably always empty. The probe, the `auth_core_path` plumbing it
+    // needed, and the `with_credentials(..)` call site are gone with it.
 
-    // Generate streaming flags for each method
-    // Streaming is explicitly declared via #[hub_method(streaming)] attribute
+
+    // Generate streaming flags for each method.
+    //
+    // PLX-107: `MethodSchema.streaming` is DECLARED (`#[method(streaming)]`)
+    // and it stays declared. The candidate one-liner from PLX-91/PLX-103 —
+    // `m.streaming || m.stream_item_type.is_some()` — is NOT applied, and this
+    // comment is the record of why, so it is not "fixed" again by someone
+    // reading the two fields side by side.
+    //
+    // The premise of the proposed fix is that the return type carries the
+    // truth. It does not. In this DX the *transport envelope* is a stream, so
+    // a one-shot method and a many-shot method have the SAME return type:
+    // `impl Stream<Item = T>`. A unary method yields one `Data` item then
+    // `Done`; a streaming method yields many. `stream_item_type.is_some()`
+    // (equivalently `MethodIr::is_streaming`, i.e. `updates.is_some()`) is
+    // therefore true for very nearly every method in the corpus and carries no
+    // routing information at all.
+    //
+    // That matters because this flag is not cosmetic: plexus-transport copies
+    // it into `RestMethodInfo`/`MethodInfo` (http/bridge.rs) and branches on it
+    // in `handle_method_call` (http/handler.rs) to choose SSE over JSON.
+    // Deriving it from the return type would flip, measured against the live
+    // corpus at the time of this build:
+    //
+    //   - plexus-idp:      10 of 10 methods (0 declare `streaming`) — including
+    //                      `register` / `login` / `refresh` / `me`, all of them
+    //                      served today as `POST /rest/idp/<method>` with a JSON
+    //                      body (see plexus-idp/src/oidc.rs's module docs).
+    //   - plexus-registry:  8 of 8 methods (0 declare `streaming`).
+    //   - plexus-substrate: ~136 of 142 methods (6 declare `streaming`).
+    //
+    // i.e. it is a fleet-wide wire-format break of every REST client, not a
+    // bug fix. The declared flag is the only place the one-shot/many-shot
+    // distinction is expressible, so it is load-bearing and is kept.
+    //
+    // What the IR and the schema each mean, stated once:
+    //   - `MethodIr::is_streaming` — "the turn declares an update item type".
+    //     A fact about the type. True almost everywhere.
+    //   - `MethodSchema.streaming` — "hold the connection open and serve SSE".
+    //     A transport decision the author makes. Opt-in.
+    // They are different predicates over the same method, so they are not
+    // required to be equal. The invariant that IS required — a method the
+    // schema calls streaming must actually have an update item type — is
+    // asserted in tests/plx91_switchover_tests.rs, and the routing contract is
+    // pinned at the boundary in plexus-transport/tests/plx107_streaming_routing_tests.rs.
     let streaming_flags: Vec<bool> = methods
         .iter()
         .map(|m| m.streaming)
@@ -424,6 +446,28 @@ pub fn generate(
     // keep their exact wire shape.
     let public_flags: Vec<bool> = methods.iter().map(|m| m.public).collect();
 
+    // PLX-71: per-method open extension pairs, emitted via the parallel-slice
+    // idiom (same shape as `public_flags` / `auth_entries_per_method` — a
+    // per-method binding indexed by `i`, never the nested-zip tuple). Each
+    // method's entry is a `vec![(key, value), ...]` whose values are
+    // reconstructed as `serde_json::Value` tokens. Methods with no `ext(...)`
+    // emit an empty vec, so their `MethodSchema.extensions` stays empty and
+    // their wire bytes are unchanged.
+    let extensions_per_method: Vec<TokenStream> = methods
+        .iter()
+        .map(|m| {
+            let pairs: Vec<TokenStream> = m
+                .extensions
+                .iter()
+                .map(|(k, v)| {
+                    let value_tokens = ext_value_tokens(v, deps);
+                    quote! { (#k, #value_tokens) }
+                })
+                .collect();
+            quote! { vec![#(#pairs),*] }
+        })
+        .collect();
+
     // R-1 (joint AP-1): activation-declared posture stamp, applied to every
     // generated RPC method schema. Undeclared posture emits nothing.
     // Framework-injected entries (the auto `schema` method, `#[child]`
@@ -559,6 +603,8 @@ pub fn generate(
                 let groups: &[::std::option::Option<&str>] = &[#(#method_groups),*];
                 let examples: Vec<&[(&str, ::std::option::Option<&str>)]> = vec![#(#method_examples),*];
                 let param_values: Vec<&[(&str, &[&str])]> = vec![#(#method_values),*];
+                // PLX-71: per-method open extension pairs, indexed by `i`.
+                let extensions_per_method: Vec<Vec<(&str, #deps::serde_json::Value)>> = vec![#(#extensions_per_method),*];
                 let activation_request_schema: Option<#deps::schemars::Schema> = #activation_request_schema_expr;
                 let activation_request_props: Option<#deps::serde_json::Map<String, #deps::serde_json::Value>> =
                     activation_request_schema
@@ -709,6 +755,13 @@ pub fn generate(
                         for (param, vals) in param_values[i].iter() {
                             schema = schema.with_param_values(param, vals.iter().copied());
                         }
+                        // PLX-71: apply per-method open extensions. Empty for
+                        // methods with no `ext(...)`, so their wire shape is
+                        // unchanged (plexus-core skips serializing an empty
+                        // extensions map).
+                        for (ext_key, ext_value) in extensions_per_method[i].iter() {
+                            schema = schema.with_extension(*ext_key, ext_value.clone());
+                        }
 
                         // R-1: explicit `scope = "..."` requirements →
                         // `requires_credential` (AUTHZ-CORE-2). Compile-time
@@ -759,24 +812,13 @@ pub fn generate(
                             _ => {}
                         }
 
-                        // AUTHZ-CRED-MACRO-3: apply credential decls projected
-                        // from the return type's `CredentialFieldMarker`
-                        // registry (see `credential_decls_per_method` above).
-                        //
-                        // Like `bidir_schema_calls`, this is a per-index
-                        // compile-time match so that type-level calls (here,
-                        // `CredentialsRegistryProbe::<RT>::new()`) resolve at
-                        // macro-expansion time against each method's concrete
-                        // return type.
-                        let __plexus_cred_decls: ::std::vec::Vec<#crate_path::plexus::schema::CredentialFieldDecl> = match i {
-                            #(
-                                #credential_decls_indices => #credential_decls_exprs,
-                            )*
-                            _ => ::std::vec::Vec::new(),
-                        };
-                        if !__plexus_cred_decls.is_empty() {
-                            schema = schema.with_credentials(__plexus_cred_decls);
-                        }
+                        // AUTHZ-CRED-MACRO-3 retired by PLX-103: no reachable
+                        // type can implement `HasCredentialMarkers` since
+                        // PLX-92 deleted `#[derive(Credentials)]`, so this
+                        // match always produced an empty vec and never called
+                        // `with_credentials`. `MethodSchema.credentials` now
+                        // stays at its `Default` empty value, which is the
+                        // value it already always had on the wire.
 
                         schema
                     })
@@ -903,8 +945,17 @@ fn compute_method_hash(method: &MethodInfo) -> String {
         }
     }
 
-    // Hash return type if present
-    if let Some(item_ty) = &method.stream_item_type {
+    // Hash return type if present.
+    //
+    // PLX-110: `terminal_type` is the unary shape's return type and is `None`
+    // for every method that compiled before this build, so no existing method
+    // hash moves. A unary method that declared no return type in its hash would
+    // hash identically to a same-named method returning something else.
+    if let Some(item_ty) = method
+        .stream_item_type
+        .as_ref()
+        .or(method.terminal_type.as_ref())
+    {
         let ty_str = quote!(#item_ty).to_string();
         ty_str.hash(&mut hasher);
     }
@@ -1067,58 +1118,4 @@ pub fn is_option_type(ty: &syn::Type) -> bool {
         }
     }
     false
-}
-
-/// AUTHZ-CRED-MACRO-3: derive the "credential probe type" for a method —
-/// the type that should be probed for `#[derive(Credentials)]` markers.
-///
-/// Resolution order:
-/// 1. If the method has `stream_item_type` populated (streaming method
-///    returning `impl Stream<Item = T>` or `impl Stream<Item = T> + Send`),
-///    the probe type is `T`.
-/// 2. Otherwise, if the return type is `Result<T, _>`, the probe type is `T`
-///    (the Ok variant). This is the most common shape for non-streaming
-///    methods.
-/// 3. Otherwise, the probe type is the return type as-is.
-/// 4. Returns `None` only when the return type contains a syntactic pattern
-///    we don't know how to handle (e.g., bare `impl Trait` with no
-///    extractable inner type, or a tuple). For those, the macro emits an
-///    empty credential decls vec — same as pre-ticket behavior.
-///
-/// We deliberately do NOT recurse into `Option<T>`, `Vec<T>`, etc. The
-/// autoref-probe handles the fallback uniformly: if the probe type doesn't
-/// derive `Credentials`, the trait's empty-slice default applies and the
-/// schema's `credentials` field stays empty.
-fn effective_credential_probe_type(m: &MethodInfo) -> Option<Type> {
-    // Streaming: probe the stream item type. The stream's `Item = T`
-    // associated type IS the user's per-event payload, which is where
-    // `#[derive(Credentials)]` lives in the streaming case.
-    if let Some(item_ty) = &m.stream_item_type {
-        return Some(item_ty.clone());
-    }
-
-    // Non-streaming: unwrap `Result<T, _>` to T if present, else use the
-    // return type as-is. The recursion stops at one level — a user with
-    // `Result<Result<T, E1>, E2>` would get the inner `Result<T, E1>`
-    // probed, which falls through to empty via the trait default.
-    if let Type::Path(tp) = &m.return_type {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Result" {
-                if let PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(GenericArgument::Type(ok_ty)) = args.args.first() {
-                        return Some(ok_ty.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    // Bare `impl Trait` returns aren't probable without the Stream-item
-    // extraction having succeeded — there's no syntactic handle on the
-    // concrete type. Emit `None` so the caller skips the credentials wiring.
-    if matches!(&m.return_type, Type::ImplTrait(_)) {
-        return None;
-    }
-
-    Some(m.return_type.clone())
 }

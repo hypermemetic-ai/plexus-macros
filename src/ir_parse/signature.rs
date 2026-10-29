@@ -54,6 +54,14 @@ pub(crate) fn parse_inputs(
             continue;
         }
 
+        // BIDIR-4: AUTH-2's `reach: Reach` is injected by main's dispatch
+        // (`current_reach()`), so it is no more a wire parameter than `auth`.
+        if let Type::Path(tp) = &*pt.ty {
+            if tp.path.segments.last().is_some_and(|s| s.ident == "Reach") {
+                continue;
+            }
+        }
+
         // The auth parameter sets `MethodIr::auth`, and is not a parameter.
         if let Some(shape) = crate::parse::classify_auth_context_type(&pt.ty) {
             auth = match shape {
