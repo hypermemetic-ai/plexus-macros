@@ -105,6 +105,9 @@ where
                 // channel the typed client does not have. Skip rather than
                 // fail: an activation may interleave them with real data.
                 Ok(StreamItem::Request { .. }) => continue,
+                // LOCAL-3: an input half's flow control is the caller's, not
+                // the typed stream's.
+                Ok(StreamItem::Credit { .. } | StreamItem::Ack { .. } | StreamItem::InputClosed { .. }) => continue,
             }
         }
     }))

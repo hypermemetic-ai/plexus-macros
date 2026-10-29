@@ -57,6 +57,11 @@ impl SubSlot {
         Arc::new(Self::default())
     }
 
+    /// LOCAL-3: the subscription id, once acknowledged.
+    pub(crate) fn subscription(&self) -> Option<Value> {
+        self.lock().subscription.clone()
+    }
+
     /// The stream saw `done` or `error`.
     pub(crate) fn mark_finished(&self) {
         self.lock().finished = true;
@@ -115,6 +120,9 @@ struct State {
     subs: HashMap<String, Sub>,
     /// Set once, when the socket goes away.
     closed: Option<TransportError>,
+    /// LOCAL-3: a plain request (not a subscribe) waiting for its reply —
+    /// the offer.
+    plain: HashMap<u64, oneshot::Sender<Result<Value, TransportError>>>,
 }
 
 /// One connection's protocol state.
@@ -123,6 +131,19 @@ pub(crate) struct Registry {
     hub_namespace: Arc<str>,
     next_id: AtomicU64,
     state: Mutex<State>,
+    /// LOCAL-3: the surface this side offers on the connection, once offered.
+    #[cfg(feature = "ws-native")]
+    pub(crate) served: Mutex<Option<Arc<super::served::Served>>>,
+}
+
+/// LOCAL-3: what [`Registry::route`] made of a frame.
+#[derive(Debug, Default)]
+pub(crate) struct Routed {
+    /// The frame was this layer's (a response, an item of a call this side
+    /// opened, a call into this side's offer).
+    pub(crate) taken: bool,
+    /// A frame to write back.
+    pub(crate) write_back: Option<String>,
 }
 
 /// The routing key for a subscription id.
@@ -140,6 +161,8 @@ impl Registry {
             // JSON-RPC ids start at 1; 0 reads like "unset" in a trace.
             next_id: AtomicU64::new(1),
             state: Mutex::new(State::default()),
+            #[cfg(feature = "ws-native")]
+            served: Mutex::new(None),
         }
     }
 
@@ -203,19 +226,84 @@ impl Registry {
     #[must_use = "the returned frame cancels a subscription nobody is reading"]
     pub(crate) fn on_text(&self, text: &str) -> Option<String> {
         let frame = serde_json::from_str::<Value>(text).ok()?;
+        self.route(&frame).write_back
+    }
 
-        // A subscribe reply.
-        if let Some(request_id) = frame.get("id").and_then(Value::as_u64) {
-            if frame.get("result").is_some() || frame.get("error").is_some() {
-                return self.on_response(request_id, &frame);
+    /// LOCAL-3: route one frame by its **shape**, which says the direction:
+    ///
+    /// | shape | names | goes to |
+    /// |---|---|---|
+    /// | no `method`, an `id`, `result`/`error` | a request this side sent | its pending entry |
+    /// | `method` + `id` | a call into this side | the offer ([`Served`](super::served::Served)) |
+    /// | `method`, no `id`, `params.result` | an item of a call this side opened (an id the peer minted) | its subscription |
+    /// | `method`, no `id`, `{ns}.input` / `{ns}.end` | a call this side serves (an id this side minted) | the offer |
+    ///
+    /// Request ids and subscription ids are each per direction: the same
+    /// number may name one thing each way at once.
+    pub(crate) fn route(&self, frame: &Value) -> Routed {
+        let method = frame.get("method").and_then(Value::as_str);
+        let Some(method) = method else {
+            if let Some(request_id) = frame.get("id").and_then(Value::as_u64) {
+                if frame.get("result").is_some() || frame.get("error").is_some() {
+                    if let Some(waiter) = self.lock().plain.remove(&request_id) {
+                        let r = match frame.get("error") {
+                            Some(e) => Err(TransportError::protocol(format!("request refused: {e}"))),
+                            None => Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
+                        };
+                        let _ = waiter.send(r);
+                        return Routed { taken: true, write_back: None };
+                    }
+                    return Routed { taken: true, write_back: self.on_response(request_id, frame) };
+                }
+            }
+            return Routed::default();
+        };
+
+        if frame.get("id").is_some() {
+            #[cfg(feature = "ws-native")]
+            if let Some(served) = self.served() {
+                return Routed { taken: served.on_request(method, frame), write_back: None };
+            }
+            return Routed::default();
+        }
+
+        if frame.pointer("/params/result").is_some() {
+            if let Some(subscription) = frame.pointer("/params/subscription") {
+                self.on_notification(&subscription.clone(), frame);
+                return Routed { taken: true, write_back: None };
             }
         }
 
-        // A stream item.
-        if let Some(subscription) = frame.pointer("/params/subscription") {
-            self.on_notification(&subscription.clone(), &frame);
+        #[cfg(feature = "ws-native")]
+        if let Some(served) = self.served() {
+            return Routed { taken: served.on_input(method, frame), write_back: None };
         }
-        None
+        Routed::default()
+    }
+
+    #[cfg(feature = "ws-native")]
+    pub(crate) fn served(&self) -> Option<Arc<super::served::Served>> {
+        self.served.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// LOCAL-3: claim a request id for a plain request (the offer).
+    pub(crate) fn register_plain(
+        &self,
+        request_id: u64,
+    ) -> Result<oneshot::Receiver<Result<Value, TransportError>>, TransportError> {
+        let mut state = self.lock();
+        if let Some(err) = &state.closed {
+            return Err(err.clone());
+        }
+        let (tx, rx) = oneshot::channel();
+        state.plain.insert(request_id, tx);
+        Ok(rx)
+    }
+
+    /// LOCAL-3: what is held — calls opened and waiting (a test of leaks).
+    pub(crate) fn held(&self) -> (usize, usize) {
+        let st = self.lock();
+        (st.pending.len() + st.plain.len(), st.subs.len())
     }
 
     fn on_response(&self, request_id: u64, frame: &Value) -> Option<String> {
@@ -302,7 +390,7 @@ impl Registry {
     /// [`TransportErrorKind::Closed`]: crate::TransportErrorKind::Closed
     pub(crate) fn on_close(&self, reason: impl Into<String>) {
         let error = TransportError::closed(reason);
-        let (pending, subs) = {
+        let (pending, subs, plain) = {
             let mut state = self.lock();
             if state.closed.is_some() {
                 return;
@@ -311,8 +399,16 @@ impl Registry {
             (
                 std::mem::take(&mut state.pending),
                 std::mem::take(&mut state.subs),
+                std::mem::take(&mut state.plain),
             )
         };
+        #[cfg(feature = "ws-native")]
+        if let Some(served) = self.served() {
+            served.on_close();
+        }
+        for (_, waiting) in plain {
+            let _ = waiting.send(Err(error.clone()));
+        }
 
         for (_, waiting) in pending {
             let _ = waiting.waiter.send(Err(error.clone()));
@@ -357,11 +453,27 @@ pub(crate) fn subscribe_frame(
     qualified_method: &str,
     params: &Value,
 ) -> String {
+    subscribe_frame_with(request_id, &format!("{hub_namespace}.call"), qualified_method, params, None)
+}
+
+/// LOCAL-3: the subscribe frame with an optional `hop` (spec/12) — the same
+/// frame in both directions of a symmetric connection.
+pub(crate) fn subscribe_frame_with(
+    request_id: u64,
+    subscribe_method: &str,
+    qualified_method: &str,
+    params: &Value,
+    hop: Option<&Value>,
+) -> String {
+    let mut p = json!({ "method": qualified_method, "params": params });
+    if let Some(hop) = hop {
+        p["hop"] = hop.clone();
+    }
     json!({
         "jsonrpc": "2.0",
         "id": request_id,
-        "method": format!("{hub_namespace}.call"),
-        "params": { "method": qualified_method, "params": params },
+        "method": subscribe_method,
+        "params": p,
     })
     .to_string()
 }

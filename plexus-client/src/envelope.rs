@@ -103,6 +103,22 @@ pub enum StreamItem {
         timeout_ms: u64,
     },
 
+    /// LOCAL-3 (spike; BIDIR-6's): the callee grants `n` more input items.
+    Credit { n: u64 },
+
+    /// LOCAL-3 (spike; BIDIR-6's): input frames delivered in order, through `seq`.
+    Ack {
+        #[serde(default)]
+        seq: Option<u64>,
+    },
+
+    /// LOCAL-3 (spike; BIDIR-6's): the method ended with its input half open.
+    InputClosed {
+        reason: String,
+        #[serde(default)]
+        ack: Option<u64>,
+    },
+
     /// Normal end of stream.
     Done {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,7 +154,10 @@ impl StreamItem {
             | StreamItem::Progress { metadata, .. }
             | StreamItem::Error { metadata, .. }
             | StreamItem::Done { metadata } => metadata.as_ref(),
-            StreamItem::Request { .. } => None,
+            StreamItem::Request { .. }
+            | StreamItem::Credit { .. }
+            | StreamItem::Ack { .. }
+            | StreamItem::InputClosed { .. } => None,
         }
     }
 }

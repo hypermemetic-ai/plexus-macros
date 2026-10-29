@@ -73,7 +73,11 @@ pub(crate) async fn connect_with_headers(
     }
     // TRANSPORT-16: a refused upgrade keeps its status — a 401 is how a
     // bridge in front of this socket learns to challenge its own caller.
-    let (socket, _response) = tokio_tungstenite::connect_async(request).await.map_err(|e| match e {
+    // LOCAL-3: no Nagle. A client that only sends a request and waits never
+    // met it; a client that ANSWERS calls (a reply, items, `done`, back to
+    // back) waits a delayed ACK (~40 ms) per call without it — as the server
+    // did before it set nodelay.
+    let (socket, _response) = tokio_tungstenite::connect_async_with_config(request, None, true).await.map_err(|e| match e {
         tokio_tungstenite::tungstenite::Error::Http(response) => {
             let status = response.status();
             TransportError::http(status.as_u16(), format!("{url}: the upgrade was refused with {status}"))

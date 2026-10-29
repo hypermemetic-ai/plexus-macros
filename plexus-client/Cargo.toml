@@ -22,7 +22,7 @@ futures-channel = { version = "0.3", default-features = false, features = [
 ], optional = true }
 
 # ws-native
-tokio = { version = "1.0", features = ["rt"], optional = true }
+tokio = { version = "1.0", features = ["rt", "sync", "macros"], optional = true }
 tokio-tungstenite = { version = "0.30", optional = true }
 
 # ws-web

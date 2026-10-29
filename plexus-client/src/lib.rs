@@ -77,6 +77,7 @@ pub mod envelope;
 pub mod error;
 pub mod event;
 pub mod memory;
+pub mod offer;
 pub mod transport;
 pub mod watch;
 
