@@ -74,6 +74,19 @@ impl Conn {
 pub(crate) async fn connect(url: &str, registry: Arc<Registry>) -> Result<Conn, TransportError> {
     let socket =
         WebSocket::new(url).map_err(|e| TransportError::connect(format!("{url}: {e:?}")))?;
+    adopt(socket, registry).await
+}
+
+/// FRAME-16: a socket the page opened itself (before the wasm was
+/// instantiated), taken over: its handlers set here, and open at once when
+/// it is open already, else when it opens. One closing or closed is
+/// refused. Nothing the peer said before this ran is read — a Plexus
+/// service says nothing before the first call.
+pub(crate) async fn adopt(socket: WebSocket, registry: Arc<Registry>) -> Result<Conn, TransportError> {
+    match socket.ready_state() {
+        WebSocket::CONNECTING | WebSocket::OPEN => {}
+        state => return Err(TransportError::connect(format!("the websocket handed over is closing or closed (readyState {state})"))),
+    }
 
     let (opened_tx, opened_rx) = oneshot::channel::<Result<(), TransportError>>();
     let opened_tx = Rc::new(RefCell::new(Some(opened_tx)));
@@ -137,6 +150,11 @@ pub(crate) async fn connect(url: &str, registry: Arc<Registry>) -> Result<Conn, 
         })
     };
     socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+    if socket.ready_state() == WebSocket::OPEN {
+        if let Some(tx) = opened_tx.borrow_mut().take() {
+            let _ = tx.send(Ok(()));
+        }
+    }
 
     let conn = Conn {
         inner: Rc::new(Socket {

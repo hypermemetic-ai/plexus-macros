@@ -52,7 +52,15 @@ ws-web = ["dep:futures-channel", "dep:wasm-bindgen", "dep:web-sys"]
 
 [dev-dependencies]
 futures = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1.0", features = ["macros", "rt", "time"] }
+
+# FRAME-16: tests/ws_web_adopt.rs — the ws-web backend under Node's own
+# WebSocket (wasm-bindgen-test-runner, node).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+wasm-bindgen-futures = "0.4"
 
 # RETURNS-38: watch((a, b, c)) against a running menger (a live check).
 [[example]]

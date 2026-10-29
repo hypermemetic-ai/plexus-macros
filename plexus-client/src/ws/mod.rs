@@ -163,6 +163,23 @@ impl WsTransport {
         })
     }
 
+    /// FRAME-16: [`connect`](Self::connect) over a socket already made —
+    /// a page opens it before its wasm is instantiated and hands it over.
+    /// Open, it is taken at once; still connecting, when it opens; closing
+    /// or closed, refused ([`TransportErrorKind::Connect`]). `ws-web` only.
+    ///
+    /// [`TransportErrorKind::Connect`]: crate::TransportErrorKind::Connect
+    #[cfg(all(feature = "ws-web", not(feature = "ws-native")))]
+    pub async fn adopt(socket: web_sys::WebSocket, hub_namespace: &str) -> Result<Self, TransportError> {
+        let registry = Arc::new(Registry::new(Arc::from(hub_namespace)));
+        let conn = backend::adopt(socket, registry.clone()).await?;
+        Ok(Self {
+            _closer: Arc::new(Closer { conn: conn.clone() }),
+            conn,
+            registry,
+        })
+    }
+
     /// [`connect`](Self::connect), with headers on the upgrade request — an
     /// `Authorization: Bearer <key proof>` for a server under login, as
     /// synapse signs in. `ws-native` only: a browser's socket takes no
