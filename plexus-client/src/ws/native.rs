@@ -71,9 +71,15 @@ pub(crate) async fn connect_with_headers(
             .map_err(|_| TransportError::connect(format!("header {name}: not a header value")))?;
         request.headers_mut().insert(name, value);
     }
-    let (socket, _response) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(|e| TransportError::connect(format!("{url}: {e}")))?;
+    // TRANSPORT-16: a refused upgrade keeps its status — a 401 is how a
+    // bridge in front of this socket learns to challenge its own caller.
+    let (socket, _response) = tokio_tungstenite::connect_async(request).await.map_err(|e| match e {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            let status = response.status();
+            TransportError::http(status.as_u16(), format!("{url}: the upgrade was refused with {status}"))
+        }
+        e => TransportError::connect(format!("{url}: {e}")),
+    })?;
 
     let (mut sink, mut source) = socket.split();
     let (outbound, mut queue) = mpsc::unbounded::<Out>();
