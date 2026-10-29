@@ -69,6 +69,7 @@
 //! (see `plexus-rpc/build.rs`).
 
 mod codegen;
+mod ir_parse;
 mod credential;
 mod handle_enum;
 mod parse;

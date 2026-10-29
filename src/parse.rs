@@ -138,6 +138,12 @@ pub struct HubMethodAttrs {
     /// `x-plexus-values` on the param's property. Checked to name params in
     /// [`MethodInfo::from_fn`].
     pub values: Vec<(syn::Ident, Vec<String>)>,
+    /// PLX-71: open extension slot — comma-separated `key = literal` pairs from
+    /// `#[method(ext(...))]`. Unknown keys are allowed by design (no allowlist);
+    /// duplicate keys within one `ext(...)` are a compile error. Emitted
+    /// verbatim into `MethodSchema.extensions` at codegen time. Values are
+    /// string / integer / bool literals mapped to the matching JSON type.
+    pub extensions: Vec<(String, serde_json::Value)>,
 }
 
 /// SYNAPSE-13: one `example(note = "…", params = r#"{…}"#)` on a method.
@@ -288,6 +294,8 @@ impl Parse for HubMethodAttrs {
         // R-1 (AUTHZ-CORE-2): explicit `scope = "..."` literals plus the
         // spans needed to anchor the `public` + `scope` contradiction error.
         let mut scopes: Vec<String> = Vec::new();
+        // PLX-71: accumulated `#[method(ext(key = literal, ...))]` pairs.
+        let mut extensions: Vec<(String, serde_json::Value)> = Vec::new();
         let mut public_span: Option<proc_macro2::Span> = None;
         let mut first_scope_span: Option<proc_macro2::Span> = None;
         // AUTH-3: `target = "param"`.
@@ -497,6 +505,55 @@ impl Parse for HubMethodAttrs {
                                     ));
                                 }
                             }
+                        } else if path.is_ident("ext") {
+                            // PLX-71: open extension passthrough.
+                            // `ext(key = literal, ...)` — comma-separated
+                            // `key = literal` pairs where literal is a string,
+                            // integer, or bool. Keys are namespaced strings with
+                            // NO allowlist (unknown keys are the whole point);
+                            // duplicate keys within one `ext(...)` are rejected
+                            // with a `syn::Error` naming the key. Each pair is
+                            // stamped verbatim into `MethodSchema.extensions`.
+                            let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
+                            let nested = syn::parse::Parser::parse2(parser, tokens.clone())?;
+                            for MetaNameValue { path, value, .. } in nested {
+                                let key = match path.get_ident() {
+                                    Some(ident) => ident.to_string(),
+                                    None => {
+                                        return Err(syn::Error::new_spanned(
+                                            &path,
+                                            "ext(...) keys must be simple identifiers, e.g. ext(nostr_kind = 30023)",
+                                        ));
+                                    }
+                                };
+                                if extensions.iter().any(|(k, _)| *k == key) {
+                                    return Err(syn::Error::new_spanned(
+                                        &path,
+                                        format!("duplicate ext key `{}` in one ext(...)", key),
+                                    ));
+                                }
+                                let json_value = match &value {
+                                    Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => {
+                                        serde_json::Value::String(s.value())
+                                    }
+                                    Expr::Lit(ExprLit { lit: Lit::Int(i), .. }) => {
+                                        serde_json::Value::Number(i.base10_parse::<i64>()?.into())
+                                    }
+                                    Expr::Lit(ExprLit { lit: Lit::Bool(b), .. }) => {
+                                        serde_json::Value::Bool(b.value)
+                                    }
+                                    other => {
+                                        return Err(syn::Error::new_spanned(
+                                            other,
+                                            format!(
+                                                "ext value for `{}` must be a string, integer, or bool literal",
+                                                key
+                                            ),
+                                        ));
+                                    }
+                                };
+                                extensions.push((key, json_value));
+                            }
                         }
                     }
                 }
@@ -516,7 +573,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes, target, group, examples, values })
+        Ok(HubMethodAttrs { name, description, param_docs, returns_variants, streaming, bidirectional, http_method, request_override, public, scopes, target, group, examples, values, extensions })
     }
 }
 
@@ -545,6 +602,31 @@ pub struct HubMethodsAttrs {
     pub methods_marked: bool,
     /// Explicit version string, or None to use CARGO_PKG_VERSION at compile time
     pub version: Option<String>,
+    /// PLX-113 / RFC 002 §3.3 — the document's **backend identity**.
+    ///
+    /// A *root fact*: it names the document, not the node. Declaring it is what
+    /// removes the separate identity probe §3.3 exists to remove, and its
+    /// absence is the §3.3 SHOULD advisory every macro-produced Connectome
+    /// carried before this attribute existed.
+    ///
+    /// Same spelling as `activation_ir!`'s `backend_name = "..."` — there is
+    /// deliberately no second vocabulary. It stays at the root by
+    /// construction: `ActivationIr::recompute_hashes` strips root facts from
+    /// every embedded child, so an activation that declares this and is then
+    /// embedded as a `#[child]` carries none of it in that position.
+    pub backend_name: Option<String>,
+    /// PLX-113 / RFC 002 §3.3 + §7.6 — the **reply-channel** method name.
+    ///
+    /// The name a client calls to answer a server-to-client request declared in
+    /// a method's callback set. §7.6: a consumer that cannot serve a declared
+    /// callback SHOULD be able to determine that *before invoking* rather than
+    /// discovering it mid-turn, and that is only possible if the reply channel
+    /// is a declared fact of the document instead of a hard-coded `respond`
+    /// convention on the client side.
+    ///
+    /// §3.3 promotes this from SHOULD to **MUST** exactly when some method in
+    /// the document declares a callback. Same spelling as `activation_ir!`.
+    pub respond_method: Option<String>,
     /// Short description (max 15 words)
     pub description: Option<String>,
     /// Long description (optional, for detailed documentation)
@@ -682,6 +764,27 @@ impl Parse for RoleDecl {
     }
 }
 
+/// PLX-113 — read a §3.3 root fact, refusing the empty spelling.
+///
+/// RFC 002 §3.5 makes "present but empty" not a value of an optional field, and
+/// the checker reports `backend_name is present but empty` / `respond_method is
+/// present but empty` as **MUST** violations. A declaration is either made or
+/// omitted; `= ""` is neither, so it is a compile error naming the clause.
+fn non_empty_root_fact(lit: &syn::LitStr, key: &str) -> syn::Result<String> {
+    let v = lit.value();
+    if v.is_empty() {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!(
+                "`{key} = \"\"` is not a declaration: RFC 002 §3.5 spells an absent \
+                 optional as ABSENCE, and a present-but-empty root fact is a MUST \
+                 violation. Give it a value or omit the argument entirely"
+            ),
+        ));
+    }
+    Ok(v)
+}
+
 /// RED-6: declared auth enforcement posture for an activation.
 /// See `HubMethodsAttrs::auth_posture` for semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -700,6 +803,8 @@ impl Parse for HubMethodsAttrs {
         let mut trait_span: Option<proc_macro2::Span> = None;
         let mut methods_marked = false;
         let mut version: Option<String> = None;
+        let mut backend_name: Option<String> = None;
+        let mut respond_method: Option<String> = None;
         let mut description = None;
         let mut long_description = None;
         let mut crate_path: Option<String> = None;
@@ -797,6 +902,19 @@ impl Parse for HubMethodsAttrs {
                                 namespace = Some(s.value());
                             } else if path.is_ident("version") {
                                 version = Some(s.value());
+                            } else if path.is_ident("backend_name") {
+                                // RFC 002 §3.5 — "an empty string is not a value
+                                // of an optional field": a decoder must treat a
+                                // present-but-empty optional as absent and an
+                                // encoder MUST NOT produce one. Emitting
+                                // `backend_name: ""` would trade the §3.3 SHOULD
+                                // advisory for a §3.5 MUST violation, which is
+                                // strictly worse, so the empty spelling is
+                                // rejected at the source rather than silently
+                                // normalized to absence.
+                                backend_name = Some(non_empty_root_fact(&s, "backend_name")?);
+                            } else if path.is_ident("respond_method") {
+                                respond_method = Some(non_empty_root_fact(&s, "respond_method")?);
                             } else if path.is_ident("description") {
                                 let desc = s.value();
                                 // Validate word count
@@ -915,6 +1033,8 @@ impl Parse for HubMethodsAttrs {
             trait_span,
             methods_marked,
             version,
+            backend_name,
+            respond_method,
             description,
             long_description,
             crate_path,
@@ -1686,10 +1806,37 @@ pub struct MethodInfo {
     pub method_name: String,
     pub description: String,
     pub params: Vec<ParamInfo>,
+    /// PLX-146: the method's capability-client handle, if it takes one.
+    ///
+    /// `Some` when the signature has a `client: Client<C>` parameter. It is a
+    /// *handle*, not a wire parameter — it is never pushed onto
+    /// [`Self::params`], so it reaches neither the JSON-schema surface nor the
+    /// method hash preimage, exactly as `ir_parse` already treats it.
+    ///
+    /// Before this existed, `parse.rs` had no branch for it and fell through to
+    /// the wire-parameter tail, which made a generated method taking a client
+    /// fail to compile with `Client<C>: Serialize is not satisfied` — while
+    /// `ir_parse/signature.rs` stripped it correctly, so reading the IR parser
+    /// alone said the feature worked.
+    pub capability_client: Option<CapabilityClientInfo>,
     /// Return type - reserved for future protocol schema generation
     #[allow(dead_code)]
     pub return_type: Type,
     pub stream_item_type: Option<Type>,
+    /// PLX-110: which body shape dispatch must emit for this method.
+    ///
+    /// Computed by `ir_parse::signature::dispatch_shape` — the same predicates
+    /// `classify_return` uses to decide `updates` vs `terminal` — so the IR and
+    /// the dispatch codegen can no longer disagree about what a signature
+    /// means. Before PLX-110 there was no such field because there was no
+    /// choice: every method got the stream body, and a `Result`-returning
+    /// method simply failed to compile.
+    pub dispatch: crate::ir_parse::signature::DispatchShape,
+    /// PLX-110: the `T` of a `-> Result<T, E>` unary method, when `T` is a real
+    /// value. `None` for every shape that existed before PLX-110, which is what
+    /// keeps existing methods' `MethodSchema.returns` and method hashes
+    /// byte-identical.
+    pub terminal_type: Option<Type>,
     /// Specific enum variants this method can return (empty = all variants)
     pub returns_variants: Vec<String>,
     /// True if method streams multiple events (from #[hub_method(streaming)])
@@ -1759,7 +1906,31 @@ pub struct MethodInfo {
     /// hands it `current_reach()` (the gate's answer); stripped from the
     /// RPC params like `auth`.
     pub takes_reach: bool,
+    /// PLX-71: open extension pairs mirrored from `HubMethodAttrs::extensions`.
+    /// Emitted into `MethodSchema.extensions` via `with_extension` at codegen
+    /// time. Empty when the method declares no `ext(...)`.
+    pub extensions: Vec<(String, serde_json::Value)>,
 }
+
+/// PLX-146: a method's `client: Client<C>` capability handle.
+#[derive(Debug, Clone)]
+pub struct CapabilityClientInfo {
+    /// The binding the author wrote, so the generated call passes the handle
+    /// under the name the method body expects.
+    pub param_name: syn::Ident,
+    /// The capability set `C`, verbatim. These are the **same tokens**
+    /// `ir_parse` turns into `MethodIr::callbacks`, which is what keeps the
+    /// minted handle and the declared callbacks from disagreeing.
+    pub set_ty: syn::Type,
+    /// How many wire parameters preceded the handle in the signature.
+    ///
+    /// `call_args` is positional, so the handle has to go back exactly where
+    /// the author put it: `(text, client)` and `(client, text)` are different
+    /// calls, and appending would silently compile the wrong one whenever the
+    /// two types happened to unify.
+    pub position: usize,
+}
+
 
 /// AUTH-3: the doc comment's text beyond `description`: the comment with a
 /// leading copy of the description (and the punctuation after it) removed;
@@ -1845,6 +2016,8 @@ impl MethodInfo {
         let mut auth_optional = false;
         let mut auth_resolvers: Vec<AuthResolver> = Vec::new();
         let mut activation_params: Vec<ActivationParamInfo> = Vec::new();
+        // PLX-146: the capability handle, stripped rather than schema'd.
+        let mut capability_client: Option<CapabilityClientInfo> = None;
 
         // Extract parameters after &self
         let mut params = Vec::new();
@@ -1929,6 +2102,35 @@ impl MethodInfo {
                         }
                     }
 
+                    // PLX-146: the capability handle is a handle, not a wire
+                    // parameter.
+                    //
+                    // Gated on the *type*, not on the binding name — unlike the
+                    // `auth` and `ctx` branches above, which are name-gated for
+                    // historical reasons. This deliberately reuses
+                    // `ir_parse::signature::capability_handle_set`, the predicate
+                    // the IR parser already applies to the same signature, so the
+                    // two parsers cannot drift about what counts as a handle and
+                    // the "must name its capability set" diagnostics are emitted
+                    // once, in one place.
+                    if let Some(set_ty) =
+                        crate::ir_parse::signature::capability_handle_set(&pat_type.ty)?
+                    {
+                        if capability_client.is_some() {
+                            return Err(syn::Error::new(
+                                pat_type.ty.span(),
+                                "a method may take at most one capability handle; merge the \
+                                 capability sets into one `Client<(..)>`",
+                            ));
+                        }
+                        capability_client = Some(CapabilityClientInfo {
+                            param_name: name,
+                            set_ty,
+                            position: params.len(),
+                        });
+                        continue;
+                    }
+
                     // Param description precedence:
                     //   1. Explicit `params(name = "...")` on the method attribute wins.
                     //   2. Otherwise fall back to `///` doc comments on the parameter
@@ -1965,7 +2167,29 @@ impl MethodInfo {
             ReturnType::Type(_, ty) => (**ty).clone(),
         };
 
-        let stream_item_type = extract_stream_item_type(&return_type);
+        // PLX-110: one authority for "what shape is this return type", shared
+        // with the IR parser (`ir_parse::signature`). Reading `&method.sig.output`
+        // rather than `return_type` keeps the `ReturnType::Default` case
+        // expressible even though the check above rejects it today.
+        let dispatch = crate::ir_parse::signature::dispatch_shape(&method.sig.output);
+        let terminal_type = crate::ir_parse::signature::unary_terminal_type(&method.sig.output);
+
+        // PLX-110: peel the `Result` before looking for the stream item, but
+        // ONLY for the `Result<impl Stream<Item = T>, E>` shape. Widening
+        // `extract_stream_item_type` itself (e.g. to accept `Pin<Box<dyn
+        // Stream<Item = T>>>` the way `ir_parse::signature::stream_item` does)
+        // would newly populate `stream_item_type` for methods that exist today,
+        // moving their `MethodSchema.returns` AND their method hash — a
+        // wire-visible change this ticket is not authorised to make. No
+        // `ResultStream` method exists anywhere today, because until this build
+        // none of them compiled, so this branch changes nothing that is live.
+        let stream_item_type = match dispatch {
+            crate::ir_parse::signature::DispatchShape::ResultStream => {
+                crate::ir_parse::signature::result_ok(&return_type)
+                    .and_then(|ok| extract_stream_item_type(&ok))
+            }
+            _ => extract_stream_item_type(&return_type),
+        };
 
         // Check for PlexusStream return type - must use streaming pattern instead
         if is_result_plexus_stream(&return_type) {
@@ -2051,14 +2275,21 @@ impl MethodInfo {
             }
         }
         let group = hub_method_attrs.and_then(|a| a.group.clone());
+        // PLX-71: mirror the open extension pairs from the attribute.
+        let extensions = hub_method_attrs
+            .map(|a| a.extensions.clone())
+            .unwrap_or_default();
 
         Ok(MethodInfo {
             fn_name,
             method_name,
             description,
             params,
+            capability_client,
             return_type,
             stream_item_type,
+            dispatch,
+            terminal_type,
             returns_variants,
             streaming,
             bidirectional,
@@ -2077,6 +2308,7 @@ impl MethodInfo {
             examples,
             values,
             takes_reach,
+            extensions,
         })
     }
 }
@@ -2536,6 +2768,7 @@ mod tests {
             group: None,
             examples: vec![],
             values: vec![],
+            extensions: vec![],
         };
         let info = MethodInfo::from_fn(&method, Some(&attrs)).expect("parses cleanly");
         let param = info.params.iter().find(|p| p.name == "message").unwrap();

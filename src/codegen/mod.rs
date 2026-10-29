@@ -1,6 +1,7 @@
 //! Code generation for Plexus RPC macros
 
 mod activation;
+pub(crate) mod handlers;
 pub(crate) mod client;
 mod contract;
 mod method_enum;
