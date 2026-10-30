@@ -15,6 +15,26 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// PERF-17 E5: see `Registry::on_text`.
+fn perf17_typed_decode() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var("PERF17_TYPED_DECODE").map(|v| v == "1").unwrap_or(false))
+}
+
+/// PERF-17 E5: a notification's envelope, its item left as borrowed text.
+#[derive(serde::Deserialize)]
+struct Perf17Envelope<'a> {
+    #[serde(borrow, default)]
+    params: Option<Perf17Params<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct Perf17Params<'a> {
+    subscription: Value,
+    #[serde(borrow)]
+    result: &'a serde_json::value::RawValue,
+}
+
 /// The receiving half of one subscription's item channel.
 pub(crate) type Items = mpsc::UnboundedReceiver<Result<StreamItem, TransportError>>;
 type ItemsTx = mpsc::UnboundedSender<Result<StreamItem, TransportError>>;
@@ -202,6 +222,19 @@ impl Registry {
     /// irrelevant, so neither spelling can break routing.
     #[must_use = "the returned frame cancels a subscription nobody is reading"]
     pub(crate) fn on_text(&self, text: &str) -> Option<String> {
+        // PERF-17 (spike, never merged) E5: a stream item's frame read through
+        // a borrowed envelope — its `result` decoded straight into the
+        // StreamItem — instead of the whole frame into a Value and the result
+        // cloned out of it. PERF17_TYPED_DECODE=1 (read once); anything the
+        // envelope does not read as a notification takes the path below.
+        if perf17_typed_decode() {
+            if let Ok(env) = serde_json::from_str::<Perf17Envelope<'_>>(text) {
+                if let Some(p) = env.params {
+                    self.on_notification_raw(&p.subscription, p.result.get());
+                    return None;
+                }
+            }
+        }
         let frame = serde_json::from_str::<Value>(text).ok()?;
 
         // A subscribe reply.
@@ -259,6 +292,38 @@ impl Registry {
             self.lock().subs.remove(&key);
         }
         None
+    }
+
+    /// PERF-17 E5: [`Self::on_notification`] with the item still as text.
+    fn on_notification_raw(&self, subscription: &Value, result: &str) {
+        let key = key_of(subscription);
+        let state = self.lock();
+        let Some((sink, slot)) = state.subs.get(&key).map(|sub| (sub.sink.clone(), sub.slot.clone())) else {
+            return;
+        };
+        drop(state);
+        // PERF-17 E2b's batch (a `result` array) is read here too.
+        let items = if result.as_bytes().first() == Some(&b'[') {
+            serde_json::from_str::<Vec<StreamItem>>(result)
+        } else {
+            serde_json::from_str::<StreamItem>(result).map(|i| vec![i])
+        };
+        match items {
+            Ok(items) => {
+                for item in items {
+                    let terminal = item.is_terminal();
+                    let _ = sink.unbounded_send(Ok(item));
+                    if terminal {
+                        slot.mark_finished();
+                        self.forget_sub(subscription);
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = sink.unbounded_send(Err(TransportError::protocol(format!("undecodable stream item: {e}"))));
+            }
+        }
     }
 
     fn on_notification(&self, subscription: &Value, frame: &Value) {
