@@ -153,6 +153,11 @@ async fn null_and_empty_are_accepted() {
 async fn the_bare_value_shortcut_is_accepted() {
     ran(&TicketsActivation, "get", serde_json::json!(7)).await;
     ran(&TicketsActivation, "maybe", serde_json::json!(7)).await;
+    // A method of no parameters takes any non-object as before: only an
+    // object's keys are looked at.
+    ran(&TicketsActivation, "health", serde_json::json!(7)).await;
+    // A known key set to null is the parameter left out.
+    ran(&TicketsActivation, "maybe", serde_json::json!({ "keep": null })).await;
 }
 
 #[tokio::test]
@@ -185,5 +190,8 @@ fn the_readme_says_an_unknown_key_is_refused() {
         .find(|l| l.starts_with("| `typed_params` |"))
         .expect("README's attribute table has a `typed_params` row");
     assert!(row.contains("MACRO-31"), "the `typed_params` row names MACRO-31: {row}");
-    assert!(row.contains("unknown field"), "the `typed_params` row gives the refusal's words: {row}");
+    assert!(
+        row.split(". ").any(|sentence| sentence.contains("unknown field `") && sentence.contains("refused")),
+        "one sentence of the `typed_params` row says an unknown key is refused, in the refusal's words (unknown field `…`): {row}"
+    );
 }

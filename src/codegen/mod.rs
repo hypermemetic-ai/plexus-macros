@@ -784,6 +784,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         activation_deprecation.as_ref(),
         &deps,
         &declared_roles,
+        args.typed_params, // MACRO-31: an unknown key is refused under it
     );
 
     // MACRO-2 / MACRO-13: the typed client. Under the name rule it is

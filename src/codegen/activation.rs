@@ -47,13 +47,15 @@ pub fn generate(
     deps: &syn::Ident,
     // AUTH-3: default roles, flattened to grants.
     roles: &[(String, Vec<String>)],
+    // MACRO-31: under `typed_params` a key no parameter claims is refused.
+    typed_params: bool,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
     let rpc_server_name = format_ident!("{}RpcServer", struct_name);
     let method_names: Vec<&str> = methods.iter().map(|m| m.method_name.as_str()).collect();
 
-    let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type, deps);
+    let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type, deps, typed_params);
     let help_arms = generate_help_arms(methods);
     let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty());
     let rpc_trait_methods = generate_rpc_trait_methods(methods, deps);
@@ -1054,6 +1056,7 @@ fn generate_dispatch_arms(
     crate_path: &syn::Path,
     request_type: Option<&syn::Type>,
     deps: &syn::Ident,
+    typed_params: bool,
 ) -> Vec<TokenStream> {
     use crate::parse::BidirType;
 
@@ -1063,10 +1066,17 @@ fn generate_dispatch_arms(
             let method_name = &m.method_name;
             let fn_name = &m.fn_name;
 
-            // Generate param extraction code
-            let (param_extraction, param_names) = generate_param_extraction(m, crate_path, deps);
-
             let content_type = format!("{}.{}", namespace, method_name);
+
+            // Generate param extraction code (MACRO-31: under `typed_params`,
+            // preceded by the check for keys no parameter claims).
+            let (param_extraction, param_names) = generate_param_extraction(m, crate_path, deps);
+            let unknown_keys = if typed_params {
+                generate_unknown_key_check(m, &content_type, crate_path, deps)
+            } else {
+                quote! {}
+            };
+            let param_extraction = quote! { #unknown_keys #param_extraction };
 
             // Generate auth injection code if needed.
             //
@@ -1325,6 +1335,47 @@ fn generate_dispatch_arms(
             }
         })
         .collect()
+}
+
+/// MACRO-31: under `typed_params`, a key of the params object that names no
+/// wire parameter of the method is `InvalidParams` (-32602) before anything
+/// is extracted — ``unknown field `sumary`; tickets.list takes: after, …``,
+/// every unknown key named and sorted, the parameters sorted (``… takes no
+/// parameters`` for a method of none). `unknown field` is the words synapse
+/// reads to know its cached schema is stale, so they are said verbatim. The
+/// method is named by this activation's namespace (a child's own, not the
+/// path it is mounted at: the dispatch is not handed that). Only an object
+/// is looked at: `null`, a bare value and `{}` reach the extraction as
+/// before, and keys inside a parameter's value are its type's to judge.
+/// `m.params` holds the wire parameters alone — what the server injects
+/// (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`, a bidirectional
+/// `ctx`) is never a key.
+fn generate_unknown_key_check(m: &MethodInfo, content_type: &str, crate_path: &syn::Path, deps: &syn::Ident) -> TokenStream {
+    let mut known: Vec<String> = m.params.iter().map(|p| p.name.to_string()).collect();
+    known.sort();
+    let takes = if known.is_empty() {
+        format!("{} takes no parameters", content_type)
+    } else {
+        format!("{} takes: {}", content_type, known.join(", "))
+    };
+    quote! {
+        if let #deps::serde_json::Value::Object(__plexus_keys) = &params {
+            const __PLEXUS_KNOWN: &[&str] = &[#(#known),*];
+            let mut __plexus_unknown: ::std::vec::Vec<&str> = __plexus_keys
+                .keys()
+                .map(|k| k.as_str())
+                .filter(|k| !__PLEXUS_KNOWN.contains(k))
+                .collect();
+            if !__plexus_unknown.is_empty() {
+                __plexus_unknown.sort_unstable();
+                let __plexus_named: ::std::vec::Vec<::std::string::String> =
+                    __plexus_unknown.iter().map(|k| format!("`{}`", k)).collect();
+                return Err(#crate_path::plexus::PlexusError::InvalidParams(
+                    format!("unknown field {}; {}", __plexus_named.join(", "), #takes)
+                ));
+            }
+        }
+    }
 }
 
 /// Generate param extraction code and return the param names for the call.
