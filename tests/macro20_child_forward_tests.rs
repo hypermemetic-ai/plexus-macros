@@ -131,7 +131,7 @@ async fn seen(child: &str) -> Value {
     let items: Vec<Value> = stream
         .filter_map(|i| async move {
             match i {
-                PlexusStreamItem::Data { content, .. } => Some(content),
+                PlexusStreamItem::Data { content, .. } => Some(content.into_value()),
                 _ => None,
             }
         })

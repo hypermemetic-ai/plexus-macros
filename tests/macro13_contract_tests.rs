@@ -67,7 +67,7 @@ async fn data(hub: &DynamicHub, method: &str, params: Value) -> Vec<Value> {
     stream
         .filter_map(|item| async move {
             match item {
-                PlexusStreamItem::Data { content, .. } => Some(content),
+                PlexusStreamItem::Data { content, .. } => Some(content.into_value()),
                 PlexusStreamItem::Error { message, .. } => panic!("error item: {message}"),
                 _ => None,
             }

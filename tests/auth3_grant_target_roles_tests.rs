@@ -153,7 +153,7 @@ async fn first_data(stream: plexus_core::plexus::PlexusStream) -> serde_json::Va
     let mut s = stream;
     while let Some(item) = s.next().await {
         if let PlexusStreamItem::Data { content, .. } = item {
-            return content;
+            return content.into_value();
         }
     }
     panic!("no data item");

@@ -64,7 +64,7 @@ async fn first_string(
 ) -> Option<String> {
     while let Some(item) = stream.next().await {
         if let plexus_core::plexus::PlexusStreamItem::Data { content, .. } = item {
-            if let serde_json::Value::String(s) = content {
+            if let serde_json::Value::String(s) = content.into_value() {
                 return Some(s);
             }
         }
