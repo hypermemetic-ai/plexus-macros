@@ -94,7 +94,7 @@ async fn call_for_schema(hub: &Hub, method: &str) -> SchemaResult {
     let items: Vec<PlexusStreamItem> = stream.collect().await;
     for item in items {
         if let PlexusStreamItem::Data { content, .. } = item {
-            return serde_json::from_value(content)
+            return serde_json::from_value(content.into_value())
                 .unwrap_or_else(|e| panic!("could not deserialize SchemaResult: {e:?}"));
         }
     }

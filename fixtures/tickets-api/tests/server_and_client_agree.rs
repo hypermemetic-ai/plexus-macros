@@ -29,7 +29,7 @@ async fn dispatch(method: &str, params: serde_json::Value) -> Vec<serde_json::Va
         .await
         .into_iter()
         .filter_map(|i| match i {
-            PlexusStreamItem::Data { content, .. } => Some(content),
+            PlexusStreamItem::Data { content, .. } => Some(content.into_value()),
             _ => None,
         })
         .collect()
