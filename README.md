@@ -4,6 +4,8 @@ Procedural macros for **Plexus RPC** activations. The macros are the **source of
 
 ---
 
+**Versions:** use `plexus-macros` and `plexus-core` from the same minor line (0.7 with 0.7). The macro emits paths into plexus-core but cannot depend on it, so cargo cannot enforce the pairing from this side; `plexus-core` requires `plexus-macros` on its own line and re-exports `activation` and `method`.
+
 ## Overview: macros → schema → clients
 
 ```
@@ -137,7 +139,7 @@ synapse lforge echo stats total                 # → 0
 
 ## Comprehensive example
 
-A single realistic activation that exercises every macro in the crate. Every attribute shown is currently supported on **0.5.x**. Features that are less common are called out inline.
+A single realistic activation that exercises every macro in the crate. Every attribute shown is currently supported on **0.7.x**. Features that are less common are called out inline.
 
 > The example below uses several `description = "..."` attr args explicitly — partly for readability in a reference doc, partly because the comprehensive activation description is the easier way to show the `long_description` companion. **In your own code prefer `///` doc comments** per the [Documentation is primary](#documentation-is-primary--everywhere) section above.
 
@@ -367,7 +369,7 @@ impl Counter {
 pub struct Stats;
 ```
 
-The example above is the **full** feature surface of plexus-macros 0.5.x. Real activations typically use a subset — see [`plexus-substrate`](https://github.com/hypermemetic/plexus-substrate/tree/main/src/activations) for concrete, minimally-documented usage (`echo` and `bash` are the smallest; `cone`, `claudecode`, and `solar` exercise children, handles, and generics).
+The example above is the **full** feature surface of plexus-macros 0.7.x. Real activations typically use a subset — see [`plexus-substrate`](https://github.com/hypermemetic/plexus-substrate/tree/main/src/activations) for concrete, minimally-documented usage (`echo` and `bash` are the smallest; `cone`, `claudecode`, and `solar` exercise children, handles, and generics).
 
 ---
 
@@ -638,8 +640,8 @@ server  = ["dep:plexus-core", "dep:tokio", "dep:jsonrpsee", "dep:serde_json", "d
 # NOT optional: a proc-macro crate is built for the host, never the target,
 # so a wasm32 build pays nothing for it — and that is what lets the macro run,
 # and emit the client, in a build with no server dependencies at all.
-plexus-macros = "0.6"
-plexus-client = "0.6"
+plexus-macros = "0.7"
+plexus-client = "0.7"
 serde         = { version = "1", features = ["derive"] }
 ```
 
@@ -739,9 +741,9 @@ Attached to an `impl` block to generate the activation's `Activation` trait impl
 | `namespace_fn = "method"` | string | _(none)_ | Advanced: generate `namespace()` as a method call instead of a constant. |
 | `client` | flag | _(off)_ | Also emit the typed client — see [The typed client](#the-typed-client-client--server_cfg). Requires a `plexus-client` dependency. MACRO-13: under the name rule the client is emitted whenever `plexus-client` is a dependency, and `client` is ignored with a deprecation warning. |
 | `server_cfg = "<pred>"` | string | _(none)_ | Compile the **server** half of the expansion only under that `cfg` (e.g. `feature = "server"`). Requires `client` (MACRO-13: not under the name rule, where `feature = "server"` is the default when the crate declares it). This is what makes an activation crate reachable from wasm32. |
-| `typed_params` | flag | _(off)_ | MACRO-12: a method parameter typed literally `String`, `&str`, `Option<String>`, `Option<&str>` or `Vec<String>` is a compile error on that parameter: ``` `<method>.<param>`: a bare string parameter; give it a type (typed_params) ```. Injected parameters (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`) are exempt. An alias (`type Name = String`) is not seen through. MACRO-31: and a key of the params object that names no wire parameter is refused at dispatch, before the method runs — `-32602 invalid_params`, ``Invalid params: unknown field `sumary`; tickets.list takes: after, limit, summary`` (every unknown key named, sorted; the parameters sorted; ``… takes no parameters`` for a method of none). `unknown field` is synapse's word for a stale cached schema (it re-reads the schema and runs the call again), so it is said verbatim. The method is named by its activation's own namespace (a child's, not the path it is mounted at). `null`, `{}` and a bare value are answered as before; keys inside a parameter's value are its type's serde's. Off by default for 0.6; on by default is MACRO-8's call. |
-| `hub` | flag | _(off, deprecated)_ | Deprecated — hub mode is inferred from `#[child]` methods. Removed in 0.6. |
-| `children = [ident, ...]` | ident list | _(empty, deprecated)_ | Deprecated — use `#[child]` methods. Removed in 0.6. |
+| `typed_params` | flag | _(off)_ | MACRO-12: a method parameter typed literally `String`, `&str`, `Option<String>`, `Option<&str>` or `Vec<String>` is a compile error on that parameter: ``` `<method>.<param>`: a bare string parameter; give it a type (typed_params) ```. Injected parameters (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`) are exempt. An alias (`type Name = String`) is not seen through. MACRO-31: and a key of the params object that names no wire parameter is refused at dispatch, before the method runs — `-32602 invalid_params`, ``Invalid params: unknown field `sumary`; tickets.list takes: after, limit, summary`` (every unknown key named, sorted; the parameters sorted; ``… takes no parameters`` for a method of none). `unknown field` is synapse's word for a stale cached schema (it re-reads the schema and runs the call again), so it is said verbatim. The method is named by its activation's own namespace (a child's, not the path it is mounted at). `null`, `{}` and a bare value are answered as before; keys inside a parameter's value are its type's serde's. Off by default for 0.7; on by default is MACRO-8's call. |
+| `hub` | flag | _(off, deprecated)_ | Deprecated — hub mode is inferred from `#[child]` methods. Still accepted in 0.7. |
+| `children = [ident, ...]` | ident list | _(empty, deprecated)_ | Deprecated — use `#[child]` methods. Still accepted in 0.7. |
 
 ### `#[plexus_macros::method(...)]`
 
@@ -932,7 +934,7 @@ Library crates almost never need this directly; the companion crate [`plexus-sch
 
 ## Migration from deprecated surfaces
 
-All deprecations in plexus-macros 0.5 continue to compile with warnings through 0.5.x and are removed in 0.6.
+All deprecations in plexus-macros 0.5 still compile with warnings in 0.7; none has a removal version yet.
 
 ### `#[hub_methods]` → `#[plexus_macros::activation]`
 
@@ -990,7 +992,7 @@ impl Solar {
 }
 ```
 
-Hub mode is now **inferred** from the presence of `#[child]` methods (CHILD-8). The `hub` flag and `children = [...]` list emit deprecation warnings and are scheduled for removal in 0.6.
+Hub mode is now **inferred** from the presence of `#[child]` methods (CHILD-8). The `hub` flag and `children = [...]` list emit deprecation warnings and still work in 0.7.
 
 ---
 

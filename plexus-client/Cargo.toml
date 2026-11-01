@@ -1,6 +1,6 @@
 [package]
 name = "plexus-client"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 description = "wasm-safe client runtime for Plexus RPC: the wire envelope, the Transport trait, and typed event decoding"
@@ -37,7 +37,7 @@ web-sys = { version = "0.3", optional = true, features = [
 # MACRO-6: the WebSocket JSON-RPC transport, one type behind two backends.
 #
 # `default = []` is load-bearing, not decoration: a wasm32 consumer that says
-# `plexus-client = "0.6"` must get the four-dependency core and nothing else,
+# `plexus-client = "0.7"` must get the four-dependency core and nothing else,
 # and `--no-default-features` must have no tokio and no jsonrpsee anywhere in
 # the tree. Both backends expose the same `WsTransport::connect(url, hub)`.
 [features]
