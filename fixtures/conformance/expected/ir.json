@@ -11,6 +11,7 @@
       "mdDescription": "Ticks from 1 up to `to`.",
       "mdError": null,
       "mdFullPath": "conformance.count",
+      "mdGrant": "conformance.count",
       "mdName": "count",
       "mdNamespace": "conformance",
       "mdParams": [
@@ -56,6 +57,7 @@
         "tag": "RefNamed"
       },
       "mdFullPath": "conformance.load",
+      "mdGrant": "conformance.load",
       "mdName": "load",
       "mdNamespace": "conformance",
       "mdParams": [
@@ -107,6 +109,7 @@
         "tag": "RefNamed"
       },
       "mdFullPath": "conformance.lookup",
+      "mdGrant": "conformance.lookup",
       "mdName": "lookup",
       "mdNamespace": "conformance",
       "mdParams": [
@@ -146,6 +149,7 @@
       "mdDescription": "Always answers pong.",
       "mdError": null,
       "mdFullPath": "conformance.ping",
+      "mdGrant": "conformance.ping",
       "mdName": "ping",
       "mdNamespace": "conformance",
       "mdParams": [],
@@ -175,6 +179,7 @@
         "tag": "RefNamed"
       },
       "mdFullPath": "conformance.scan",
+      "mdGrant": "conformance.scan",
       "mdName": "scan",
       "mdNamespace": "conformance",
       "mdParams": [
@@ -214,9 +219,29 @@
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
       "mdFullPath": "conformance.schema",
+      "mdGrant": "conformance.schema",
       "mdName": "schema",
       "mdNamespace": "conformance",
-      "mdParams": [],
+      "mdParams": [
+        {
+          "pdDefault": null,
+          "pdDeprecation": null,
+          "pdDescription": "One method's schema instead of the whole activation's.",
+          "pdName": "method",
+          "pdRequired": false,
+          "pdSource": null,
+          "pdType": {
+            "contents": {
+              "contents": [
+                "string",
+                null
+              ],
+              "tag": "RefPrimitive"
+            },
+            "tag": "RefOptional"
+          }
+        }
+      ],
       "mdProgress": null,
       "mdReturns": {
         "contents": {
@@ -237,6 +262,7 @@
       "mdDescription": "Warms the cache, noting its progress, then says how many entries it holds.",
       "mdError": null,
       "mdFullPath": "conformance.warm",
+      "mdGrant": "conformance.warm",
       "mdName": "warm",
       "mdNamespace": "conformance",
       "mdParams": [],
@@ -261,9 +287,9 @@
   },
   "irPluginHashes": {
     "conformance": {
-      "phiChildrenHash": "60d7e85ced34c0c7",
-      "phiHash": "60d7e85ced34c0c7",
-      "phiSelfHash": "60d7e85ced34c0c7"
+      "phiChildrenHash": "6b9d49caad9ae188",
+      "phiHash": "6b9d49caad9ae188",
+      "phiSelfHash": "6b9d49caad9ae188"
     }
   },
   "irPluginRequests": null,
@@ -995,6 +1021,41 @@
       "tdName": "LookupError",
       "tdNamespace": "conformance"
     },
+    "conformance.MethodExample": {
+      "tdDescription": "SYNAPSE-13: one worked call of a method — the params it sends and a note\nsaying what it does (`#[plexus_macros::method(example(note = \"…\", params\n= r#\"{…}\"#))]`).",
+      "tdKind": {
+        "ksFields": [
+          {
+            "fdDefault": null,
+            "fdDescription": "What the call does, in a line.",
+            "fdName": "note",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": [
+                  "string",
+                  null
+                ],
+                "tag": "RefPrimitive"
+              },
+              "tag": "RefOptional"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "The params object, as the method takes it.",
+            "fdName": "params",
+            "fdRequired": true,
+            "fdType": {
+              "tag": "RefJson"
+            }
+          }
+        ],
+        "tag": "KindStruct"
+      },
+      "tdName": "MethodExample",
+      "tdNamespace": "conformance"
+    },
     "conformance.MethodPath": {
       "tdDescription": "A dotted method path like `auth.login` or `cone.send_message`.\n\nWire form: bare string. Validation: must match\n`^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`. At least two segments are required\n(the activation namespace plus the method name).\n\nWildcards are NOT allowed — wildcards belong to `Scope` (AUTHZ-CORE-4).\n\nPer AUTHZ-S01-output §1.",
       "tdKind": {
@@ -1068,6 +1129,22 @@
       "tdDescription": "Schema for a single method exposed by a plugin",
       "tdKind": {
         "ksFields": [
+          {
+            "fdDefault": null,
+            "fdDescription": "BIDIR-8: who may answer a question this method asks mid-call\n(`#[method(answer_by = \"person\" | \"grant:<g>\")]`; BIDIR-1\n`answerer`). Absent for the default, `caller` — the call's own\nconnection — so a method without the attribute is byte-identical.",
+            "fdName": "answer_by",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": [
+                  "string",
+                  null
+                ],
+                "tag": "RefPrimitive"
+              },
+              "tag": "RefOptional"
+            }
+          },
           {
             "fdDefault": null,
             "fdDescription": "Declared auth posture of the activation this method belongs to.\n\nPopulated by `#[plexus_macros::activation(auth = \"...\")]` (R-1) —\nstamped onto every RPC method of the activation. `None` means the\nactivation never declared a posture (pre-R-1 emissions and\nposture-silent activations are byte-identical on the wire).\n\nAdded in R-2 (joint AP-1). Defaults to `None` via `#[serde(default)]`\nso pre-R IRs decode cleanly; `skip_serializing_if` keeps the wire\nshape unchanged when unset.",
@@ -1161,12 +1238,53 @@
             "fdName": "error",
             "fdRequired": false,
             "fdType": {
+              "tag": "RefJson"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "SYNAPSE-13: worked calls of this method, each its params object and a\nnote saying what it does — OpenAPI's `examples`. A client renders them\nas command lines (`synapse … --id MENGER-40 --status Coding`).\n\nOptional on the wire (`serde(default)`, skipped when empty).",
+            "fdName": "examples",
+            "fdRequired": false,
+            "fdType": {
               "contents": {
                 "contents": {
-                  "qnLocalName": "Schema",
+                  "qnLocalName": "MethodExample",
                   "qnNamespace": "conformance"
                 },
                 "tag": "RefNamed"
+              },
+              "tag": "RefArray"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "AUTH-3: the grant this method is — `<activation>.<method>`, inherent\n(AUTH-1: \"every method should be its own grant\"). The macro emits it\nfor every method; `None` only on a hand-built or pre-AUTH schema, and\na gate then takes the method's dotted path.\n\nOptional on the wire (`serde(default)`, skipped when unset) so older\nschemas and clients parse unchanged.",
+            "fdName": "grant",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": [
+                  "string",
+                  null
+                ],
+                "tag": "RefPrimitive"
+              },
+              "tag": "RefOptional"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "SYNAPSE-13: the method's group in a listing (`\"read\"`, `\"write\"`, …)\n— one group, like an OpenAPI operation's first tag. Clients list the\nmethods of a group together and alphabetically within it.\n\nOptional on the wire (`serde(default)`, skipped when unset) so older\nschemas and clients parse unchanged.",
+            "fdName": "group",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": [
+                  "string",
+                  null
+                ],
+                "tag": "RefPrimitive"
               },
               "tag": "RefOptional"
             }
@@ -1185,6 +1303,25 @@
             }
           },
           {
+            "fdDefault": null,
+            "fdDescription": "AUTH-4: in a caller's view of a gated hub, where the caller holds this\nmethod's grant (`[\"MENGER\"]`, `[\"*\"]`), within its session's ceiling.\nAbsent outside a caller's view (and on a public method the caller\nholds nowhere).",
+            "fdName": "held_on",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": {
+                  "contents": [
+                    "string",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                },
+                "tag": "RefArray"
+              },
+              "tag": "RefOptional"
+            }
+          },
+          {
             "fdDefault": "POST",
             "fdDescription": "HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)\n\nThis field is used by the HTTP gateway to determine which HTTP method\nto use when exposing this method as a REST endpoint. Defaults to POST\nfor backward compatibility.\n\n- GET: Idempotent read operations (no side effects)\n- POST: Create operations or non-idempotent actions (default)\n- PUT: Replace/update operations (idempotent)\n- DELETE: Remove operations (idempotent)\n- PATCH: Partial update operations",
             "fdName": "http_method",
@@ -1195,6 +1332,31 @@
                 "qnNamespace": "conformance"
               },
               "tag": "RefNamed"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "SYNAPSE-CC-9: reserved for BIDIR-6 — the JSON Schema of the items a\nclient streams *in* to this method (`Input<T>`). Always `None` until\nBIDIR-6 fills it; absent from the wire while `None`, so a schema\nwithout it is byte-identical to 0.6.1's.",
+            "fdName": "input",
+            "fdRequired": false,
+            "fdType": {
+              "tag": "RefJson"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "AUTH-3: the method's `///` doc comment, when it says more than\n`description` (the macro used to drop it whenever `description =\n\"...\"` was given).",
+            "fdName": "long_description",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": [
+                  "string",
+                  null
+                ],
+                "tag": "RefPrimitive"
+              },
+              "tag": "RefOptional"
             }
           },
           {
@@ -1216,14 +1378,7 @@
             "fdName": "params",
             "fdRequired": false,
             "fdType": {
-              "contents": {
-                "contents": {
-                  "qnLocalName": "Schema",
-                  "qnNamespace": "conformance"
-                },
-                "tag": "RefNamed"
-              },
-              "tag": "RefOptional"
+              "tag": "RefJson"
             }
           },
           {
@@ -1248,14 +1403,7 @@
             "fdName": "progress",
             "fdRequired": false,
             "fdType": {
-              "contents": {
-                "contents": {
-                  "qnLocalName": "Schema",
-                  "qnNamespace": "conformance"
-                },
-                "tag": "RefNamed"
-              },
-              "tag": "RefOptional"
+              "tag": "RefJson"
             }
           },
           {
@@ -1277,14 +1425,7 @@
             "fdName": "request_type",
             "fdRequired": false,
             "fdType": {
-              "contents": {
-                "contents": {
-                  "qnLocalName": "Schema",
-                  "qnNamespace": "conformance"
-                },
-                "tag": "RefNamed"
-              },
-              "tag": "RefOptional"
+              "tag": "RefJson"
             }
           },
           {
@@ -1309,14 +1450,7 @@
             "fdName": "response_type",
             "fdRequired": false,
             "fdType": {
-              "contents": {
-                "contents": {
-                  "qnLocalName": "Schema",
-                  "qnNamespace": "conformance"
-                },
-                "tag": "RefNamed"
-              },
-              "tag": "RefOptional"
+              "tag": "RefJson"
             }
           },
           {
@@ -1325,11 +1459,7 @@
             "fdName": "returns",
             "fdRequired": true,
             "fdType": {
-              "contents": {
-                "qnLocalName": "Schema",
-                "qnNamespace": "conformance"
-              },
-              "tag": "RefNamed"
+              "tag": "RefJson"
             }
           },
           {
@@ -1345,6 +1475,22 @@
                 "qnNamespace": "conformance"
               },
               "tag": "RefNamed"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "AUTH-3: the param that locates what this call acts on\n(`#[plexus_macros::method(target = \"id\")]`). A gate resolves its\nvalue to the scopes it lives in and asks for the grant there; a\nmethod without one is allowed where the grant is held anywhere and\nanswers only from there.",
+            "fdName": "target",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": [
+                  "string",
+                  null
+                ],
+                "tag": "RefPrimitive"
+              },
+              "tag": "RefOptional"
             }
           }
         ],
@@ -1583,7 +1729,26 @@
             "fdName": "request",
             "fdRequired": false,
             "fdType": {
-              "tag": "RefAny"
+              "tag": "RefJson"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "AUTH-3: this activation's default roles — role name → the grants it\nlists (`<activation>.<method>`, role inclusion already flattened), as\ndeclared by `#[plexus_macros::activation(roles(...))]`. `admin` is\nbuilt in and never listed. Empty (and absent on the wire) when the\nactivation declares none.",
+            "fdName": "roles",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": {
+                  "contents": [
+                    "string",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                },
+                "tag": "RefArray"
+              },
+              "tag": "RefMap"
             }
           },
           {
@@ -1610,6 +1775,22 @@
                 null
               ],
               "tag": "RefPrimitive"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "AUTH-4: which view of a gated hub this schema answers from —\n`anonymous` (only the door: the public methods) or `caller` (the\nmethods the caller holds). Absent from every schema a hub without a\ngate answers, so those stay byte-identical.",
+            "fdName": "view",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": {
+                  "qnLocalName": "ViewKind",
+                  "qnNamespace": "conformance"
+                },
+                "tag": "RefNamed"
+              },
+              "tag": "RefOptional"
             }
           }
         ],
@@ -1752,23 +1933,38 @@
       "tdName": "ScanError",
       "tdNamespace": "conformance"
     },
-    "conformance.Schema": {
-      "tdDescription": null,
-      "tdKind": {
-        "kpFormat": null,
-        "kpType": "any",
-        "tag": "KindPrimitive"
-      },
-      "tdName": "Schema",
-      "tdNamespace": "conformance"
-    },
     "conformance.SchemaResult": {
       "tdDescription": "Result of a schema query - either full plugin or single method",
       "tdKind": {
-        "kaTarget": {
-          "tag": "RefAny"
-        },
-        "tag": "KindAlias"
+        "keDiscriminator": "",
+        "keRepr": "untagged",
+        "keVariants": [
+          {
+            "vdDescription": "Full plugin schema (when no method specified)",
+            "vdFields": [],
+            "vdName": "PluginSchema",
+            "vdRef": {
+              "contents": {
+                "qnLocalName": "PluginSchema",
+                "qnNamespace": "conformance"
+              },
+              "tag": "RefNamed"
+            }
+          },
+          {
+            "vdDescription": "Single method schema (when method specified)",
+            "vdFields": [],
+            "vdName": "MethodSchema",
+            "vdRef": {
+              "contents": {
+                "qnLocalName": "MethodSchema",
+                "qnNamespace": "conformance"
+              },
+              "tag": "RefNamed"
+            }
+          }
+        ],
+        "tag": "KindEnum"
       },
       "tdName": "SchemaResult",
       "tdNamespace": "conformance"
@@ -1840,6 +2036,18 @@
         "tag": "KindStruct"
       },
       "tdName": "Tick",
+      "tdNamespace": "conformance"
+    },
+    "conformance.ViewKind": {
+      "tdDescription": "AUTH-4: the two views of a gated hub. On the wire, `\"anonymous\"` or\n`\"caller\"`.",
+      "tdKind": {
+        "kseValues": [
+          "anonymous",
+          "caller"
+        ],
+        "tag": "KindStringEnum"
+      },
+      "tdName": "ViewKind",
       "tdNamespace": "conformance"
     },
     "conformance.Warmed": {
