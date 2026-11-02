@@ -5,7 +5,16 @@ This file starts at 0.7.0; earlier changes are in the git history.
 
 ## [Unreleased]
 
-BIDIR-6: `Input<T>`.
+BIDIR-6: `Input<T>`. BIDIR-17: `Input<Bytes>` as binary frames.
+
+### Added (BIDIR-17)
+
+- `MethodSchema.input` of an `Input<Bytes>` is marked binary (through
+  plexus-core's `input::item_schema`).
+- plexus-client: `InputItems` carries `InputItem` (`Json`, or `Binary` with the
+  new `binary` feature, which `ws-native` and `ws-web` turn on; the default
+  core stays four dependencies). `encode_input` makes a `Bytes` item `Binary`
+  and needs `T: 'static`; `WsTransport` writes each as one binary frame.
 
 ### Added
 
