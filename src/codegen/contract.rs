@@ -586,7 +586,7 @@ pub(crate) fn client_trait_impl(
             fn #fn_ident(&self #(, #params)*) -> #client::BoxStream<'static, #ev> {
                 let mut __params = #client::__rt::serde_json::Map::new();
                 #(#inserts)*
-                #client::into_events::<#ev>(#client::decode::<#ev>(#client::owned_call(
+                #client::into_events::<#ev>(#client::decode_raw::<#ev>(#client::owned_call_raw(
                     ::core::clone::Clone::clone(&self.transport),
                     Self::#const_ident.at(self.path),
                     #client::__rt::serde_json::Value::Object(__params),

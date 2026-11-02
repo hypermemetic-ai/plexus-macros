@@ -261,8 +261,10 @@ pub(crate) fn generate(
             {
                 let mut __params = #client_path::__rt::serde_json::Map::new();
                 #(#inserts)*
-                #client_path::decode::<#event_ty>(
-                    #client_path::Transport::call(
+                // PERF.115-36: the items with their content still the
+                // wire's text, decoded straight into the event.
+                #client_path::decode_raw::<#event_ty>(
+                    #client_path::Transport::call_raw(
                         &self.transport,
                         Self::#const_ident.at(self.path),
                         #client_path::__rt::serde_json::Value::Object(__params),
