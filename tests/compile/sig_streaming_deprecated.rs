@@ -1,5 +1,7 @@
-//! RETURNS-8 negative fixture: `#[method(streaming)]` is removed — a
-//! method's cardinality comes from its return type.
+//! RETURNS-36: `#[method(streaming)]` on a stream form still compiles (echo-rs
+//! builds on 0.7.0 and 0.8 unchanged), with a deprecation warning — made an
+//! error here by `deny(deprecated)` so the test can see it.
+#![deny(deprecated)]
 
 pub struct TickerActivation;
 

@@ -2955,12 +2955,10 @@ mod tests {
     }
 
     #[test]
-    fn streaming_and_returns_are_removed() {
-        let err = match syn::parse_str::<HubMethodAttrs>("streaming") {
-            Ok(_) => panic!("`streaming` must be rejected"),
-            Err(e) => e.to_string(),
-        };
-        assert!(err.contains("cardinality comes from the return type — remove `streaming`"), "{err}");
+    fn streaming_is_deprecated_and_returns_removed() {
+        // RETURNS-36: `streaming` parses (a deprecated no-op where the
+        // signature agrees; checked against it in `MethodInfo::from_fn`).
+        assert!(syn::parse_str::<HubMethodAttrs>("streaming").is_ok(), "`streaming` parses");
         let err = match syn::parse_str::<HubMethodAttrs>("returns(Ok, Error)") {
             Ok(_) => panic!("`returns(..)` must be rejected"),
             Err(e) => e.to_string(),

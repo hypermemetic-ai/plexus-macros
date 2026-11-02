@@ -1,0 +1,5 @@
+error: `streaming` says this method yields many items, but `-> u64` yields one. Remove `streaming` (cardinality comes from the return type), or return `impl Stream<Item = ...>`.
+ --> tests/compile/sig_streaming_on_one_item.rs:9:29
+  |
+9 |     #[plexus_macros::method(streaming)]
+  |                             ^^^^^^^^^
