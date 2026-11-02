@@ -385,6 +385,62 @@ fn unsubscribe_frame(request_id: u64, hub_namespace: &str, subscription: &Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{FutureExt, StreamExt};
+
+    /// A subscribe written as request `id` and answered with `subscription`:
+    /// the channel its items arrive on.
+    fn subscribed(registry: &Registry, id: u64, subscription: &str) -> Items {
+        let reply = registry.register_pending(id, SubSlot::new()).unwrap();
+        let answer = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{subscription}}}"#);
+        assert!(registry.on_text(&answer).is_none());
+        reply.now_or_never().expect("answered").expect("not dropped").expect("subscribed")
+    }
+
+    /// A notification for `subscription` carrying `item`.
+    fn note(subscription: &str, item: &str) -> String {
+        format!(r#"{{"jsonrpc":"2.0","method":"kit.call","params":{{"subscription":{subscription},"result":{item}}}}}"#)
+    }
+
+    const DATA: &str = r#"{"type":"data","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"content_type":"kit.say","content":{"type":"said","text":"hi"}}"#;
+    const DONE: &str = r#"{"type":"done","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1}}"#;
+
+    /// Everything the channel holds now.
+    fn drain(items: &mut Items) -> Vec<Result<StreamItem, TransportError>> {
+        std::iter::from_fn(|| items.next().now_or_never().flatten()).collect()
+    }
+
+    /// spec/03: a client SHOULD treat an item `type` it does not know as
+    /// non-terminal and skip it. PERF.115-41 found one ended the stream, so a
+    /// new kind of item (a stream's header, say) would end every call that
+    /// met it, and menger's `watch` would reconnect.
+    #[test]
+    fn an_item_of_a_type_it_does_not_know_is_skipped_and_the_stream_goes_on() {
+        let registry = Registry::new(Arc::from("kit"));
+        let mut items = subscribed(&registry, 1, "7");
+        for item in [
+            r#"{"type":"header","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"columns":["a"]}"#,
+            r#"{"type":"guidance","error_type":"retired","suggestion":"none"}"#,
+            DATA,
+            DONE,
+        ] {
+            assert!(registry.on_text(&note("7", item)).is_none());
+        }
+        let got = drain(&mut items);
+        assert!(matches!(got[..], [Ok(StreamItem::Data { .. }), Ok(StreamItem::Done { .. })]), "{got:?}");
+    }
+
+    /// What the spec does not excuse stays an error: an item with no `type`,
+    /// or a known one missing what it must carry.
+    #[test]
+    fn an_item_that_is_not_one_is_still_an_error() {
+        for item in [r#"{"content":{"a":1}}"#, r#"{"type":"data","metadata":{"provenance":[],"plexus_hash":"h","timestamp":1}}"#, "42"] {
+            let registry = Registry::new(Arc::from("kit"));
+            let mut items = subscribed(&registry, 1, "7");
+            assert!(registry.on_text(&note("7", item)).is_none());
+            let got = drain(&mut items);
+            assert!(matches!(got[..], [Err(_)]), "{item}: {got:?}");
+        }
+    }
 
     #[test]
     fn the_subscribe_frame_is_the_one_menger_speaks() {
