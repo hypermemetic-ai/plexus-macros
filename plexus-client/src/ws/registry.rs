@@ -321,6 +321,37 @@ enum ItemKey {
     Other,
 }
 
+/// A data notification exactly as plexus-core writes one, read by its bytes
+/// (PERF.115-36): `{"jsonrpc":"2.0","method":M,"params":{"subscription":S,
+/// "result":{"type":"data","metadata":D,"content_type":T,"content":C}}}`, the
+/// metadata optional. Its subscription id, its content type, and the span
+/// from `C` to the frame's last three bytes, which are its content when the
+/// frame is that and nothing more: the content is not read here at all, and
+/// a decode that finds the span is not one value reads the frame whole.
+/// `None` for any other frame.
+fn plexus_core_data(text: &str) -> Option<(&RawValue, &str, std::ops::Range<usize>)> {
+    let rest = text.strip_prefix(r#"{"jsonrpc":"2.0","method":"#)?;
+    let (_, rest) = value_at(rest)?;
+    let rest = rest.strip_prefix(r#","params":{"subscription":"#)?;
+    let (subscription, rest) = value_at(rest)?;
+    let mut rest = rest.strip_prefix(r#","result":{"type":"data","#)?;
+    if let Some(metadata) = rest.strip_prefix(r#""metadata":"#) {
+        rest = value_at(metadata)?.1.strip_prefix(',')?;
+    }
+    let (content_type, rest) = value_at(rest.strip_prefix(r#""content_type":"#)?)?;
+    let content_type = content_type.get().strip_prefix('"')?.strip_suffix('"')?;
+    let rest = rest.strip_prefix(r#","content":"#)?;
+    let (start, end) = (text.len() - rest.len(), text.len().checked_sub(3)?);
+    (!content_type.contains('\\') && text.ends_with("}}}") && start < end).then_some((subscription, content_type, start..end))
+}
+
+/// The JSON value `text` begins with, as its text, and what follows it.
+fn value_at(text: &str) -> Option<(&RawValue, &str)> {
+    let mut values = serde_json::Deserializer::from_str(text).into_iter::<&RawValue>();
+    let value = values.next()?.ok()?;
+    Some((value, &text[values.byte_offset()..]))
+}
+
 /// The frame length from which a typed call's data item is read on its head.
 /// The head's own reading costs about what a frame of 2 KB of content costs
 /// to scan once more (counted, PERF.115-36): below this a frame is read whole,
@@ -598,12 +629,19 @@ impl Registry {
     /// content stays text until the call reads it, a typed call's straight
     /// into its event. What does not read so is read as a `Value`, as before.
     pub(crate) fn on_text(&self, text: &str) -> Option<String> {
-        // A typed call's large data item: routed on its head, its content
-        // left for the call to read, once.
-        if text.len() > HEAD_FRAMES_FROM && self.typed.load(Ordering::Relaxed) {
-            if let Some(head) = Head::read(text) {
-                if self.on_head(&head, text) {
+        // A typed call's data item: routed on its head, its content left for
+        // the call to read, once. A notification as plexus-core writes it is
+        // read by its bytes; a large one in another hand, on its head.
+        if self.typed.load(Ordering::Relaxed) {
+            if let Some((subscription, content_type, span)) = plexus_core_data(text) {
+                if self.on_data(subscription, Some(content_type), text, Some(span)) {
                     return None;
+                }
+            } else if text.len() > HEAD_FRAMES_FROM {
+                if let Some(Head { subscription: Some(subscription), kind: Some(Kind::Data), content_type, .. }) = Head::read(text) {
+                    if self.on_data(subscription, content_type, text, None) {
+                        return None;
+                    }
                 }
             }
         }
@@ -715,12 +753,10 @@ impl Registry {
     }
 
     /// A data item for a typed call, handed over with its frame unread past
-    /// the head: the call decodes the content from it. `false` for anything
-    /// else, which the full reading takes.
-    fn on_head(&self, head: &Head<'_>, text: &str) -> bool {
-        let (Some(Kind::Data), Some(subscription)) = (head.kind, head.subscription) else {
-            return false;
-        };
+    /// its head (its content at `span`, where that is known): the call
+    /// decodes the content from it. `false` where it is not a typed call's,
+    /// for the full reading.
+    fn on_data(&self, subscription: &RawValue, content_type: Option<&str>, text: &str, span: Option<std::ops::Range<usize>>) -> bool {
         let key = key_of_text(subscription);
         let mut state = self.lock();
         let Some(sub) = state.subs.get_mut(key.as_ref()) else {
@@ -730,10 +766,10 @@ impl Registry {
         if !sub.raw {
             return false;
         }
-        let content_type = shared(&mut sub.content_type, head.content_type);
+        let content_type = shared(&mut sub.content_type, content_type);
         let sink = sub.sink.clone();
         drop(state);
-        let _ = sink.unbounded_send(Ok(Delivered::Raw(RawItem::Data { content_type, content: Content::frame(text) })));
+        let _ = sink.unbounded_send(Ok(Delivered::Raw(RawItem::Data { content_type, content: Content::frame(text, span) })));
         true
     }
 
@@ -1121,7 +1157,9 @@ mod tests {
         ];
         let head = |c: &str| format!(r#"{{"type":"data","metadata":{{"provenance":["kit"],"plexus_hash":"h","timestamp":1}},"content_type":"kit.say","content":{c}}}"#);
         let whole = |c: &str| format!(r#"{{"content":{c},"type":"data","content_type":"kit.say"}}"#);
-        for item in contents.iter().map(|c| head(c)).chain(contents.iter().map(|c| whole(c))) {
+        let after = |c: &str| format!(r#"{{"type":"data","content_type":"kit.say","content":{c},"later":{{"x":[1,"}}}}}}"]}}}}"#);
+        let forms = [&head as &dyn Fn(&str) -> String, &whole, &after];
+        for item in forms.iter().flat_map(|form| contents.iter().map(move |c| form(c))) {
             let registry = Registry::new(Arc::from("kit"));
             let values = subscribed_as(&registry, 1, "7", false);
             let raws = subscribed_as(&registry, 2, "8", true);
@@ -1150,12 +1188,35 @@ mod tests {
         }
         match &drain_raw(&mut items)[..] {
             [Ok(RawItem::Data { content: small, .. }), Ok(RawItem::Data { content: large, content_type })] => {
-                assert!(!small.is_frame() && large.is_frame());
+                assert_eq!((small.in_frame(), large.in_frame()), (Some(true), Some(true)));
                 assert_eq!(large.as_text(), Some(body.as_str()));
                 assert_eq!(content_type.as_deref(), Some("kit.say"));
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// plexus-core's data notification is read by its bytes: its id, its
+    /// content type and its content's span; any other frame is not.
+    #[test]
+    fn plexus_cores_data_notification_is_read_by_its_bytes() {
+        let read = |item: &str| {
+            let text = note("296970649928868", item);
+            plexus_core_data(&text).map(|(id, ct, span)| (id.get().to_owned(), ct.to_owned(), text[span].to_owned()))
+        };
+        let said = r#"{"type":"said","text":"}}}"}"#;
+        let with = |rest: &str| format!(r#"{{"type":"data",{rest}"content":{said}}}"#);
+        let want = Some(("296970649928868".to_owned(), "kit.say".to_owned(), said.to_owned()));
+        assert_eq!(read(&with(r#""metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"content_type":"kit.say","#)), want);
+        assert_eq!(read(&with(r#""content_type":"kit.say","#)), want);
+        assert_eq!(read(&with(r#""content_type":"kit\u002esay","#)), None);
+        assert_eq!(read(&with(r#""metadata":null,"content_type":"kit.say","#)), want);
+        assert_eq!(read(r#"{"type":"done"}"#), None);
+        assert_eq!(read(r#"{"content_type":"kit.say","type":"data","content":1}"#), None);
+        assert_eq!(read(&with(r#""metadata" : {},"content_type":"kit.say","#)), None);
+        assert!(plexus_core_data(r#"{"jsonrpc":"2.0","id":1,"result":7}"#).is_none());
+        assert!(plexus_core_data(r#"{"method":"kit.call","jsonrpc":"2.0","params":{"subscription":7,"result":{"type":"data","content_type":"x","content":1}}}"#).is_none());
+        assert!(plexus_core_data(r#"{"jsonrpc":"2.0","method":"kit.call","params":{"subscription":7,"result":{"type":"data","content_type":"x","content":1}}} "#).is_none());
     }
 
     /// The head's reading takes a data item for a typed call only where it

@@ -159,8 +159,9 @@ enum Repr {
     Value(Value),
     /// The whole notification the item came in, its content at
     /// `params.result.content`, which is read only when it is decoded: once,
-    /// straight into the event.
-    Frame(Box<str>),
+    /// straight into the event. Where the reader found it by the frame's
+    /// bytes, its span, which is decoded alone first.
+    Frame(Box<str>, Option<(usize, usize)>),
 }
 
 /// A notification read for its item's content alone; everything else in it
@@ -182,15 +183,19 @@ struct InItem<C> {
 
 impl Content {
     /// A data item's content inside its whole notification (`text`), read
-    /// when it is decoded.
-    pub(crate) fn frame(text: &str) -> Self {
-        Content(Repr::Frame(text.into()))
+    /// when it is decoded; at `span`, where the reader found it there.
+    pub(crate) fn frame(text: &str, span: Option<std::ops::Range<usize>>) -> Self {
+        Content(Repr::Frame(text.into(), span.map(|s| (s.start, s.end))))
     }
 
-    /// Whether the content is still inside its whole notification.
+    /// Whether the content is still inside its whole notification, and
+    /// whether the reader said where.
     #[cfg(test)]
-    pub(crate) fn is_frame(&self) -> bool {
-        matches!(self.0, Repr::Frame(_))
+    pub(crate) fn in_frame(&self) -> Option<bool> {
+        match self.0 {
+            Repr::Frame(_, span) => Some(span.is_some()),
+            _ => None,
+        }
     }
 
     /// The JSON text the wire carried, when the transport kept it.
@@ -198,7 +203,7 @@ impl Content {
         match &self.0 {
             Repr::Text(text) => Some(text.get()),
             Repr::Value(_) => None,
-            Repr::Frame(frame) => serde_json::from_str::<InFrame<&RawValue>>(frame).ok().map(|f| f.params.result.content.get()),
+            Repr::Frame(frame, _) => serde_json::from_str::<InFrame<&RawValue>>(frame).ok().map(|f| f.params.result.content.get()),
         }
     }
 
@@ -207,7 +212,15 @@ impl Content {
         match self.0 {
             Repr::Text(text) => serde_json::from_str(text.get()),
             Repr::Value(value) => serde_json::from_value(value),
-            Repr::Frame(frame) => serde_json::from_str::<InFrame<E>>(&frame).map(|f| f.params.result.content),
+            Repr::Frame(frame, span) => {
+                // The span is where the content begins and the frame's three
+                // closing braces; it is the content alone, or no one value,
+                // which the frame's own reading answers.
+                if let Some(event) = span.and_then(|(start, end)| serde_json::from_str(&frame[start..end]).ok()) {
+                    return Ok(event);
+                }
+                serde_json::from_str::<InFrame<E>>(&frame).map(|f| f.params.result.content)
+            }
         }
     }
 
@@ -216,7 +229,7 @@ impl Content {
         match self.0 {
             Repr::Text(text) => serde_json::from_str(text.get()),
             Repr::Value(value) => Ok(value),
-            Repr::Frame(_) => self.decode(),
+            Repr::Frame(..) => self.decode(),
         }
     }
 }
