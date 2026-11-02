@@ -23,9 +23,21 @@ pub type ItemStream<'a> =
 #[cfg(target_arch = "wasm32")]
 pub type ItemStream<'a> = Pin<Box<dyn Stream<Item = Result<StreamItem, TransportError>> + 'a>>;
 
-/// BIDIR-6: what a transport sends for a call's input half: each item's JSON,
-/// or why an item would not serialize (which ends the call).
-pub type InputItems<'a> = crate::contract::BoxStream<'a, Result<Value, TransportError>>;
+/// BIDIR-6: what a transport sends for a call's input half: each item, or
+/// why an item would not serialize (which ends the call).
+pub type InputItems<'a> = crate::contract::BoxStream<'a, Result<InputItem, TransportError>>;
+
+/// One item of a call's input half.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum InputItem {
+    /// An item as JSON, in a `{ns}.input` frame.
+    Json(Value),
+    /// BIDIR-17: an `Input<Bytes>` item, which a WebSocket sends as one binary
+    /// frame, `[0x01][subscription: u64 BE][seq: u64 BE][payload]`.
+    #[cfg(feature = "binary")]
+    Binary(bytes::Bytes),
+}
 
 /// `Send` where a client stream is: off wasm32. The bound a generated client
 /// method puts on the stream it takes.
@@ -41,14 +53,32 @@ pub trait MaybeSend {}
 impl<T> MaybeSend for T {}
 
 /// A stream of items as [`InputItems`]: what a generated client method
-/// hands [`Transport::call_with_input`].
+/// hands [`Transport::call_with_input`]. `Bytes` items are
+/// [`InputItem::Binary`] (with a WebSocket backend); anything else is JSON.
 pub fn encode_input<'a, T, S>(input: S) -> InputItems<'a>
 where
-    T: serde::Serialize + 'a,
+    T: serde::Serialize + 'static,
     S: Stream<Item = T> + MaybeSend + 'a,
 {
     use futures_util::StreamExt;
-    Box::pin(input.map(|item| serde_json::to_value(&item).map_err(|e| TransportError::protocol(format!("an input item will not serialize: {e}")))))
+    Box::pin(input.map(|item| {
+        #[cfg(feature = "binary")]
+        {
+            let mut slot = Some(item);
+            let any: &mut dyn core::any::Any = &mut slot;
+            if let Some(bytes) = any.downcast_mut::<Option<bytes::Bytes>>() {
+                return Ok(InputItem::Binary(bytes.take().expect("taken once")));
+            }
+            let item = slot.take().expect("not taken");
+            json_item(&item)
+        }
+        #[cfg(not(feature = "binary"))]
+        json_item(&item)
+    }))
+}
+
+fn json_item<T: serde::Serialize>(item: &T) -> Result<InputItem, TransportError> {
+    serde_json::to_value(item).map(InputItem::Json).map_err(|e| TransportError::protocol(format!("an input item will not serialize: {e}")))
 }
 
 /// A fully qualified Plexus method — the activation namespace and the method

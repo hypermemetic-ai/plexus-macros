@@ -101,7 +101,7 @@ mod backend;
 
 use crate::envelope::StreamItem;
 use crate::error::TransportError;
-use crate::transport::{InputItems, ItemStream, MethodRef, Transport};
+use crate::transport::{InputItem, InputItems, ItemStream, MethodRef, Transport};
 use futures_core::Stream;
 use futures_util::{stream, StreamExt};
 use registry::{end_frame, input_frame, subscribe_frame, Inbound, InputSignal, Items, Registry, SubSlot};
@@ -377,15 +377,33 @@ impl Feed<'_> {
         let mut items = String::new();
         let mut count = 0;
         let mut over = false;
+        let ns = self.registry.hub_namespace();
+        let mut binaries = 0;
         while self.credit > 0 && count < FRAME_ITEMS && items.len() < FRAME_BYTES {
             match Pin::new(&mut *input).poll_next(cx) {
-                Poll::Ready(Some(Ok(item))) => {
+                Poll::Ready(Some(Ok(InputItem::Json(item)))) => {
                     if count > 0 {
                         items.push(',');
                     }
                     items.push_str(&item.to_string());
                     count += 1;
                     self.credit -= 1;
+                }
+                // BIDIR-17: one binary frame an item, in the same sequence
+                // (what JSON is gathered goes first).
+                Poll::Ready(Some(Ok(InputItem::Binary(payload)))) => {
+                    if count > 0 {
+                        let frame = input_frame(ns, &subscription, self.seq, &items);
+                        trace("→", &frame);
+                        self.conn.send(frame)?;
+                        self.seq += 1;
+                        items.clear();
+                        count = 0;
+                    }
+                    self.conn.send_binary(binary_frame(&subscription, self.seq, &payload)?)?;
+                    self.seq += 1;
+                    self.credit -= 1;
+                    binaries += 1;
                 }
                 Poll::Ready(Some(Err(e))) => return Err(e),
                 Poll::Ready(None) => {
@@ -397,7 +415,6 @@ impl Feed<'_> {
         }
         // With no credit the input is not polled: its end is found once there
         // is, as the callee's half-window comes back or the call ends.
-        let ns = self.registry.hub_namespace();
         if count > 0 {
             let frame = input_frame(ns, &subscription, self.seq, &items);
             trace("→", &frame);
@@ -410,8 +427,21 @@ impl Feed<'_> {
             trace("→", &frame);
             self.conn.send(frame)?;
         }
-        Ok(count > 0 || over)
+        Ok(count > 0 || binaries > 0 || over)
     }
+}
+
+/// BIDIR-17: `[0x01][subscription: u64 BE][seq: u64 BE][payload]`.
+fn binary_frame(subscription: &Value, seq: u64, payload: &[u8]) -> Result<Vec<u8>, TransportError> {
+    let Some(subscription) = subscription.as_u64() else {
+        return Err(TransportError::protocol(format!("a binary input frame needs an integer subscription id, not {subscription}")));
+    };
+    let mut frame = Vec::with_capacity(17 + payload.len());
+    frame.push(0x01);
+    frame.extend_from_slice(&subscription.to_be_bytes());
+    frame.extend_from_slice(&seq.to_be_bytes());
+    frame.extend_from_slice(payload);
+    Ok(frame)
 }
 
 /// One call's life: the subscribe is on the wire, then the subscription is

@@ -384,7 +384,7 @@ pub fn generate(
             Some(quote! {
                 #i => {
                     #[allow(unused_mut)]
-                    let mut __input = #deps::schemars::schema_for!(#item);
+                    let mut __input = #crate_path::plexus::input::item_schema::<#item>(#deps::schemars::schema_for!(#item));
                     #describe
                     schema = schema.with_input(__input);
                 }
