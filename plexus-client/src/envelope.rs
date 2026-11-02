@@ -160,7 +160,9 @@ enum Repr {
     /// The whole notification the item came in, its content at
     /// `params.result.content`, which is read only when it is decoded: once,
     /// straight into the event. Where the reader found it by the frame's
-    /// bytes, its span, which is decoded alone first.
+    /// bytes, its span, which is decoded alone first. Only a WebSocket reader
+    /// makes one.
+    #[cfg_attr(not(any(feature = "ws-native", feature = "ws-web")), allow(dead_code))]
     Frame(Box<str>, Option<(usize, usize)>),
 }
 
@@ -184,6 +186,7 @@ struct InItem<C> {
 impl Content {
     /// A data item's content inside its whole notification (`text`), read
     /// when it is decoded; at `span`, where the reader found it there.
+    #[cfg_attr(not(any(feature = "ws-native", feature = "ws-web")), allow(dead_code))]
     pub(crate) fn frame(text: &str, span: Option<std::ops::Range<usize>>) -> Self {
         Content(Repr::Frame(text.into(), span.map(|s| (s.start, s.end))))
     }
