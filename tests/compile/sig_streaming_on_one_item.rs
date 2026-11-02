@@ -1,6 +1,7 @@
 //! RETURNS-36: `#[method(streaming)]` is a deprecated no-op where the
 //! signature agrees, and an error where it does not — here, a one-item form.
 
+#[derive(Clone)]
 pub struct TickerActivation;
 
 #[plexus_macros::activation]

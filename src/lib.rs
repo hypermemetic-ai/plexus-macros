@@ -69,8 +69,8 @@
 //! A Result item travels as data, `{"ok": t}` or `{"err": e}`; a
 //! `Progress::Update(p)` as a progress frame. The namespace is the stem of
 //! `impl FooActivation` (MACRO-13; `namespace = "..."` overrides it).
-//! `#[method(streaming)]`,
-//! `#[method(returns(..))]` and `#[derive(StreamEvent)]` are gone. See the
+//! `#[method(returns(..))]` and `#[derive(StreamEvent)]` are gone, and
+//! `#[method(streaming)]` is a deprecated no-op on a stream form. See the
 //! README's per-macro reference.
 //!
 //! Deprecated surfaces still accepted: `#[hub_methods]`, `#[hub_method]`, the
@@ -126,9 +126,6 @@ impl Parse for HubMethodAttrs {
                 // RETURNS-8: the removed attributes fail here too, not only
                 // inside `#[activation]`.
                 match &meta {
-                    Meta::Path(path) if path.is_ident("streaming") => {
-                        return Err(syn::Error::new_spanned(path, parse::STREAMING_REMOVED));
-                    }
                     Meta::List(list) if list.path.is_ident("returns") => {
                         return Err(syn::Error::new_spanned(&list.path, parse::RETURNS_REMOVED));
                     }
@@ -187,7 +184,8 @@ impl Parse for HubMethodAttrs {
 /// P>>`, `-> impl Stream<Item = Result<Progress<T, P>, E>>`. A plain return
 /// yields one item, `impl Stream` many; `Result` and `Progress` are
 /// recognised by name. Any other return type is a compile error that lists
-/// the six. `streaming` and `returns(..)` are removed (compile errors).
+/// the six. `returns(..)` is removed (a compile error); `streaming` is a
+/// deprecated no-op on a stream form and an error on a one-item one.
 ///
 /// # Authorization arguments (R-1 / AUTHZ-CORE-2)
 ///

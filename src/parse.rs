@@ -76,12 +76,12 @@ pub enum MethodRequestOverride {
     Type(syn::Type),
 }
 
-/// RETURNS-8: `#[method(streaming)]` is gone — a method's cardinality is
-/// read from its return type (RETURNS-1 decision 2).
-pub(crate) const STREAMING_REMOVED: &str =
-    "`streaming` is removed: cardinality comes from the return type — remove `streaming`. \
-     A method returning `-> T` or `-> Result<T, E>` yields one item; one returning \
-     `-> impl Stream<Item = ...>` yields many.";
+/// RETURNS-36 (the owner, review #2): `#[method(streaming)]` is a deprecated
+/// no-op where the signature agrees (a stream form), so a file that builds on
+/// 0.7.0 builds on 0.8 unchanged; on a one-item form it is an error.
+pub(crate) const STREAMING_DEPRECATED: &str =
+    "`streaming` is deprecated: cardinality comes from the return type, which \
+     already says this method yields many items. Remove `streaming`.";
 
 /// RETURNS-8: `#[method(returns(..))]` is gone — it filtered the variants of
 /// a shared event enum, and a method's own return type now says exactly what
@@ -128,6 +128,9 @@ pub struct HubMethodAttrs {
     /// Each literal is validated against the AUTHZ-CORE-4 scope grammar at
     /// macro-expansion time (see [`validate_scope_literal`]).
     pub scopes: Vec<String>,
+    /// RETURNS-36: where `streaming` was written, if it was — a deprecated
+    /// no-op, checked against the signature in [`MethodInfo::from_fn`].
+    pub streaming: Option<proc_macro2::Span>,
     /// AUTH-3: `target = "param"` — the param that locates what this call
     /// acts on. Must name one of the method's RPC params (checked in
     /// [`MethodInfo::from_fn`]).
@@ -294,6 +297,7 @@ impl Parse for HubMethodAttrs {
         let mut http_method = None;
         let mut request_override: Option<MethodRequestOverride> = None;
         let mut public = false;
+        let mut streaming: Option<proc_macro2::Span> = None;
         // R-1 (AUTHZ-CORE-2): explicit `scope = "..."` literals plus the
         // spans needed to anchor the `public` + `scope` contradiction error.
         let mut scopes: Vec<String> = Vec::new();
@@ -326,7 +330,7 @@ impl Parse for HubMethodAttrs {
                             ));
                         } else if path.is_ident("streaming") {
                             // RETURNS-8: cardinality is read from the signature.
-                            return Err(syn::Error::new_spanned(&path, STREAMING_REMOVED));
+                            streaming = Some(path.span());
                         } else if path.is_ident("bidirectional") {
                             bidirectional = BidirType::Standard;
                         } else if path.is_ident("public") {
@@ -535,7 +539,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, bidirectional, http_method, request_override, public, scopes, target, answer_by, group, examples, values })
+        Ok(HubMethodAttrs { name, description, param_docs, bidirectional, http_method, request_override, public, scopes, streaming, target, answer_by, group, examples, values })
     }
 }
 
@@ -1708,6 +1712,9 @@ pub struct MethodInfo {
     /// RETURNS-8: one item (`-> T`, `-> Result<T, E>`) or many (`-> impl
     /// Stream<Item = …>`), read from the return type.
     pub cardinality: Cardinality,
+    /// RETURNS-36: the span of a `streaming` that agrees with the signature,
+    /// for its deprecation warning.
+    pub streaming_deprecated: Option<proc_macro2::Span>,
     /// RETURNS-8: `T` — the item minus its `Result` / `Progress` wrappers.
     pub ok_ty: Type,
     /// RETURNS-8: `E` when the item is a `Result<_, E>`; `None` when the method
@@ -1979,6 +1986,24 @@ impl MethodInfo {
         let ReturnShape { cardinality, ok_ty, err_ty, progress_ty } =
             classify_return(&method.sig)?;
 
+        // RETURNS-36: `streaming` agrees with a stream form (a deprecated
+        // no-op, warned in codegen) and is an error on a one-item form.
+        let streaming_deprecated = hub_method_attrs.and_then(|a| a.streaming);
+        if let (Some(span), Cardinality::One) = (streaming_deprecated, cardinality) {
+            let returns = match &method.sig.output {
+                ReturnType::Type(_, ty) => quote::quote!(#ty).to_string(),
+                ReturnType::Default => "()".to_string(),
+            };
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "`streaming` says this method yields many items, but `-> {returns}` yields one. \
+                     Remove `streaming` (cardinality comes from the return type), or return \
+                     `impl Stream<Item = ...>`."
+                ),
+            ));
+        }
+
         // IR-3: extract deprecation info from the method's attributes (before
         // codegen strips the `#[plexus_macros::removed_in]` companion).
         let deprecation = parse_deprecation_attrs(&method.attrs, method.sig.span())?;
@@ -2074,6 +2099,7 @@ impl MethodInfo {
             description,
             params,
             cardinality,
+            streaming_deprecated,
             ok_ty,
             err_ty,
             progress_ty,
@@ -2734,6 +2760,7 @@ mod tests {
             request_override: None,
             public: false,
             scopes: vec![],
+            streaming: None,
             target: None,
             answer_by: None,
             group: None,

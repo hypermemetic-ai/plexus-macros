@@ -648,6 +648,32 @@ pub(crate) fn client_flag_warning(span: Span, struct_name: &syn::Ident) -> Token
     }
 }
 
+/// RETURNS-36: `#[method(streaming)]` on a stream form — a deprecated no-op,
+/// said as a deprecation warning at the attribute.
+pub(crate) fn streaming_warnings(methods: &[MethodInfo], struct_name: &syn::Ident) -> TokenStream {
+    methods
+        .iter()
+        .filter_map(|m| {
+            let span = m.streaming_deprecated?;
+            let const_name = format_ident!("_PLEXUS_MACROS_DEPRECATED_STREAMING_{}_{}", struct_name, m.fn_name, span = span);
+            let touch = format_ident!("_plexus_macros_touch_streaming_{}_{}", struct_name, m.fn_name, span = span);
+            let note = crate::parse::STREAMING_DEPRECATED;
+            Some(quote::quote_spanned! { span =>
+                #[doc(hidden)]
+                #[allow(non_upper_case_globals, non_snake_case, dead_code)]
+                #[deprecated(since = "0.8.0", note = #note)]
+                const #const_name: () = ();
+
+                #[doc(hidden)]
+                #[allow(non_snake_case, dead_code)]
+                fn #touch() {
+                    let _ = #const_name;
+                }
+            })
+        })
+        .collect()
+}
+
 /// The cfg predicate the server half is gated on, parsed.
 pub(crate) fn parse_gate(predicate: &str, span: Span) -> syn::Result<syn::Meta> {
     syn::parse_str(predicate).map_err(|e| {

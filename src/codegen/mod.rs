@@ -912,11 +912,14 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         Some(meta) => cfg_gate(server_half, meta, Span::call_site())?,
     };
 
+    let streaming_warnings = contract::streaming_warnings(&methods, &struct_name);
+
     Ok(quote! {
         #server_half
         #trait_items
         #client_impl
         #client_flag_warning
+        #streaming_warnings
     })
 }
 

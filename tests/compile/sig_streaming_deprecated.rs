@@ -3,13 +3,14 @@
 //! error here by `deny(deprecated)` so the test can see it.
 #![deny(deprecated)]
 
+#[derive(Clone)]
 pub struct TickerActivation;
 
 #[plexus_macros::activation]
 impl TickerActivation {
     /// Ticks.
     #[plexus_macros::method(streaming)]
-    async fn tick(&self) -> impl futures::Stream<Item = u64> + Send + 'static {
+    async fn tick(&self) -> impl futures::Stream<Item = String> + Send + 'static {
         futures::stream::empty()
     }
 }
