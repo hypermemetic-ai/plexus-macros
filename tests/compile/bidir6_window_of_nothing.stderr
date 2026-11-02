@@ -1,0 +1,19 @@
+error: input_window on `tokens`: a window of 0 lets nothing in
+  --> tests/compile/bidir6_window_of_nothing.rs:10:44
+   |
+10 |     #[plexus_macros::method(input_window = 0)]
+   |                                            ^
+
+warning: unused import: `futures::stream::Stream`
+ --> tests/compile/bidir6_window_of_nothing.rs:2:5
+  |
+2 | use futures::stream::Stream;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `plexus_core::plexus::Input`
+ --> tests/compile/bidir6_window_of_nothing.rs:3:5
+  |
+3 | use plexus_core::plexus::Input;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^

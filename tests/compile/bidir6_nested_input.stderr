@@ -1,0 +1,19 @@
+error: `tokens`: `Input` is a parameter of the method itself, by value: it cannot be nested in another type
+  --> tests/compile/bidir6_nested_input.rs:11:36
+   |
+11 |     async fn tokens(&self, tokens: Option<Input<u32>>) -> impl Stream<Item = String> + Send + 'static {
+   |                                    ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `futures::stream::Stream`
+ --> tests/compile/bidir6_nested_input.rs:2:5
+  |
+2 | use futures::stream::Stream;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `plexus_core::plexus::Input`
+ --> tests/compile/bidir6_nested_input.rs:3:5
+  |
+3 | use plexus_core::plexus::Input;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^

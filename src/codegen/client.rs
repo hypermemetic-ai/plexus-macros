@@ -46,6 +46,10 @@
 //! wasm32 one. `T: Transport` costs one type parameter and keeps the emitted
 //! code free of all of them.
 //!
+//! **`Input<T>` is a stream here.** `fn tokens(&self, run: RunId, tokens: impl
+//! Stream<Item = Token>)`: the params object is the other parameters, and the
+//! stream is drained under credit as the returned stream is read (BIDIR-6).
+//!
 //! **`Option` parameters are omitted, not nulled.** menger's `Ticket`
 //! serializes `severity`/`parent` with `skip_serializing_if`, and its REST
 //! tests assert absence rather than null. A client that sent `"parent":
@@ -218,7 +222,7 @@ pub(crate) fn generate(
         // `#[activation_param]`, `#[from_auth]` and `auth:`/`ctx:` are
         // already absent from `MethodInfo::params` by construction, which is
         // exactly the set a caller must not be asked for.
-        let sig_params: Vec<TokenStream> = m
+        let mut sig_params: Vec<TokenStream> = m
             .params
             .iter()
             .map(|p| {
@@ -227,7 +231,40 @@ pub(crate) fn generate(
                 quote! { #name: #ty }
             })
             .collect();
-        let arg_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
+        let mut arg_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
+        // BIDIR-6: the input half is a parameter of the client too, as any
+        // stream of the method's items; it is drained under credit as the
+        // returned stream is read.
+        let lifetime = m.input.as_ref().map(|_| quote! { <'__plexus_a> });
+        let this = if m.input.is_some() { quote! { &'__plexus_a self } } else { quote! { &self } };
+        let events = if m.input.is_some() { quote! { '__plexus_a } } else { quote! { '_ } };
+        if let Some(i) = &m.input {
+            let (name, item) = (&i.name, &i.item);
+            sig_params.insert(i.at, quote! {
+                #name: impl #client_path::__rt::Stream<Item = #item> + #client_path::MaybeSend + '__plexus_a
+            });
+            arg_names.insert(i.at, name);
+        }
+        let call = match &m.input {
+            None => quote! {
+                #client_path::Transport::call(
+                    &self.transport,
+                    Self::#const_ident.at(self.path),
+                    #client_path::__rt::serde_json::Value::Object(__params),
+                )
+            },
+            Some(i) => {
+                let name = &i.name;
+                quote! {
+                    #client_path::Transport::call_with_input(
+                        &self.transport,
+                        Self::#const_ident.at(self.path),
+                        #client_path::__rt::serde_json::Value::Object(__params),
+                        #client_path::encode_input(#name),
+                    )
+                }
+            }
+        };
         let inserts: Vec<TokenStream> = m
             .params
             .iter()
@@ -256,23 +293,17 @@ pub(crate) fn generate(
             // crate that merely opted into a client.
             #[allow(clippy::too_many_arguments)]
             #[doc = #doc]
-            pub fn #fn_ident(&self #(, #sig_params)*)
-                -> #client_path::EventStream<'_, #event_ty>
+            pub fn #fn_ident #lifetime (#this #(, #sig_params)*)
+                -> #client_path::EventStream<#events, #event_ty>
             {
                 let mut __params = #client_path::__rt::serde_json::Map::new();
                 #(#inserts)*
-                #client_path::decode::<#event_ty>(
-                    #client_path::Transport::call(
-                        &self.transport,
-                        Self::#const_ident.at(self.path),
-                        #client_path::__rt::serde_json::Value::Object(__params),
-                    )
-                )
+                #client_path::decode::<#event_ty>(#call)
             }
 
             #[allow(clippy::too_many_arguments)]
             #[doc = #doc_all]
-            pub async fn #all_ident(&self #(, #sig_params)*)
+            pub async fn #all_ident #lifetime (#this #(, #sig_params)*)
                 -> ::core::result::Result<
                     ::std::vec::Vec<#event_ty>,
                     #client_path::ClientError,

@@ -369,6 +369,34 @@ pub fn generate(
         .map(|m| matches!(m.request_override, Some(MethodRequestOverride::Skip)))
         .collect();
 
+    // BIDIR-6: `.with_input(T's schema)` for each method with an `Input`,
+    // its parameter's doc as the schema's description.
+    let input_arms: Vec<TokenStream> = methods
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            let input = m.input.as_ref()?;
+            let item = &input.item;
+            let i = syn::Index::from(i);
+            let describe = input.description.as_ref().map(|d| {
+                quote! { __input.insert("description".to_string(), #deps::serde_json::Value::String(#d.to_string())); }
+            });
+            Some(quote! {
+                #i => {
+                    #[allow(unused_mut)]
+                    let mut __input = #deps::schemars::schema_for!(#item);
+                    #describe
+                    schema = schema.with_input(__input);
+                }
+            })
+        })
+        .collect();
+    let input_schema = if input_arms.is_empty() {
+        quote! {}
+    } else {
+        quote! { match i { #(#input_arms)* _ => {} } }
+    };
+
     // REQ-6: activation-level request schema token — `Some(schemars::schema_for!(T))` or `None`.
     let activation_request_schema_expr: TokenStream = match activation_request_type {
         Some(ty) => quote! { Some(#deps::schemars::schema_for!(#ty)) },
@@ -701,6 +729,8 @@ pub fn generate(
                         if let ::std::option::Option::Some(a) = answer_bys[i] {
                             schema = schema.with_answer_by(a);
                         }
+                        // BIDIR-6: what the caller streams in.
+                        #input_schema
                         if let ::std::option::Option::Some(l) = long_descriptions[i] {
                             schema = schema.with_long_description(l);
                         }
@@ -927,6 +957,14 @@ fn compute_method_hash(method: &MethodInfo) -> String {
     if let Some(t) = &method.target {
         "target".hash(&mut hasher);
         t.hash(&mut hasher);
+    }
+    // BIDIR-6: an input half is part of the contract; hashed only when
+    // present, so every method without one keeps its hash.
+    if let Some(input) = &method.input {
+        let item = &input.item;
+        "input".hash(&mut hasher);
+        quote!(#item).to_string().hash(&mut hasher);
+        input.name.to_string().hash(&mut hasher);
     }
     // SYNAPSE-13: group, examples and values change what a client shows, so
     // they change the hash (a cached schema is refetched); each hashed only

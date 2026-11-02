@@ -161,6 +161,12 @@ impl Parse for HubMethodAttrs {
 ///   (conjunction — AND, not OR). Literals are validated at compile time
 ///   against the AUTHZ-CORE-4 scope grammar (dot-separated `[a-z][a-z0-9_]*`
 ///   segments, optional trailing `.*` segment wildcard, or bare `*`).
+/// - `input_window = N` (BIDIR-6) — on a method with an `Input<T>` parameter,
+///   the credit it grants (default 64). `input_max_buffered = N`: the bytes
+///   it holds at once (default 64 MiB). `input_max_items = N`,
+///   `input_max_bytes = N`: limits over the call's life, none unless given.
+///   An `Input<T>` is at most one, top-level, and not one of the params:
+///   `MethodSchema.input` is `T`'s schema, and the client takes a stream.
 /// - `public` — the method is exempt from the default-deny gate; emitted as
 ///   `MethodSchema.public = true`. Mixing `public` with `scope = "..."` is a
 ///   compile error (a public method has no required scope to enforce).

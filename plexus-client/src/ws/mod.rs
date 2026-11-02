@@ -46,6 +46,16 @@
 //!   server puts on the wire immediately behind the acknowledgement cannot
 //!   be lost.
 //!
+//! # A call with an input half (BIDIR-6)
+//!
+//! [`Transport::call_with_input`] is a subscribe like any other. The stream
+//! it returns also feeds the input: as it is polled it spends the callee's
+//! `credit`, sending what is ready as one `<hub>.input {subscription, seq,
+//! items}` and `<hub>.end` when the input ends. `credit`, `ack` and
+//! `input_closed` are spent here and never yielded. A caller that stops
+//! reading stops feeding; no task runs behind its back, so both backends
+//! share this.
+//!
 //! # One type, two backends
 //!
 //! `plexus-client`'s default feature set is the four-dependency wasm-clean
@@ -91,11 +101,14 @@ mod backend;
 
 use crate::envelope::StreamItem;
 use crate::error::TransportError;
-use crate::transport::{ItemStream, MethodRef, Transport};
+use crate::transport::{InputItems, ItemStream, MethodRef, Transport};
+use futures_core::Stream;
 use futures_util::{stream, StreamExt};
-use registry::{subscribe_frame, Items, Registry, SubSlot};
+use registry::{end_frame, input_frame, subscribe_frame, Inbound, InputSignal, Items, Registry, SubSlot};
 use serde_json::Value;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 /// Frame tracing, for when a wire question has to be answered with bytes.
 ///
@@ -270,6 +283,135 @@ impl Transport for WsTransport {
             }
         }))
     }
+
+    fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
+        let start = match self.subscribe(method, params) {
+            Ok(awaiting) => awaiting,
+            Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+        };
+        let feed = Feed { input: Some(input), credit: 0, seq: 0, conn: self.conn.clone(), registry: self.registry.clone(), failed: false };
+        Box::pin(stream::unfold(Feeding::Awaiting(start, feed), |state| async move {
+            let (mut active, mut feed) = match state {
+                Feeding::Awaiting(awaiting, feed) => match awaiting.established().await {
+                    Err(e) => return Some((Err(e), Feeding::Ended)),
+                    Ok(active) => (active, feed),
+                },
+                Feeding::Active(active, feed) => (active, feed),
+                Feeding::Ended => return None,
+            };
+            let item = std::future::poll_fn(|cx| feed.poll_next(&mut active, cx)).await?;
+            let failed = feed.failed;
+            Some((item, if failed { Feeding::Ended } else { Feeding::Active(active, feed) }))
+        }))
+    }
+}
+
+/// [`CallState`], for a call with an input half.
+enum Feeding<'a> {
+    Awaiting(Awaiting, Feed<'a>),
+    Active(Active, Feed<'a>),
+    Ended,
+}
+
+/// The most items one `<hub>.input` carries, and about the most bytes: a
+/// frame is what was ready, and stays well under a server's message cap.
+const FRAME_ITEMS: usize = 256;
+const FRAME_BYTES: usize = 1024 * 1024;
+
+/// The input half of a call, fed as its stream is polled.
+struct Feed<'a> {
+    /// `None`: ended, or the callee closed the half.
+    input: Option<InputItems<'a>>,
+    /// Items the callee has granted and this side has not sent.
+    credit: u64,
+    /// Frames sent.
+    seq: u64,
+    conn: backend::Conn,
+    registry: Arc<Registry>,
+    failed: bool,
+}
+
+impl Feed<'_> {
+    /// The call's next item: the socket first, and between its items
+    /// whatever the input has ready and credit allows.
+    fn poll_next(&mut self, active: &mut Active, cx: &mut Context<'_>) -> Poll<Option<Result<StreamItem, TransportError>>> {
+        loop {
+            let read = match active.items.poll_next_unpin(cx) {
+                Poll::Ready(Some(Inbound::Input(InputSignal::Credit(n)))) => {
+                    self.credit = self.credit.saturating_add(n);
+                    true
+                }
+                Poll::Ready(Some(Inbound::Input(InputSignal::Ack))) => true,
+                Poll::Ready(Some(Inbound::Input(InputSignal::Closed))) => {
+                    self.input = None;
+                    true
+                }
+                Poll::Ready(Some(Inbound::Item(item))) => {
+                    if let Ok(item) = &item {
+                        if item.is_terminal() {
+                            self.input = None;
+                            active.guard.slot.mark_finished();
+                        }
+                    }
+                    return Poll::Ready(Some(item));
+                }
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => false,
+            };
+            match self.feed(active, cx) {
+                Err(e) => {
+                    self.failed = true;
+                    return Poll::Ready(Some(Err(e)));
+                }
+                Ok(fed) if read || fed => continue,
+                Ok(_) => return Poll::Pending,
+            }
+        }
+    }
+
+    /// One frame of what is ready, within the credit; `end` when the input
+    /// has ended. `Ok(true)`: something went out, so look again.
+    fn feed(&mut self, active: &Active, cx: &mut Context<'_>) -> Result<bool, TransportError> {
+        let Some(subscription) = active.guard.slot.subscription() else { return Ok(false) };
+        let Some(input) = &mut self.input else { return Ok(false) };
+        let mut items = String::new();
+        let mut count = 0;
+        let mut over = false;
+        while self.credit > 0 && count < FRAME_ITEMS && items.len() < FRAME_BYTES {
+            match Pin::new(&mut *input).poll_next(cx) {
+                Poll::Ready(Some(Ok(item))) => {
+                    if count > 0 {
+                        items.push(',');
+                    }
+                    items.push_str(&item.to_string());
+                    count += 1;
+                    self.credit -= 1;
+                }
+                Poll::Ready(Some(Err(e))) => return Err(e),
+                Poll::Ready(None) => {
+                    over = true;
+                    break;
+                }
+                Poll::Pending => break,
+            }
+        }
+        // With no credit the input is not polled: its end is found once there
+        // is, as the callee's half-window comes back or the call ends.
+        let ns = self.registry.hub_namespace();
+        if count > 0 {
+            let frame = input_frame(ns, &subscription, self.seq, &items);
+            trace("→", &frame);
+            self.conn.send(frame)?;
+            self.seq += 1;
+        }
+        if over {
+            self.input = None;
+            let frame = end_frame(ns, &subscription, self.seq);
+            trace("→", &frame);
+            self.conn.send(frame)?;
+        }
+        Ok(count > 0 || over)
+    }
 }
 
 /// One call's life: the subscribe is on the wire, then the subscription is
@@ -311,21 +453,25 @@ struct Active {
 
 impl Active {
     async fn next_item(&mut self) -> Option<Result<StreamItem, TransportError>> {
-        match self.items.next().await {
-            // `done` / `error` end the subscription server-side, so there is
-            // nothing left to unsubscribe from.
-            Some(Ok(item)) => {
-                if item.is_terminal() {
-                    self.guard.slot.mark_finished();
+        loop {
+            match self.items.next().await {
+                // `done` / `error` end the subscription server-side, so there
+                // is nothing left to unsubscribe from.
+                Some(Inbound::Item(Ok(item))) => {
+                    if item.is_terminal() {
+                        self.guard.slot.mark_finished();
+                    }
+                    return Some(Ok(item));
                 }
-                Some(Ok(item))
+                // A transport failure does NOT mark the slot finished: if the
+                // socket survived (a malformed item, say) the subscription is
+                // still live and the guard must still cancel it. On a dead
+                // socket the unsubscribe write simply fails and is ignored.
+                Some(Inbound::Item(Err(e))) => return Some(Err(e)),
+                // A plain call of a method with an input half: nothing to feed.
+                Some(Inbound::Input(_)) => continue,
+                None => return None,
             }
-            // A transport failure does NOT mark the slot finished: if the
-            // socket survived (a malformed item, say) the subscription is
-            // still live and the guard must still cancel it. On a dead
-            // socket the unsubscribe write simply fails and is ignored.
-            Some(Err(e)) => Some(Err(e)),
-            None => None,
         }
     }
 }

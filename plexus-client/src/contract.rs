@@ -153,6 +153,45 @@ where
     Box::pin(Owned { driver: Some(driver), slot })
 }
 
+/// BIDIR-6: [`owned_call`], for a method with an input half.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn owned_call_with_input<T>(transport: T, method: MethodRef, params: Value, input: crate::transport::InputItems<'static>) -> ItemStream<'static>
+where
+    T: Transport + Send + Sync + 'static,
+{
+    let slot: Slot = Arc::new(Mutex::new(None));
+    let tx = slot.clone();
+    let driver: Driver = Box::pin(async move {
+        let transport = transport;
+        let mut items = transport.call_with_input(method, params, input);
+        while let Some(item) = items.next().await {
+            *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
+            HandOff(false).await;
+        }
+    });
+    Box::pin(Owned { driver: Some(driver), slot })
+}
+
+/// BIDIR-6: [`owned_call`], for a method with an input half. See the
+/// non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub fn owned_call_with_input<T>(transport: T, method: MethodRef, params: Value, input: crate::transport::InputItems<'static>) -> ItemStream<'static>
+where
+    T: Transport + 'static,
+{
+    let slot: Slot = Arc::new(Mutex::new(None));
+    let tx = slot.clone();
+    let driver: Driver = Box::pin(async move {
+        let transport = transport;
+        let mut items = transport.call_with_input(method, params, input);
+        while let Some(item) = items.next().await {
+            *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
+            HandOff(false).await;
+        }
+    });
+    Box::pin(Owned { driver: Some(driver), slot })
+}
+
 /// Pending once, so the stream can hand out the item just put in the slot;
 /// ready the next time it is polled. It does not wake: the stream returns
 /// the item, and the caller polls again when it wants the next one.

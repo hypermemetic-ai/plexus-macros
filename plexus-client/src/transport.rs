@@ -23,6 +23,34 @@ pub type ItemStream<'a> =
 #[cfg(target_arch = "wasm32")]
 pub type ItemStream<'a> = Pin<Box<dyn Stream<Item = Result<StreamItem, TransportError>> + 'a>>;
 
+/// BIDIR-6: what a transport sends for a call's input half: each item's JSON,
+/// or why an item would not serialize (which ends the call).
+pub type InputItems<'a> = crate::contract::BoxStream<'a, Result<Value, TransportError>>;
+
+/// `Send` where a client stream is: off wasm32. The bound a generated client
+/// method puts on the stream it takes.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> MaybeSend for T {}
+
+/// `Send` where a client stream is. See the non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSend for T {}
+
+/// A stream of items as [`InputItems`]: what a generated client method
+/// hands [`Transport::call_with_input`].
+pub fn encode_input<'a, T, S>(input: S) -> InputItems<'a>
+where
+    T: serde::Serialize + 'a,
+    S: Stream<Item = T> + MaybeSend + 'a,
+{
+    use futures_util::StreamExt;
+    Box::pin(input.map(|item| serde_json::to_value(&item).map_err(|e| TransportError::protocol(format!("an input item will not serialize: {e}")))))
+}
+
 /// A fully qualified Plexus method — the activation namespace and the method
 /// name, kept as separate fields because the transports need them
 /// differently:
@@ -136,6 +164,16 @@ pub fn join_path(parent: &'static str, segment: &'static str) -> &'static str {
 /// has already built the by-name object the schema expects.
 pub trait Transport {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_>;
+
+    /// BIDIR-6: [`call`](Self::call), for a method with an input half:
+    /// `input` is sent as the call runs, under the callee's credit, and ended
+    /// when it ends. A transport that carries no input half (the default)
+    /// says so in the one item it yields: the call does not hang.
+    fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
+        let _ = (params, input);
+        let refused = TransportError::protocol(format!("`{method}` takes an input stream, and this transport carries none"));
+        Box::pin(futures_util::stream::once(async move { Err(refused) }))
+    }
 }
 
 /// So a client can be handed `&T`, `Arc<T>`, `Box<T>`, … interchangeably.
@@ -143,11 +181,17 @@ impl<T: Transport + ?Sized> Transport for &T {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
     }
+    fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
+        (**self).call_with_input(method, params, input)
+    }
 }
 
 impl<T: Transport + ?Sized> Transport for Box<T> {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
+    }
+    fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
+        (**self).call_with_input(method, params, input)
     }
 }
 
@@ -155,10 +199,16 @@ impl<T: Transport + ?Sized> Transport for std::rc::Rc<T> {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
     }
+    fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
+        (**self).call_with_input(method, params, input)
+    }
 }
 
 impl<T: Transport + ?Sized> Transport for std::sync::Arc<T> {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
+    }
+    fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
+        (**self).call_with_input(method, params, input)
     }
 }

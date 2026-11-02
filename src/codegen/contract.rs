@@ -324,8 +324,11 @@ pub(crate) fn check_trait_methods(methods: &[MethodInfo], trait_ident: &syn::Ide
     Ok(self_callable)
 }
 
-fn sig_params(m: &MethodInfo) -> (Vec<TokenStream>, Vec<&syn::Ident>) {
-    let params = m
+/// A trait method's parameters and their names. BIDIR-6: an `Input<T>` is a
+/// boxed stream of `T` in the trait, which its implementors all take: the
+/// activation as its `Input`, the client as what it sends.
+fn sig_params<'a>(m: &'a MethodInfo, box_stream: &TokenStream) -> (Vec<TokenStream>, Vec<&'a syn::Ident>) {
+    let mut params: Vec<TokenStream> = m
         .params
         .iter()
         .map(|p| {
@@ -333,8 +336,23 @@ fn sig_params(m: &MethodInfo) -> (Vec<TokenStream>, Vec<&syn::Ident>) {
             quote! { #name: #ty }
         })
         .collect();
-    let names = m.params.iter().map(|p| &p.name).collect();
+    let mut names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
+    if let Some(i) = &m.input {
+        let (name, item) = (&i.name, &i.item);
+        params.insert(i.at, quote! { #name: #box_stream<'static, #item> });
+        names.insert(i.at, name);
+    }
     (params, names)
+}
+
+/// The names as the inherent method and the trait method pass them to one
+/// another: an `Input` through `convert`.
+fn passed<'a>(m: &'a MethodInfo, convert: impl Fn(&syn::Ident) -> TokenStream) -> Vec<TokenStream> {
+    let mut names: Vec<TokenStream> = m.params.iter().map(|p| { let n = &p.name; quote! { #n } }).collect();
+    if let Some(i) = &m.input {
+        names.insert(i.at, convert(&i.name));
+    }
+    names
 }
 
 fn event_ty(m: &MethodInfo) -> &Type {
@@ -354,7 +372,7 @@ pub(crate) fn trait_def(
 ) -> TokenStream {
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
-        let (params, _) = sig_params(m);
+        let (params, _) = sig_params(m, box_stream);
         let ev = event_ty(m);
         let doc = &m.description;
         let doc = if doc.is_empty() { quote! {} } else { quote! { #[doc = #doc] } };
@@ -422,7 +440,8 @@ pub(crate) fn activation_trait_impl(
 ) -> TokenStream {
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
-        let (params, names) = sig_params(m);
+        let (params, _) = sig_params(m, box_stream);
+        let names = passed(m, |n| quote! { ::core::convert::Into::into(#n) });
         let ev = event_ty(m);
         quote! {
             #[allow(clippy::too_many_arguments)]
@@ -495,7 +514,7 @@ pub(crate) fn rewrite_contract_impl(
         if let ImplItem::Fn(f) = item {
             if let Some(m) = methods.iter().find(|m| m.fn_name == f.sig.ident) {
                 let fn_ident = &m.fn_name;
-                let (_, names) = sig_params(m);
+                let names = passed(m, |n| quote! { #n.into_boxed() });
                 f.block = syn::parse_quote!({
                     <#d as #trait_ident>::#fn_ident(&*self.0 #(, #names)*)
                 });
@@ -522,7 +541,7 @@ pub(crate) fn contract_items(
     );
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
-        let (params, names) = sig_params(m);
+        let (params, names) = sig_params(m, box_stream);
         let ev = event_ty(m);
         quote! {
             #[allow(clippy::too_many_arguments)]
@@ -573,7 +592,7 @@ pub(crate) fn client_trait_impl(
 ) -> TokenStream {
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
-        let (params, _) = sig_params(m);
+        let (params, _) = sig_params(m, &quote! { #client::BoxStream });
         let ev = event_ty(m);
         let const_ident = crate::codegen::client::method_const_ident(m);
         let inserts = m.params.iter().map(|p| {
@@ -581,16 +600,32 @@ pub(crate) fn client_trait_impl(
                 quote! { return #client::error_events::<#ev>(#err); }
             })
         });
+        let call = match &m.input {
+            None => quote! {
+                #client::owned_call(
+                    ::core::clone::Clone::clone(&self.transport),
+                    Self::#const_ident.at(self.path),
+                    #client::__rt::serde_json::Value::Object(__params),
+                )
+            },
+            Some(i) => {
+                let name = &i.name;
+                quote! {
+                    #client::owned_call_with_input(
+                        ::core::clone::Clone::clone(&self.transport),
+                        Self::#const_ident.at(self.path),
+                        #client::__rt::serde_json::Value::Object(__params),
+                        #client::encode_input(#name),
+                    )
+                }
+            }
+        };
         quote! {
             #[allow(clippy::too_many_arguments)]
             fn #fn_ident(&self #(, #params)*) -> #client::BoxStream<'static, #ev> {
                 let mut __params = #client::__rt::serde_json::Map::new();
                 #(#inserts)*
-                #client::into_events::<#ev>(#client::decode::<#ev>(#client::owned_call(
-                    ::core::clone::Clone::clone(&self.transport),
-                    Self::#const_ident.at(self.path),
-                    #client::__rt::serde_json::Value::Object(__params),
-                )))
+                #client::into_events::<#ev>(#client::decode::<#ev>(#call))
             }
         }
     });

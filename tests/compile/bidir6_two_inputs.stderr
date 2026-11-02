@@ -1,0 +1,19 @@
+error: `tokens` declares a second `Input` (the first is `a`): a method takes at most one
+  --> tests/compile/bidir6_two_inputs.rs:11:43
+   |
+11 |     async fn tokens(&self, a: Input<u32>, b: Input<u32>) -> impl Stream<Item = String> + Send + 'static {
+   |                                           ^^^^^^^^^^^^^
+
+warning: unused import: `futures::stream::Stream`
+ --> tests/compile/bidir6_two_inputs.rs:2:5
+  |
+2 | use futures::stream::Stream;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `plexus_core::plexus::Input`
+ --> tests/compile/bidir6_two_inputs.rs:3:5
+  |
+3 | use plexus_core::plexus::Input;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
