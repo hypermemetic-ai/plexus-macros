@@ -163,7 +163,7 @@ impl Parse for HubMethodAttrs {
 ///   segments, optional trailing `.*` segment wildcard, or bare `*`).
 /// - `input_window = N` (BIDIR-6) — on a method with an `Input<T>` parameter,
 ///   the credit it grants (default 64). `input_max_buffered = N`: the bytes
-///   it holds at once (default 64 MiB). `input_max_items = N`,
+///   held past which it grants no credit until drained (default 64 MiB). `input_max_items = N`,
 ///   `input_max_bytes = N`: limits over the call's life, none unless given.
 ///   An `Input<T>` is at most one, top-level, and not one of the params:
 ///   `MethodSchema.input` is `T`'s schema, and the client takes a stream.

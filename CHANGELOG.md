@@ -14,7 +14,8 @@ BIDIR-6: `Input<T>`.
   the signature shows, is a compile error naming the method; one in a param's
   struct does not compile, since `Input` takes no serde.
 - `#[method(input_window = N)]` (the credit, default 64),
-  `input_max_buffered = N` (bytes held, default 64 MiB), and the opt-in
+  `input_max_buffered = N` (bytes held past which credit is held back,
+  default 64 MiB; never a refusal), and the opt-in
   `input_max_items = N`, `input_max_bytes = N`.
 - The emitted client takes the input as `impl Stream<Item = T>` in the
   parameter's place; the emitted trait takes it as a boxed stream.
