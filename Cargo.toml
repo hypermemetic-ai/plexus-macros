@@ -20,6 +20,9 @@ members = [
     # RETURNS-8 serves it in-process against its `expected/` JSON
     # (`fixtures/conformance/tests/serve.rs`).
     "fixtures/conformance",
+    # RETURNS-40's: a service of several activations, served whole — the IR
+    # plexus-core writes for it held equal to synapse's.
+    "fixtures/ir-service",
 ]
 
 [package]

@@ -1,0 +1,1 @@
+IR: two different types are titled "Thing" in namespace "clash": method one (returns) and method two (returns). One title in one namespace is one type; rename one of them.
