@@ -322,3 +322,25 @@ fn is_a_std_error() {
     let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(RemoteError::Unauthenticated);
     assert_eq!(boxed.to_string(), "unauthenticated: credentials required");
 }
+
+/// RETURNS-36 (review #4): a kind this build does not know is kept, typed,
+/// with every field — menger's `too_many_connections`, and `too_many_writes`
+/// with `retry_after_ms` — and written back exactly as it came.
+#[test]
+fn an_unknown_kind_round_trips_with_its_fields() {
+    for wire in [
+        json!({"kind": "too_many_connections", "max": 64}),
+        json!({"kind": "too_many_writes", "retry_after_ms": 250, "message": "slow down"}),
+    ] {
+        let err: RemoteError = serde_json::from_value(wire.clone()).expect("an unknown kind reads");
+        assert_eq!(err.kind(), wire["kind"].as_str().unwrap());
+        assert_eq!(serde_json::to_value(&err).unwrap(), wire);
+    }
+}
+
+/// A known kind still reads as itself, not as the open variant.
+#[test]
+fn a_known_kind_is_not_the_open_one() {
+    let err: RemoteError = serde_json::from_value(json!({"kind": "unauthenticated"})).unwrap();
+    assert_eq!(err, RemoteError::Unauthenticated);
+}
