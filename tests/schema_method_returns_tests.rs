@@ -51,7 +51,10 @@ fn the_schema_method_declares_its_param_and_return() {
     let mut result = schema_for!(SchemaResult);
     spell_json_values(&mut result); // its JSON-Schema-valued fields are the JSON type
     assert_eq!(s.returns, result);
-    assert_eq!(s.hash, "auto_schema");
+    // RETURNS-10: its hash is its content hash, by which it is known
+    // (RETURNS-36: `is_auto_schema`, where main read the fixed "auto_schema").
+    assert_eq!(s.hash, s.content_hash());
+    assert!(s.is_auto_schema());
     assert_eq!(s.grant.as_deref(), Some("store.schema"));
     assert!(s.input.is_none());
 }
