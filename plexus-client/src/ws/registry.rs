@@ -437,6 +437,35 @@ mod tests {
         assert!(matches!(got[..], [Ok(StreamItem::Data { .. }), Ok(StreamItem::Done { .. })]), "{got:?}");
     }
 
+    /// spec/02 rule 4: a client SHOULD keep a notification for an id it has
+    /// not yet seen the response for. The spec says plexus-client does;
+    /// PERF.115-41 found it dropped it.
+    #[test]
+    fn an_item_before_its_subscription_id_is_kept_until_the_id_arrives() {
+        let registry = Registry::new(Arc::from("kit"));
+        let reply = registry.register_pending(1, SubSlot::new()).unwrap();
+        assert!(registry.on_text(&note("7", DATA)).is_none());
+        assert!(registry.on_text(r#"{"jsonrpc":"2.0","id":1,"result":7}"#).is_none());
+        assert!(registry.on_text(&note("7", DONE)).is_none());
+        let mut items = reply.now_or_never().unwrap().unwrap().unwrap();
+        let got = drain(&mut items);
+        assert!(matches!(got[..], [Ok(StreamItem::Data { .. }), Ok(StreamItem::Done { .. })]), "{got:?}");
+    }
+
+    /// Kept only while a call waits for its id: an item for an id no call is
+    /// waiting on belongs to a call that is over, and a later call answered
+    /// with that id does not get it.
+    #[test]
+    fn an_item_for_an_id_no_call_waits_on_is_dropped() {
+        let registry = Registry::new(Arc::from("kit"));
+        let _first = subscribed(&registry, 1, "7");
+        assert!(registry.on_text(&note("8", DATA)).is_none());
+        let mut items = subscribed(&registry, 2, "8");
+        assert!(registry.on_text(&note("8", DONE)).is_none());
+        let got = drain(&mut items);
+        assert!(matches!(got[..], [Ok(StreamItem::Done { .. })]), "{got:?}");
+    }
+
     /// What the spec does not excuse stays an error: an item with no `type`,
     /// or a known one missing what it must carry.
     #[test]
