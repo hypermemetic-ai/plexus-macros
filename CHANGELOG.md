@@ -3,6 +3,38 @@
 All notable changes to plexus-macros and plexus-client are documented here.
 This file starts at 0.7.0; earlier changes are in the git history.
 
+## [Unreleased]
+
+### Added
+
+- PERF.115-36: a typed client decodes an item's content straight from the
+  wire's text into the method's event, never through a `Value`.
+  `Transport::call_raw` yields the call's items as a typed client reads them
+  (`RawItem`, its content a `Content`); its default maps `call`'s items, so
+  every transport has it, and `WsTransport` hands over the text unread.
+  `decode_raw` and `owned_call_raw` are `decode` and `owned_call` for them.
+  A generated client and a client's contract call these. A decode error is
+  worded as `decode` words it. On a WebSocket from plexus-core, a 64 B item
+  falls from 36,976 instructions to 6,404 in the client, a ticket row from
+  77,577 to 16,145, a 17 KB ticket body from 176,873 to 128,388.
+
+### Changed
+
+- `WsTransport` reads each frame in place, not into a `Value`; a call that
+  reads `StreamItem`s (`call`) gets the same items, built from their fields.
+  A data notification as plexus-core writes it is read by its bytes for a
+  typed call, and only its content is decoded. A frame it does not read so
+  is read as a `Value`, as before. plexus-client takes serde_json's
+  `raw_value` feature.
+
+### Fixed
+
+- An item of a `type` plexus-client does not know is skipped and the stream
+  goes on (spec/03); it ended the stream.
+- A notification that comes before the reply naming its subscription id is
+  kept, while a call waits for its id, and handed over when the id arrives
+  (spec/02 rule 4); it was dropped.
+
 ## [0.7.0]
 
 Release with plexus-core 0.7.0: the code these macros emit needs it, and
