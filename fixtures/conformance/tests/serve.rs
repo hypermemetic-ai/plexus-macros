@@ -121,9 +121,12 @@ async fn serve(method: &str, params: Value) -> Vec<Value> {
     init_context();
     match Activation::call(&ConformanceActivation, method, params, None, None).await {
         Ok(stream) => stream.map(|item| normalized(&item)).collect().await,
-        Err(e) => vec![normalized(&PlexusStreamItem::error(
+        // RETURNS-36: as a hub's `error_item` builds it — spec/05's
+        // `message` (the server's own line), `code` and `error_kind` beside
+        // the typed `error`.
+        Err(e) => vec![normalized(&PlexusStreamItem::from_plexus_error(
             StreamMetadata::new(vec![NS.into()], PlexusContext::hash()),
-            RemoteError::from(&e),
+            &e,
             false,
         ))],
     }

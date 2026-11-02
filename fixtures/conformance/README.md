@@ -136,6 +136,17 @@ the plugin hash, and with it all 25 frames' `plexus_hash`: regenerate
 (`the_served_hash_is_the_fixtures_real_hash`) and plexus-core's
 `tests/conformance_fixture.rs` recompute every hash from the files.
 
+RETURNS-36 (returns/0.7 merged with main) changed the contract once:
+`schema.json` gains main's `grant` on every method (AUTH-3), and the
+`schema` method its `params` (SYNAPSE-CC-9's `{method?: string}`) and main's
+`SchemaResult` (`grant`, `target`, `group`, `examples`, `answer_by`,
+`held_on`, `input`, `roles`, `view`; a JSON Schema field is the JSON type,
+SYNAPSE-CC-9) — and so every hash; `errors.jsonl`'s frames carry spec/05's
+`message` and `code` (and `error_kind` where spec/05 gives one) beside the
+typed `error`, as every main error item does. The wire and aggregate items
+are unchanged. `ir.json` was **not** regenerated in that change: it waits on
+the synapse merge (RETURNS-36's Haskell half), as below.
+
 RETURNS-13 wrote `ir.json` from `schema.json`. It follows `schema.json`:
 after any change there, regenerate it from a synapse checkout beside this
 repo (`SYNAPSE_GOLDEN_ACCEPT=1 cabal test ir3-test`), and the diff is the
