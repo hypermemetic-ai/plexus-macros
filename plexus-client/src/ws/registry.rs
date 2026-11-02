@@ -7,11 +7,16 @@
 //! (`web_sys::WebSocket`) backends share one protocol implementation
 //! instead of two that drift.
 
-use crate::envelope::{RawItem, StreamItem};
+use crate::envelope::{Content, RawItem, StreamItem, StreamMetadata};
 use crate::error::TransportError;
 use futures_channel::{mpsc, oneshot};
+use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -143,6 +148,9 @@ struct Sub {
     slot: Arc<SubSlot>,
     /// The call reads [`RawItem`]s (a typed client).
     raw: bool,
+    /// The content type its last data item named, shared with the next that
+    /// names the same: every item of a call does.
+    content_type: Option<Arc<str>>,
 }
 
 #[derive(Debug, Default)]
@@ -165,6 +173,16 @@ struct State {
 const EARLY_FRAMES: usize = 1024;
 const EARLY_BYTES: usize = 4 << 20;
 
+/// A notification for an id no subscription has: a call still waiting for its
+/// reply may be about to learn it (spec/02 rule 4), so it is kept while one
+/// waits, within bounds. With none waiting it is a call that is over.
+fn keep_early(state: &mut State, key: &str, text: &str) {
+    if !state.pending.is_empty() && state.early.len() < EARLY_FRAMES && state.early_bytes + text.len() <= EARLY_BYTES {
+        state.early_bytes += text.len();
+        state.early.push((key.to_owned(), text.to_owned()));
+    }
+}
+
 /// One connection's protocol state.
 #[derive(Debug)]
 pub(crate) struct Registry {
@@ -182,6 +200,178 @@ const KINDS: [&str; 5] = ["data", "progress", "error", "request", "done"];
 /// that answers `7` and a server that answers `"7"` cannot collide.
 fn key_of(id: &Value) -> String {
     id.to_string()
+}
+
+/// [`key_of`] for an id still as its text: the text itself where it is what
+/// `key_of` writes (an integer of at most 19 digits, a string with nothing
+/// escaped), so the two readings route alike; anything else through a `Value`.
+fn key_of_text(id: &RawValue) -> Cow<'_, str> {
+    let text = id.get();
+    let bytes = text.as_bytes();
+    let integer = !bytes.is_empty() && bytes.len() <= 19 && bytes.iter().all(u8::is_ascii_digit) && (bytes.len() == 1 || bytes[0] != b'0');
+    let string = bytes.len() >= 2
+        && bytes[0] == b'"'
+        && bytes[bytes.len() - 1] == b'"'
+        && !bytes[1..bytes.len() - 1].iter().any(|&b| b == b'\\' || b == b'"' || b < 0x20);
+    if integer || string {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(key_of(&value_of(id)))
+    }
+}
+
+/// A piece of a frame, as a `Value`.
+fn value_of(text: &RawValue) -> Value {
+    serde_json::from_str(text.get()).unwrap_or(Value::Null)
+}
+
+/// A frame as the reader reads it (PERF.115-36): nothing built of it. A
+/// reply's `id`, `result` and `error` stay their JSON text, and a
+/// notification's subscription and item are read in place. A frame that does
+/// not read this way is read as a `Value`, as before ([`Registry::on_value`]).
+#[derive(Deserialize)]
+struct Frame<'a> {
+    #[serde(default, borrow)]
+    id: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    result: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    error: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    params: Option<Note<'a>>,
+}
+
+/// A notification's `params`, an object: whose item it is, and the item.
+struct Note<'a> {
+    subscription: &'a RawValue,
+    item: Fields<'a>,
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for Note<'a> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Read<'a>(std::marker::PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> Visitor<'de> for Read<'a> {
+            type Value = Note<'a>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a notification's params")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Note<'a>, A::Error> {
+                let (mut subscription, mut item) = (None, None);
+                while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+                    match key.as_ref() {
+                        "subscription" => subscription = Some(map.next_value()?),
+                        "result" => item = Some(map.next_value()?),
+                        _ => drop(map.next_value::<IgnoredAny>()?),
+                    }
+                }
+                Ok(Note {
+                    subscription: subscription.ok_or_else(|| A::Error::missing_field("subscription"))?,
+                    item: item.ok_or_else(|| A::Error::missing_field("result"))?,
+                })
+            }
+        }
+        d.deserialize_map(Read(std::marker::PhantomData))
+    }
+}
+
+/// An item's fields, read in place: its content, metadata and request data
+/// left as their text, what a typed decode never reads never built.
+#[derive(Deserialize)]
+struct Fields<'a> {
+    #[serde(rename = "type")]
+    kind: Option<Kind>,
+    #[serde(default, borrow)]
+    metadata: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    content_type: Option<Cow<'a, str>>,
+    #[serde(default, borrow, deserialize_with = "present")]
+    content: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    message: Option<Cow<'a, str>>,
+    #[serde(default)]
+    percentage: Option<f32>,
+    #[serde(default, borrow)]
+    code: Option<Cow<'a, str>>,
+    #[serde(default)]
+    recoverable: Option<bool>,
+    #[serde(default, borrow, rename = "requestId")]
+    request_id: Option<Cow<'a, str>>,
+    #[serde(default, borrow, rename = "requestData", deserialize_with = "present")]
+    request_data: Option<&'a RawValue>,
+    #[serde(default, rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+/// A field that is there, as its text, `null` included: a `Value` field reads
+/// `null` as itself, where an `Option` would read it as absent.
+fn present<'de: 'a, 'a, D: Deserializer<'de>>(d: D) -> Result<Option<&'a RawValue>, D::Error> {
+    <&'a RawValue>::deserialize(d).map(Some)
+}
+
+/// An item's `type`: the five this client reads, or one it skips (spec/03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Kind {
+    Data,
+    Progress,
+    Error,
+    Request,
+    Done,
+    #[serde(other)]
+    Other,
+}
+
+impl Fields<'_> {
+    /// The [`StreamItem`] serde makes of the item, made from its fields; `None`
+    /// where they make none, for the `Value` reading to say why.
+    fn stream_item(&self, kind: Kind) -> Option<StreamItem> {
+        let metadata = match self.metadata {
+            Some(m) if m.get() != "null" => Some(serde_json::from_str::<StreamMetadata>(m.get()).ok()?),
+            _ => None,
+        };
+        Some(match kind {
+            Kind::Data => StreamItem::Data {
+                metadata,
+                content_type: self.content_type.as_deref().map(str::to_owned),
+                content: serde_json::from_str(self.content?.get()).ok()?,
+            },
+            Kind::Progress => StreamItem::Progress {
+                metadata,
+                message: self.message.as_deref()?.to_owned(),
+                percentage: self.percentage,
+            },
+            Kind::Error => StreamItem::Error {
+                metadata,
+                message: self.message.as_deref()?.to_owned(),
+                code: self.code.as_deref().map(str::to_owned),
+                recoverable: self.recoverable.unwrap_or(false),
+            },
+            Kind::Request => StreamItem::Request {
+                request_id: self.request_id.as_deref()?.to_owned(),
+                request_data: serde_json::from_str(self.request_data?.get()).ok()?,
+                timeout_ms: self.timeout_ms.unwrap_or(0),
+            },
+            Kind::Done => StreamItem::Done { metadata },
+            Kind::Other => return None,
+        })
+    }
+
+    /// The [`RawItem`] a typed call reads: its content the item's own text,
+    /// its content type `content_type`.
+    fn raw_item(&self, kind: Kind, content_type: Option<Arc<str>>) -> Option<RawItem> {
+        Some(match kind {
+            Kind::Data => RawItem::Data { content_type, content: Content::from(self.content?.to_owned()) },
+            Kind::Progress => RawItem::Progress { message: self.message.as_deref()?.to_owned(), percentage: self.percentage },
+            Kind::Error => RawItem::Error {
+                message: self.message.as_deref()?.to_owned(),
+                code: self.code.as_deref().map(str::to_owned),
+                recoverable: self.recoverable.unwrap_or(false),
+            },
+            Kind::Request => RawItem::Request,
+            Kind::Done => RawItem::Done,
+            Kind::Other => return None,
+        })
+    }
 }
 
 impl Registry {
@@ -230,7 +420,11 @@ impl Registry {
     /// Drop a subscription's routing entry (the stream was dropped, or the
     /// server sent its terminal item).
     pub(crate) fn forget_sub(&self, subscription: &Value) {
-        self.lock().subs.remove(&key_of(subscription));
+        self.forget_key(&key_of(subscription));
+    }
+
+    fn forget_key(&self, key: &str) {
+        self.lock().subs.remove(key);
     }
 
     /// Route one inbound text frame, returning a frame the connection should
@@ -253,13 +447,38 @@ impl Registry {
     /// accepts both. Keying on `params.subscription` makes the method name
     /// irrelevant, so neither spelling can break routing.
     #[must_use = "the returned frame cancels a subscription nobody is reading"]
+    ///
+    /// The frame is read in place ([`Frame`], PERF.115-36): its item's
+    /// content stays text until the call reads it, a typed call's straight
+    /// into its event. What does not read so is read as a `Value`, as before.
     pub(crate) fn on_text(&self, text: &str) -> Option<String> {
+        let Ok(frame) = serde_json::from_str::<Frame<'_>>(text) else {
+            return self.on_value(text);
+        };
+
+        // A subscribe reply.
+        if let Some(request_id) = frame.id.and_then(|id| id.get().parse::<u64>().ok()) {
+            if frame.result.is_some() || frame.error.is_some() {
+                return self.on_response(request_id, frame.result.map(value_of), frame.error.map(value_of));
+            }
+        }
+
+        // A stream item.
+        if let Some(note) = frame.params {
+            self.on_note(note, text);
+        }
+        None
+    }
+
+    /// [`on_text`](Self::on_text) through a `Value`: for a frame the reading
+    /// in place does not take, which this reads as it always has.
+    fn on_value(&self, text: &str) -> Option<String> {
         let frame = serde_json::from_str::<Value>(text).ok()?;
 
         // A subscribe reply.
         if let Some(request_id) = frame.get("id").and_then(Value::as_u64) {
             if frame.get("result").is_some() || frame.get("error").is_some() {
-                return self.on_response(request_id, &frame);
+                return self.on_response(request_id, frame.get("result").cloned(), frame.get("error").cloned());
             }
         }
 
@@ -270,12 +489,12 @@ impl Registry {
         None
     }
 
-    fn on_response(&self, request_id: u64, frame: &Value) -> Option<String> {
+    fn on_response(&self, request_id: u64, result: Option<Value>, error: Option<Value>) -> Option<String> {
         let mut state = self.lock();
         // Not ours: the reply to an unsubscribe, or a duplicate.
         let pending = state.pending.remove(&request_id)?;
 
-        if let Some(error) = frame.get("error") {
+        if let Some(error) = error {
             if state.pending.is_empty() {
                 state.early.clear();
                 state.early_bytes = 0;
@@ -287,7 +506,7 @@ impl Registry {
             return None;
         }
 
-        let subscription = frame.get("result").cloned().unwrap_or(Value::Null);
+        let subscription = result.unwrap_or(Value::Null);
 
         // The caller dropped its stream before the acknowledgement arrived,
         // so it never learned this id and could not cancel it. Cancel it
@@ -306,6 +525,7 @@ impl Registry {
                 sink,
                 slot: pending.slot.clone(),
                 raw: pending.raw,
+                content_type: None,
             },
         );
         drop(state);
@@ -339,6 +559,53 @@ impl Registry {
         mine.into_iter().map(|(_, f)| f).collect()
     }
 
+    /// A stream item read in place: the call's kind of item made of its
+    /// fields, or, where they make none, the frame read as a `Value`, which
+    /// says why as it always has.
+    fn on_note(&self, note: Note<'_>, text: &str) {
+        let Some(kind) = note.item.kind else {
+            return drop(self.on_value(text));
+        };
+        // spec/03: an item of a `type` this client does not know is skipped.
+        if kind == Kind::Other {
+            return;
+        }
+        let key = key_of_text(note.subscription);
+        let mut state = self.lock();
+        let Some(sub) = state.subs.get_mut(key.as_ref()) else {
+            keep_early(&mut state, &key, text);
+            return;
+        };
+        let (sink, slot) = (sub.sink.clone(), sub.slot.clone());
+        let item = if sub.raw {
+            let content_type = match note.item.content_type.as_deref() {
+                Some(named) if sub.content_type.as_deref() == Some(named) => sub.content_type.clone(),
+                Some(named) => {
+                    let shared: Arc<str> = Arc::from(named);
+                    sub.content_type = Some(shared.clone());
+                    Some(shared)
+                }
+                None => None,
+            };
+            drop(state);
+            note.item.raw_item(kind, content_type).map(Delivered::Raw)
+        } else {
+            drop(state);
+            note.item.stream_item(kind).map(Delivered::Item)
+        };
+        let Some(item) = item else {
+            return drop(self.on_value(text));
+        };
+        let terminal = item.is_terminal();
+        let _ = sink.unbounded_send(Ok(item));
+        if terminal {
+            // The server ended it; there is nothing left to cancel,
+            // whether or not the caller ever reads this item.
+            slot.mark_finished();
+            self.forget_key(&key);
+        }
+    }
+
     fn on_notification(&self, subscription: &Value, frame: &Value, text: &str) {
         let key = key_of(subscription);
         let mut state = self.lock();
@@ -347,14 +614,7 @@ impl Registry {
             .get(&key)
             .map(|sub| (sub.sink.clone(), sub.slot.clone(), sub.raw))
         else {
-            // An id no subscription has: a call still waiting for its reply
-            // may be about to learn it (spec/02 rule 4), so it is kept while
-            // one waits, within bounds. With none waiting it is a call that
-            // is over.
-            if !state.pending.is_empty() && state.early.len() < EARLY_FRAMES && state.early_bytes + text.len() <= EARLY_BYTES {
-                state.early_bytes += text.len();
-                state.early.push((key, text.to_owned()));
-            }
+            keep_early(&mut state, &key, text);
             return;
         };
         drop(state);
@@ -617,6 +877,44 @@ mod tests {
                 }
                 other => panic!("{other:?}"),
             }
+        }
+    }
+
+    /// The in-place reading makes of each well-formed item the `StreamItem`
+    /// serde makes of it (PERF.115-36).
+    #[test]
+    fn the_in_place_reading_makes_the_stream_item_serde_makes() {
+        for item in [
+            DATA,
+            DONE,
+            r#"{"type":"done"}"#,
+            r#"{"type":"data","content":{"n":[1,2.5,"x\"y"]},"content_type":"kit.n"}"#,
+            r#"{"type":"data","metadata":null,"content_type":null,"content":null}"#,
+            r#"{"content":{"a":1},"extra":{"ignored":[true]},"type":"data"}"#,
+            r#"{"type":"data","metadata":{"provenance":["a","b"],"plexus_hash":"x","timestamp":-1,"more":1},"content":"s"}"#,
+            r#"{"type":"data","metadata":{},"content":{}}"#,
+            r#"{"type":"progress","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"half","percentage":50.0}"#,
+            r#"{"type":"progress","message":"none yet","percentage":null}"#,
+            r#"{"type":"request","requestId":"r-1","requestData":{"type":"confirm"},"timeoutMs":30000}"#,
+            r#"{"type":"request","requestId":"r-2","requestData":null}"#,
+            r#"{"type":"error","message":"no","code":"forbidden","recoverable":true,"metadata":{"provenance":[],"plexus_hash":"","timestamp":0}}"#,
+            r#"{"type":"error","message":"no","code":null}"#,
+        ] {
+            let fields: Fields<'_> = serde_json::from_str(item).unwrap();
+            let built = fields.stream_item(fields.kind.unwrap());
+            assert_eq!(built, Some(serde_json::from_str::<StreamItem>(item).unwrap()), "{item}");
+        }
+    }
+
+    /// A subscription id is routed alike however its text is written: as the
+    /// reply wrote it, through a `Value`, or as the notification writes it.
+    #[test]
+    fn every_subscription_id_routes_alike_read_in_place_or_as_a_value() {
+        for id in ["7", r#""s-8""#, r#""a\"b""#, r#""é""#, "12345678901234567890", "0", r#""""#] {
+            let registry = Registry::new(Arc::from("kit"));
+            let mut items = subscribed_as(&registry, 1, id, true);
+            assert!(registry.on_text(&note(id, DONE)).is_none());
+            assert!(matches!(drain_raw(&mut items)[..], [Ok(RawItem::Done)]), "{id}");
         }
     }
 
