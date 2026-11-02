@@ -115,7 +115,17 @@ struct State {
     subs: HashMap<String, Sub>,
     /// Set once, when the socket goes away.
     closed: Option<TransportError>,
+    /// Notifications for an id no subscription has yet, kept while a call
+    /// waits for its id (spec/02 rule 4), in the order they came.
+    early: Vec<(String, String)>,
+    /// Their bytes.
+    early_bytes: usize,
 }
+
+/// How much is kept for ids not yet answered: a server keeps rule 1 and sends
+/// none, so this only has to be enough for one that does not.
+const EARLY_FRAMES: usize = 1024;
+const EARLY_BYTES: usize = 4 << 20;
 
 /// One connection's protocol state.
 #[derive(Debug)]
@@ -216,7 +226,7 @@ impl Registry {
 
         // A stream item.
         if let Some(subscription) = frame.pointer("/params/subscription") {
-            self.on_notification(&subscription.clone(), &frame);
+            self.on_notification(&subscription.clone(), &frame, text);
         }
         None
     }
@@ -227,6 +237,10 @@ impl Registry {
         let pending = state.pending.remove(&request_id)?;
 
         if let Some(error) = frame.get("error") {
+            if state.pending.is_empty() {
+                state.early.clear();
+                state.early_bytes = 0;
+            }
             drop(state);
             let _ = pending.waiter.send(Err(TransportError::protocol(format!(
                 "subscribe rejected: {error}"
@@ -241,6 +255,7 @@ impl Registry {
         // here instead of registering a channel nobody will read.
         if pending.slot.acknowledged(&subscription) {
             drop(state);
+            drop(self.take_early(&key_of(&subscription)));
             return Some(self.unsubscribe(&subscription));
         }
 
@@ -261,17 +276,45 @@ impl Registry {
             // routing to a receiver that is gone.
             self.lock().subs.remove(&key);
         }
+        // What came for this id before its reply goes first, in order: the
+        // reader is the only caller of `on_text`, so nothing overtakes it.
+        for frame in self.take_early(&key) {
+            let _ = self.on_text(&frame);
+        }
         None
     }
 
-    fn on_notification(&self, subscription: &Value, frame: &Value) {
+    /// The notifications kept for `key`; and, once no call waits for an id,
+    /// everything kept, which belongs to calls that are over.
+    fn take_early(&self, key: &str) -> Vec<String> {
+        let mut state = self.lock();
+        if state.early.is_empty() {
+            return Vec::new();
+        }
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.early).into_iter().partition(|(k, _)| k == key);
+        if !state.pending.is_empty() {
+            state.early = rest;
+        }
+        state.early_bytes = state.early.iter().map(|(_, f)| f.len()).sum();
+        mine.into_iter().map(|(_, f)| f).collect()
+    }
+
+    fn on_notification(&self, subscription: &Value, frame: &Value, text: &str) {
         let key = key_of(subscription);
-        let state = self.lock();
+        let mut state = self.lock();
         let Some((sink, slot)) = state
             .subs
             .get(&key)
             .map(|sub| (sub.sink.clone(), sub.slot.clone()))
         else {
+            // An id no subscription has: a call still waiting for its reply
+            // may be about to learn it (spec/02 rule 4), so it is kept while
+            // one waits, within bounds. With none waiting it is a call that
+            // is over.
+            if !state.pending.is_empty() && state.early.len() < EARLY_FRAMES && state.early_bytes + text.len() <= EARLY_BYTES {
+                state.early_bytes += text.len();
+                state.early.push((key, text.to_owned()));
+            }
             return;
         };
         drop(state);
@@ -316,6 +359,8 @@ impl Registry {
                 return;
             }
             state.closed = Some(error.clone());
+            state.early = Vec::new();
+            state.early_bytes = 0;
             (
                 std::mem::take(&mut state.pending),
                 std::mem::take(&mut state.subs),
