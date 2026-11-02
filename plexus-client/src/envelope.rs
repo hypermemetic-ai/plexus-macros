@@ -157,14 +157,48 @@ pub struct Content(Repr);
 enum Repr {
     Text(Box<RawValue>),
     Value(Value),
+    /// The whole notification the item came in, its content at
+    /// `params.result.content`, which is read only when it is decoded: once,
+    /// straight into the event.
+    Frame(Box<str>),
+}
+
+/// A notification read for its item's content alone; everything else in it
+/// is passed over.
+#[derive(Deserialize)]
+struct InFrame<C> {
+    params: InParams<C>,
+}
+
+#[derive(Deserialize)]
+struct InParams<C> {
+    result: InItem<C>,
+}
+
+#[derive(Deserialize)]
+struct InItem<C> {
+    content: C,
 }
 
 impl Content {
+    /// A data item's content inside its whole notification (`text`), read
+    /// when it is decoded.
+    pub(crate) fn frame(text: &str) -> Self {
+        Content(Repr::Frame(text.into()))
+    }
+
+    /// Whether the content is still inside its whole notification.
+    #[cfg(test)]
+    pub(crate) fn is_frame(&self) -> bool {
+        matches!(self.0, Repr::Frame(_))
+    }
+
     /// The JSON text the wire carried, when the transport kept it.
     pub fn as_text(&self) -> Option<&str> {
         match &self.0 {
             Repr::Text(text) => Some(text.get()),
             Repr::Value(_) => None,
+            Repr::Frame(frame) => serde_json::from_str::<InFrame<&RawValue>>(frame).ok().map(|f| f.params.result.content.get()),
         }
     }
 
@@ -173,6 +207,7 @@ impl Content {
         match self.0 {
             Repr::Text(text) => serde_json::from_str(text.get()),
             Repr::Value(value) => serde_json::from_value(value),
+            Repr::Frame(frame) => serde_json::from_str::<InFrame<E>>(&frame).map(|f| f.params.result.content),
         }
     }
 
@@ -181,6 +216,7 @@ impl Content {
         match self.0 {
             Repr::Text(text) => serde_json::from_str(text.get()),
             Repr::Value(value) => Ok(value),
+            Repr::Frame(_) => self.decode(),
         }
     }
 }

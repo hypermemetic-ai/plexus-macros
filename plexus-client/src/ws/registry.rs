@@ -10,14 +10,14 @@
 use crate::envelope::{Content, RawItem, StreamItem, StreamMetadata};
 use crate::error::TransportError;
 use futures_channel::{mpsc, oneshot};
-use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
+use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// An item as a call reads it: a [`StreamItem`] for `call`, a [`RawItem`]
@@ -173,6 +173,16 @@ struct State {
 const EARLY_FRAMES: usize = 1024;
 const EARLY_BYTES: usize = 4 << 20;
 
+/// A content type `named` by an item, shared with the call's `last` when it is
+/// the same: every item of a call names one.
+fn shared(last: &mut Option<Arc<str>>, named: Option<&str>) -> Option<Arc<str>> {
+    let named = named?;
+    if last.as_deref() != Some(named) {
+        *last = Some(Arc::from(named));
+    }
+    last.clone()
+}
+
 /// A notification for an id no subscription has: a call still waiting for its
 /// reply may be about to learn it (spec/02 rule 4), so it is kept while one
 /// waits, within bounds. With none waiting it is a call that is over.
@@ -189,6 +199,10 @@ pub(crate) struct Registry {
     hub_namespace: Arc<str>,
     next_id: AtomicU64,
     state: Mutex<State>,
+    /// A typed call has been made on this connection: a large frame's head is
+    /// worth reading. A connection whose calls all read `StreamItem`s never
+    /// reads one.
+    typed: AtomicBool,
 }
 
 /// The item `type`s this client reads (spec/03); any other is skipped.
@@ -257,11 +271,11 @@ impl<'de: 'a, 'a> Deserialize<'de> for Note<'a> {
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Note<'a>, A::Error> {
                 let (mut subscription, mut item) = (None, None);
-                while let Some(key) = map.next_key::<Cow<'de, str>>()? {
-                    match key.as_ref() {
-                        "subscription" => subscription = Some(map.next_value()?),
-                        "result" => item = Some(map.next_value()?),
-                        _ => drop(map.next_value::<IgnoredAny>()?),
+                while let Some(key) = map.next_key::<NoteKey>()? {
+                    match key {
+                        NoteKey::Subscription => subscription = Some(map.next_value()?),
+                        NoteKey::Result => item = Some(map.next_value()?),
+                        NoteKey::Other => drop(map.next_value::<IgnoredAny>()?),
                     }
                 }
                 Ok(Note {
@@ -271,6 +285,134 @@ impl<'de: 'a, 'a> Deserialize<'de> for Note<'a> {
             }
         }
         d.deserialize_map(Read(std::marker::PhantomData))
+    }
+}
+
+/// A key of a notification's `params`, read without making a string of it.
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum NoteKey {
+    Subscription,
+    Result,
+    #[serde(other)]
+    Other,
+}
+
+/// A key of a frame, as the head's reading reads it.
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum FrameKey {
+    Id,
+    Result,
+    Error,
+    Params,
+    #[serde(other)]
+    Other,
+}
+
+/// A key of an item, as the head's reading reads it.
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum ItemKey {
+    Type,
+    ContentType,
+    Content,
+    #[serde(other)]
+    Other,
+}
+
+/// The frame length from which a typed call's data item is read on its head.
+/// The head's own reading costs about what a frame of 2 KB of content costs
+/// to scan once more (counted, PERF.115-36): below this a frame is read whole,
+/// its content found and then decoded, which scans it twice but reads its
+/// head once; above, the content is scanned once.
+const HEAD_FRAMES_FROM: usize = 4096;
+
+/// What the reader needs of a notification before its item's content, read
+/// in place and no further (PERF.115-36): whose item it is, its type and its
+/// content type. A typed call reads the content itself, once, straight into
+/// its event; read here too, a body's text would be scanned twice.
+#[derive(Default)]
+struct Head<'a> {
+    subscription: Option<&'a RawValue>,
+    kind: Option<Kind>,
+    content_type: Option<&'a str>,
+    /// The reading stopped where the item's content begins.
+    at_content: bool,
+}
+
+impl<'a> Head<'a> {
+    /// The head of a notification that reached its item's content having
+    /// read whose item it is and its content type, as plexus-core writes
+    /// them; `None` for anything else (a reply, an item with no content, keys
+    /// in another order), which the full reading takes.
+    fn read(text: &'a str) -> Option<Self> {
+        let mut head = Head::default();
+        let read = HeadSeed(&mut head, Level::Frame).deserialize(&mut serde_json::Deserializer::from_str(text));
+        (read.is_err() && head.at_content && head.subscription.is_some() && head.content_type.is_some()).then_some(head)
+    }
+}
+
+/// Where in a notification the head's reading is.
+#[derive(Clone, Copy)]
+enum Level {
+    Frame,
+    Params,
+    Item,
+}
+
+/// The head's reading: a frame's keys until `params`, its keys until
+/// `subscription` and `result`, the item's until `content`, where it stops.
+struct HeadSeed<'h, 'a>(&'h mut Head<'a>, Level);
+
+impl<'de: 'a, 'a> DeserializeSeed<'de> for HeadSeed<'_, 'a> {
+    type Value = ();
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl<'de: 'a, 'a> Visitor<'de> for HeadSeed<'_, 'a> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a notification")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let HeadSeed(head, level) = self;
+        match level {
+            Level::Frame => {
+                while let Some(key) = map.next_key::<FrameKey>()? {
+                    match key {
+                        FrameKey::Params => return map.next_value_seed(HeadSeed(head, Level::Params)),
+                        FrameKey::Id | FrameKey::Result | FrameKey::Error => return Err(A::Error::custom("a reply")),
+                        FrameKey::Other => drop(map.next_value::<IgnoredAny>()?),
+                    }
+                }
+            }
+            Level::Params => {
+                while let Some(key) = map.next_key::<NoteKey>()? {
+                    match key {
+                        NoteKey::Subscription => head.subscription = Some(map.next_value()?),
+                        NoteKey::Result => map.next_value_seed(HeadSeed(&mut *head, Level::Item))?,
+                        NoteKey::Other => drop(map.next_value::<IgnoredAny>()?),
+                    }
+                }
+            }
+            Level::Item => {
+                while let Some(key) = map.next_key::<ItemKey>()? {
+                    match key {
+                        ItemKey::Type => head.kind = Some(map.next_value()?),
+                        ItemKey::ContentType => head.content_type = map.next_value()?,
+                        ItemKey::Content => {
+                            head.at_content = true;
+                            return Err(A::Error::custom("the content"));
+                        }
+                        ItemKey::Other => drop(map.next_value::<IgnoredAny>()?),
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -381,6 +523,7 @@ impl Registry {
             // JSON-RPC ids start at 1; 0 reads like "unset" in a trace.
             next_id: AtomicU64::new(1),
             state: Mutex::new(State::default()),
+            typed: AtomicBool::new(false),
         }
     }
 
@@ -409,6 +552,9 @@ impl Registry {
         }
         let (waiter, reply) = oneshot::channel();
         state.pending.insert(request_id, Pending { slot, waiter, raw });
+        if raw {
+            self.typed.store(true, Ordering::Relaxed);
+        }
         Ok(reply)
     }
 
@@ -452,6 +598,15 @@ impl Registry {
     /// content stays text until the call reads it, a typed call's straight
     /// into its event. What does not read so is read as a `Value`, as before.
     pub(crate) fn on_text(&self, text: &str) -> Option<String> {
+        // A typed call's large data item: routed on its head, its content
+        // left for the call to read, once.
+        if text.len() > HEAD_FRAMES_FROM && self.typed.load(Ordering::Relaxed) {
+            if let Some(head) = Head::read(text) {
+                if self.on_head(&head, text) {
+                    return None;
+                }
+            }
+        }
         let Ok(frame) = serde_json::from_str::<Frame<'_>>(text) else {
             return self.on_value(text);
         };
@@ -559,6 +714,29 @@ impl Registry {
         mine.into_iter().map(|(_, f)| f).collect()
     }
 
+    /// A data item for a typed call, handed over with its frame unread past
+    /// the head: the call decodes the content from it. `false` for anything
+    /// else, which the full reading takes.
+    fn on_head(&self, head: &Head<'_>, text: &str) -> bool {
+        let (Some(Kind::Data), Some(subscription)) = (head.kind, head.subscription) else {
+            return false;
+        };
+        let key = key_of_text(subscription);
+        let mut state = self.lock();
+        let Some(sub) = state.subs.get_mut(key.as_ref()) else {
+            keep_early(&mut state, &key, text);
+            return true;
+        };
+        if !sub.raw {
+            return false;
+        }
+        let content_type = shared(&mut sub.content_type, head.content_type);
+        let sink = sub.sink.clone();
+        drop(state);
+        let _ = sink.unbounded_send(Ok(Delivered::Raw(RawItem::Data { content_type, content: Content::frame(text) })));
+        true
+    }
+
     /// A stream item read in place: the call's kind of item made of its
     /// fields, or, where they make none, the frame read as a `Value`, which
     /// says why as it always has.
@@ -578,15 +756,7 @@ impl Registry {
         };
         let (sink, slot) = (sub.sink.clone(), sub.slot.clone());
         let item = if sub.raw {
-            let content_type = match note.item.content_type.as_deref() {
-                Some(named) if sub.content_type.as_deref() == Some(named) => sub.content_type.clone(),
-                Some(named) => {
-                    let shared: Arc<str> = Arc::from(named);
-                    sub.content_type = Some(shared.clone());
-                    Some(shared)
-                }
-                None => None,
-            };
+            let content_type = shared(&mut sub.content_type, note.item.content_type.as_deref());
             drop(state);
             note.item.raw_item(kind, content_type).map(Delivered::Raw)
         } else {
@@ -916,6 +1086,89 @@ mod tests {
             assert!(registry.on_text(&note(id, DONE)).is_none());
             assert!(matches!(drain_raw(&mut items)[..], [Ok(RawItem::Done)]), "{id}");
         }
+    }
+
+    /// A typed call decodes from its frames what a call that reads `Value`s
+    /// decodes, and is refused in the same words, whether its data items are
+    /// read on their head (plexus-core's order) or whole (any other).
+    #[test]
+    fn a_typed_call_decodes_from_its_frames_what_a_value_call_decodes() {
+        use crate::{decode, decode_raw, ItemStream, RawItemStream};
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Ev {
+            Said { text: String },
+            Row { id: String, labels: Vec<String>, parent: Option<String> },
+            Ready,
+        }
+        let long = "a \\\"long\\\" body, é and \\n ".repeat(200);
+        let big = [
+            format!(r#"{{"type":"said","text":"{long}"}}"#),
+            format!(r#"{{"type":"said","text":7,"pad":"{long}"}}"#),
+            format!(r#"{{"type":"row","id":"{long}","labels":[]}}"#),
+        ];
+        let contents = [
+            r#"{"type":"said","text":"hi \"there\"\n\u00e9"}"#,
+            r#"{"type":"row","id":"MQ-1","labels":["perf"],"parent":null}"#,
+            r#"{"type":"ready"}"#,
+            r#"{"type":"said"}"#,
+            r#"{"type":"said","text":7}"#,
+            r#"{"type":"gone"}"#,
+            "null",
+            &big[0],
+            &big[1],
+            &big[2],
+        ];
+        let head = |c: &str| format!(r#"{{"type":"data","metadata":{{"provenance":["kit"],"plexus_hash":"h","timestamp":1}},"content_type":"kit.say","content":{c}}}"#);
+        let whole = |c: &str| format!(r#"{{"content":{c},"type":"data","content_type":"kit.say"}}"#);
+        for item in contents.iter().map(|c| head(c)).chain(contents.iter().map(|c| whole(c))) {
+            let registry = Registry::new(Arc::from("kit"));
+            let values = subscribed_as(&registry, 1, "7", false);
+            let raws = subscribed_as(&registry, 2, "8", true);
+            for sub in ["7", "8"] {
+                assert!(registry.on_text(&note(sub, &item)).is_none());
+                assert!(registry.on_text(&note(sub, DONE)).is_none());
+            }
+            let values: ItemStream<'static> = Box::pin(values.map(|i| i.map(Delivered::into_item)));
+            let raws: RawItemStream<'static> = Box::pin(raws.map(|i| i.map(Delivered::into_raw)));
+            let a: Vec<_> = futures_util::stream::StreamExt::collect::<Vec<_>>(decode::<Ev>(values)).now_or_never().unwrap();
+            let b: Vec<_> = futures_util::stream::StreamExt::collect::<Vec<_>>(decode_raw::<Ev>(raws)).now_or_never().unwrap();
+            assert_eq!(a, b, "{item}");
+        }
+    }
+
+    /// A typed call's large data item is handed over inside its frame, its
+    /// content read once, when it is decoded; a small one as its text.
+    #[test]
+    fn a_large_item_reaches_a_typed_call_in_its_frame() {
+        let registry = Registry::new(Arc::from("kit"));
+        let mut items = subscribed_as(&registry, 1, "7", true);
+        let body = format!(r#"{{"type":"said","text":"{}"}}"#, "x".repeat(HEAD_FRAMES_FROM));
+        let large = format!(r#"{{"type":"data","metadata":{{"provenance":["kit"],"plexus_hash":"h","timestamp":1}},"content_type":"kit.say","content":{body}}}"#);
+        for item in [DATA, large.as_str()] {
+            assert!(registry.on_text(&note("7", item)).is_none());
+        }
+        match &drain_raw(&mut items)[..] {
+            [Ok(RawItem::Data { content: small, .. }), Ok(RawItem::Data { content: large, content_type })] => {
+                assert!(!small.is_frame() && large.is_frame());
+                assert_eq!(large.as_text(), Some(body.as_str()));
+                assert_eq!(content_type.as_deref(), Some("kit.say"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The head's reading takes a data item for a typed call only where it
+    /// has read whose it is and its content type before the content.
+    #[test]
+    fn the_head_is_read_only_in_plexus_cores_order() {
+        let at = |item: &str| Head::read(&note("7", item)).map(|h| (h.kind, h.content_type.map(str::to_owned)));
+        assert_eq!(at(DATA), Some((Some(Kind::Data), Some("kit.say".into()))));
+        assert_eq!(at(r#"{"content":1,"type":"data","content_type":"kit.say"}"#), None);
+        assert_eq!(at(r#"{"type":"data","content":1}"#), None);
+        assert_eq!(at(DONE), None);
+        assert!(Head::read(r#"{"jsonrpc":"2.0","id":1,"result":7}"#).is_none());
+        assert!(Head::read(r#"{"jsonrpc":"2.0","method":"kit.call","params":{"result":{"type":"data","content_type":"x","content":1},"subscription":7}}"#).is_none());
     }
 
     /// What the spec does not excuse stays an error: an item with no `type`,
