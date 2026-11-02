@@ -739,8 +739,9 @@ pub fn generate(
     // way DynamicHub's `plugin_children` does it (it used to be `""`, so a
     // change inside a static child reached no ancestor's hash). It rolls up
     // into this hub's `children_hash` and `hash`, so a change anywhere below
-    // moves every ancestor's hash and the root's. A static child must
-    // therefore be an `Activation` (every `#[activation]` is). The child is
+    // moves every ancestor's hash and the root's. A static child that is not
+    // an `Activation` — a hand-written `ChildRouter` (MACRO-20) — describes
+    // nothing, and its hash is `""` as before. The child is
     // built by its accessor and its schema computed on each call; a type that
     // is its own static descendant would recurse without end.
     let plugin_children_synth = if synthesize_plugin_children {
@@ -758,7 +759,31 @@ pub fn generate(
                     #crate_path::plexus::ChildSummary {
                         namespace: ::std::string::String::from(#name),
                         description: ::std::string::String::from(#desc),
-                        hash: #crate_path::plexus::Activation::plugin_schema(&self.#fn_name()).hash,
+                        // RETURNS-36: by autoref, the child's schema hash
+                        // when it is an `Activation` (RETURNS-25), and `""`
+                        // when it is a hand-written `ChildRouter` that
+                        // describes nothing (MACRO-20 still compiles it).
+                        hash: {
+                            struct __PlexusChildHash<'a, C>(&'a C);
+                            trait __PlexusViaActivation {
+                                fn __plexus_child_hash(&self) -> ::std::string::String;
+                            }
+                            impl<C: #crate_path::plexus::Activation> __PlexusViaActivation for __PlexusChildHash<'_, C> {
+                                fn __plexus_child_hash(&self) -> ::std::string::String {
+                                    #crate_path::plexus::Activation::plugin_schema(self.0).hash
+                                }
+                            }
+                            trait __PlexusViaRouter {
+                                fn __plexus_child_hash(&self) -> ::std::string::String;
+                            }
+                            impl<C> __PlexusViaRouter for &__PlexusChildHash<'_, C> {
+                                fn __plexus_child_hash(&self) -> ::std::string::String {
+                                    ::std::string::String::new()
+                                }
+                            }
+                            let __child = self.#fn_name();
+                            (&__PlexusChildHash(&__child)).__plexus_child_hash()
+                        },
                     }
                 }
             })
