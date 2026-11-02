@@ -121,7 +121,9 @@ fn schema_snapshot() {
 /// A schema without the fields (an older server's) parses, and says none.
 #[test]
 fn an_older_schema_parses() {
-    let old = serde_json::json!({ "name": "get", "description": "One", "hash": "00" });
+    // RETURNS-36: older than SYNAPSE-13, but with what 0.8 requires of every
+    // method schema (RETURNS-5: `returns` and `cardinality`).
+    let old = serde_json::json!({ "name": "get", "description": "One", "hash": "00", "returns": {}, "cardinality": "one" });
     let m: plexus_core::plexus::MethodSchema = serde_json::from_value(old).unwrap();
     assert_eq!(m.group, None);
     assert!(m.examples.is_empty());

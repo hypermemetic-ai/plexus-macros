@@ -1,11 +1,20 @@
 //! MACRO-13 · `#[activation]` needs nothing.
 //!
 //! On `impl FooActivation` the stem `Foo` names the namespace (`foo`), the
-//! trait (`trait Foo`, always emitted — the owner's `always`, 2026-10-16) and
-//! the client (`FooClient<T>`); `trait = "Bar"` names them whatever the type
-//! is called. Every `pub async fn` on `&self` returning `impl Stream<Item =
-//! E>` is a wire method (`methods = marked` restores the `#[method]`-only
-//! rule). A crate that declares a `server` feature gets its server half gated
+//! trait (`trait Foo`) and the client (`FooClient<T>`); `trait = "Bar"` names
+//! them whatever the type is called. Every `pub async fn` on `&self`
+//! returning one of RETURNS-8's signature forms is a wire method (`methods =
+//! marked` restores the `#[method]`-only rule).
+//!
+//! RETURNS-36: the trait carries one event type `E` across the activation,
+//! each method `-> BoxStream<'static, E>` — the shape of an activation whose
+//! wire methods are all `impl Stream<Item = E>` of one `E`, which every
+//! activation written before 0.7 has. It is emitted for exactly those (the
+//! owner's `always`, 2026-10-16, for every activation that has the shape);
+//! an activation that gives its methods their own return types (the owner,
+//! 2026-11-02: "each method declared under its own return type") has its
+//! client and its aggregate `{Ns}Event`, and no trait. A contract (a bodiless
+//! activation) is its trait, so it must have the shape. A crate that declares a `server` feature gets its server half gated
 //! on it. A bodiless activation is a contract: the macro emits
 //! `FooActivation<D: Foo>`, delegating to `D`, and `Foo::server(self)`.
 //!
@@ -16,7 +25,7 @@
 //! asking for the rename, so that every repository that takes the macro by
 //! path keeps building until its own rename lands.
 
-use crate::parse::{extract_stream_item_type, HubMethodsAttrs, MethodInfo};
+use crate::parse::{classify_return, Cardinality, HubMethodsAttrs, MethodInfo};
 use proc_macro2::{Span, TokenStream};
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote};
@@ -183,9 +192,9 @@ pub(crate) fn take_bodiless(input_impl: &mut syn::ItemImpl) -> Vec<syn::Ident> {
 }
 
 /// Under the name rule (and not `methods = marked`): is this unmarked method
-/// on the wire? `pub async fn` on `&self` returning `impl Stream<Item = E>`
-/// is; one returning anything else is refused; any other shape is a plain
-/// method.
+/// on the wire? `pub async fn` on `&self` returning one of the six signature
+/// forms (RETURNS-8) is; one returning anything else is refused; any other
+/// shape is a plain method.
 pub(crate) fn is_wire_shape(method: &ImplItemFn) -> syn::Result<bool> {
     let public = matches!(method.vis, Visibility::Public(_));
     let on_ref_self = matches!(
@@ -195,27 +204,27 @@ pub(crate) fn is_wire_shape(method: &ImplItemFn) -> syn::Result<bool> {
     if !(public && method.sig.asyncness.is_some() && on_ref_self) {
         return Ok(false);
     }
-    let returns_stream = match &method.sig.output {
-        syn::ReturnType::Type(_, ty) => extract_stream_item_type(ty).is_some(),
-        syn::ReturnType::Default => false,
-    };
-    if returns_stream {
-        return Ok(true);
+    match classify_return(&method.sig) {
+        Ok(_) => Ok(true),
+        Err(form) => {
+            let name = &method.sig.ident;
+            let returns = match &method.sig.output {
+                syn::ReturnType::Type(_, ty) => quote!(#ty).to_string(),
+                syn::ReturnType::Default => "()".to_string(),
+            };
+            let mut e = syn::Error::new(
+                name.span(),
+                format!(
+                    "`pub async fn {name}(&self, …)` returns `{returns}`, which is not a signature \
+                     form, so it cannot go on the wire — and every `pub async fn` on `&self` of an \
+                     activation is a wire method. Make `{name}` non-`pub`, or write `methods = \
+                     marked` on the activation (then only #[plexus_macros::method]s are on the wire)."
+                ),
+            );
+            e.combine(form);
+            Err(e)
+        }
     }
-    let name = &method.sig.ident;
-    let returns = match &method.sig.output {
-        syn::ReturnType::Type(_, ty) => quote!(#ty).to_string(),
-        syn::ReturnType::Default => "()".to_string(),
-    };
-    Err(syn::Error::new(
-        name.span(),
-        format!(
-            "`pub async fn {name}(&self, …)` returns `{returns}`, not `impl Stream<Item = E>`, so \
-             it cannot go on the wire — and every `pub async fn` on `&self` of an activation is a \
-             wire method. Make `{name}` non-`pub`, or write `methods = marked` on the activation \
-             (then only #[plexus_macros::method]s are on the wire)."
-        ),
-    ))
 }
 
 /// Does the consuming crate's manifest declare a `server` feature?
@@ -283,24 +292,32 @@ pub(crate) fn injected(m: &MethodInfo) -> Option<&'static str> {
     }
 }
 
-/// The checks a method must pass to be on the trait. The trait carries what
-/// a caller passes; a method that also takes what the server injects is on
-/// it (the client implements it), but the activation then does not implement
-/// its own trait — it has no caller to take those from. Answers whether it
-/// does: true when no wire method takes anything injected.
-pub(crate) fn check_trait_methods(methods: &[MethodInfo], trait_ident: &syn::Ident) -> syn::Result<bool> {
+/// Does a method take what the server injects? An activation with such a
+/// method does not implement its own trait — it has no caller to take those
+/// from. True when no wire method does.
+pub(crate) fn self_callable(methods: &[MethodInfo]) -> bool {
+    methods.iter().all(|m| injected(m).is_none())
+}
+
+/// A method's event type on the trait: `E` of `impl Stream<Item = E>`, a
+/// plain stream (no `Result`, no `Progress`).
+fn plain_stream_item(m: &MethodInfo) -> Option<&Type> {
+    (m.cardinality == Cardinality::Many && m.err_ty.is_none() && m.progress_ty.is_none()).then_some(&m.ok_ty)
+}
+
+/// RETURNS-36: can the activation's methods be trait `trait_ident` — every
+/// one `impl Stream<Item = E>` of one `E`? `Err` says why not, on the method
+/// that breaks it.
+pub(crate) fn trait_shape(methods: &[MethodInfo], trait_ident: &syn::Ident) -> syn::Result<()> {
     let mut first_event: Option<(String, &syn::Ident)> = None;
-    let mut self_callable = true;
     for m in methods {
-        if injected(m).is_some() {
-            self_callable = false;
-        }
-        let Some(event) = &m.stream_item_type else {
+        let Some(event) = plain_stream_item(m) else {
             return Err(syn::Error::new(
                 m.fn_name.span(),
                 format!(
                     "`{}` does not return `impl Stream<Item = E>`, so trait `{trait_ident}` has no \
-                     event type for it. Give it a stream return type.",
+                     event type for it: the trait's methods yield one event type across the \
+                     activation. Give it a stream return type.",
                     m.fn_name
                 ),
             ));
@@ -321,7 +338,7 @@ pub(crate) fn check_trait_methods(methods: &[MethodInfo], trait_ident: &syn::Ide
             Some(_) => {}
         }
     }
-    Ok(self_callable)
+    Ok(())
 }
 
 fn sig_params(m: &MethodInfo) -> (Vec<TokenStream>, Vec<&syn::Ident>) {
@@ -338,7 +355,7 @@ fn sig_params(m: &MethodInfo) -> (Vec<TokenStream>, Vec<&syn::Ident>) {
 }
 
 fn event_ty(m: &MethodInfo) -> &Type {
-    m.stream_item_type.as_ref().expect("checked by check_trait_methods")
+    plain_stream_item(m).expect("checked by trait_shape")
 }
 
 /// `pub trait Foo: Send + Sync + 'static { fn m(&self, …) -> BoxStream<'static, E>; … }`,
@@ -586,7 +603,7 @@ pub(crate) fn client_trait_impl(
             fn #fn_ident(&self #(, #params)*) -> #client::BoxStream<'static, #ev> {
                 let mut __params = #client::__rt::serde_json::Map::new();
                 #(#inserts)*
-                #client::into_events::<#ev>(#client::decode::<#ev>(#client::owned_call(
+                #client::into_events::<#ev, _>(#client::decode::<#ev>(#client::owned_call(
                     ::core::clone::Clone::clone(&self.transport),
                     Self::#const_ident.at(self.path),
                     #client::__rt::serde_json::Value::Object(__params),

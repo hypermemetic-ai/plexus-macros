@@ -12,7 +12,7 @@ use futures::StreamExt;
 use plexus_client::{MemoryTransport, MethodRef, StreamItem};
 use plexus_core::plexus::{Activation, PlexusStreamItem};
 use serde_json::json;
-use tickets_api::{Status, Tickets, TicketsClient, TicketsEvent};
+use tickets_api::{Status, TicketEvent, Tickets, TicketsClient};
 
 const GET: MethodRef = MethodRef::new("tickets", "get");
 
@@ -52,9 +52,9 @@ async fn what_the_server_emits_is_what_the_client_decodes() {
         .collect();
     let client = TicketsClient::new(MemoryTransport::new().script(GET, items));
 
-    let decoded = client.get_all("MACRO-2".to_string()).await.expect("decodes");
-    match &decoded[..] {
-        [TicketsEvent::Ticket { ticket }] => {
+    let decoded = client.get("MACRO-2".to_string()).await.expect("decodes");
+    match &decoded {
+        TicketEvent::Ticket { ticket } => {
             assert_eq!(ticket.id, "MACRO-2");
             assert_eq!(ticket.status, Status::Ready);
             assert_eq!(ticket.parent.as_deref(), Some("MACRO-1"));
@@ -80,8 +80,8 @@ async fn the_missing_ticket_path_agrees_too() {
     let client = TicketsClient::new(MemoryTransport::new().script(GET, items));
 
     assert_eq!(
-        client.get_all("NOPE-1".to_string()).await.unwrap(),
-        vec![TicketsEvent::NotFound { id: "NOPE-1".into() }]
+        client.get("NOPE-1".to_string()).await.unwrap(),
+        TicketEvent::NotFound { id: "NOPE-1".into() }
     );
 }
 

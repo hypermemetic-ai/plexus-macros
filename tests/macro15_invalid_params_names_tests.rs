@@ -76,9 +76,19 @@ impl Hub {
     }
 }
 
+/// The refusal, whole (RETURNS-6: structured).
+async fn invalid_error(method: &str, params: serde_json::Value) -> PlexusError {
+    match Hub.call(method, params.clone(), None, None).await {
+        Err(e @ PlexusError::InvalidParams { .. }) => e,
+        Err(other) => panic!("{method} {params}: expected InvalidParams, got {other:?}"),
+        Ok(_) => panic!("{method} {params}: expected InvalidParams, got a stream"),
+    }
+}
+
+/// Its line past `Invalid params: ` — MACRO-15's `<param>: <detail>`.
 async fn invalid(method: &str, params: serde_json::Value) -> String {
     match Hub.call(method, params.clone(), None, None).await {
-        Err(PlexusError::InvalidParams(m)) => m,
+        Err(e @ PlexusError::InvalidParams { .. }) => e.to_string().trim_start_matches("Invalid params: ").to_string(),
         Err(other) => panic!("{method} {params}: expected InvalidParams, got {other:?}"),
         Ok(_) => panic!("{method} {params}: expected InvalidParams, got a stream"),
     }
@@ -132,7 +142,7 @@ async fn a_missing_field_is_unchanged() {
 
 #[tokio::test]
 async fn the_wire_code_is_unchanged() {
-    let e = PlexusError::InvalidParams(invalid("get", serde_json::json!({ "id": "x" })).await);
+    let e = invalid_error("get", serde_json::json!({ "id": "x" })).await;
     let item = plexus_core::plexus::error_item("hub", &e);
     assert_eq!(item["code"], "-32602");
     assert_eq!(item["error_kind"], "invalid_params");

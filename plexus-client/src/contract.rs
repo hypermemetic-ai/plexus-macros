@@ -3,8 +3,9 @@
 //! `#[plexus_macros::activation(trait)]` on `impl FooActivation` emits
 //! `trait Foo`: every wire method as `fn(&self, ..) -> BoxStream<'static, E>`,
 //! implemented by the activation and by `FooClient<T>`. A client call is a
-//! stream of `Result<ClientEvent<E>, ClientError>`; a trait method is a
-//! stream of `E`. This module is the bridge:
+//! stream of `Result<E, ClientError>` (RETURNS-9's `MethodStream`, progress
+//! already dropped); a trait method is a stream of `E`. This module is the
+//! bridge:
 //!
 //! - [`FromClientError`] — how a client failure becomes the event type's own
 //!   in-band error (one line, usually `Error { message }`), so a caller of
@@ -12,14 +13,16 @@
 //!   implementation or a remote one;
 //! - [`owned_call`] — a `'static` call from an owned transport, since a trait
 //!   method's stream outlives the `&self` it was called on;
-//! - [`into_events`] / [`error_events`] — the mapping itself: a data event is
-//!   yielded, a progress report is dropped, an error is yielded as
-//!   `E::from_client_error(err)` and ends the stream.
+//! - [`into_events`] / [`error_events`] — the mapping itself: an item is
+//!   yielded, an error is yielded as `E::from_client_error(err)` and ends the
+//!   stream.
+//!
+//! RETURNS-36: the trait is emitted for an activation whose wire methods are
+//! all `impl Stream<Item = E>` of one `E` — the shape it has always had; an
+//! activation using RETURNS-8's other signature forms has its client alone.
 
-use crate::decode::EventStream;
 use crate::envelope::StreamItem;
 use crate::error::{ClientError, TransportError};
-use crate::event::ClientEvent;
 use crate::transport::{ItemStream, MethodRef, Transport};
 use futures_core::Stream;
 use futures_util::{stream, StreamExt};
@@ -76,18 +79,33 @@ impl FromClientError for String {
 /// A typed client stream as a trait method's stream: data events yielded,
 /// progress dropped, the first error yielded as `E::from_client_error(err)`
 /// and the stream ended there.
-pub fn into_events<'a, E>(events: EventStream<'a, E>) -> BoxStream<'a, E>
+#[cfg(not(target_arch = "wasm32"))]
+pub fn into_events<'a, E, S>(events: S) -> BoxStream<'a, E>
 where
-    E: FromClientError + 'a,
+    E: FromClientError + Send + 'a,
+    S: Stream<Item = Result<E, ClientError>> + Unpin + Send + 'a,
 {
     Box::pin(stream::unfold(Some(events), |state| async move {
         let mut events = state?;
-        loop {
-            match events.next().await? {
-                Ok(ClientEvent::Data(e)) => return Some((e, Some(events))),
-                Ok(ClientEvent::Progress { .. }) => continue,
-                Err(err) => return Some((E::from_client_error(err), None)),
-            }
+        match events.next().await? {
+            Ok(e) => Some((e, Some(events))),
+            Err(err) => Some((E::from_client_error(err), None)),
+        }
+    }))
+}
+
+/// [`into_events`] on wasm32, where a stream need not be `Send`.
+#[cfg(target_arch = "wasm32")]
+pub fn into_events<'a, E, S>(events: S) -> BoxStream<'a, E>
+where
+    E: FromClientError + 'a,
+    S: Stream<Item = Result<E, ClientError>> + Unpin + 'a,
+{
+    Box::pin(stream::unfold(Some(events), |state| async move {
+        let mut events = state?;
+        match events.next().await? {
+            Ok(e) => Some((e, Some(events))),
+            Err(err) => Some((E::from_client_error(err), None)),
         }
     }))
 }
@@ -227,14 +245,21 @@ mod tests {
             COUNT,
             vec![
                 StreamItem::Data { metadata: None, content_type: None, content: serde_json::json!({"N": 1}) },
-                StreamItem::Progress { metadata: None, message: "half".into(), percentage: Some(50.0) },
+                StreamItem::Progress { metadata: None, content_type: None, content: serde_json::json!({"message": "half", "percentage": 50.0}) },
                 StreamItem::Data { metadata: None, content_type: None, content: serde_json::json!({"N": 2}) },
-                StreamItem::Error { metadata: None, message: "no".into(), code: None, recoverable: false },
+                StreamItem::Error {
+                    metadata: None,
+                    recoverable: false,
+                    message: Some("no".into()),
+                    code: None,
+                    error: crate::RemoteError::Execution { message: "no".into() },
+                    fields: Default::default(),
+                },
                 StreamItem::Data { metadata: None, content_type: None, content: serde_json::json!({"N": 3}) },
             ],
         );
-        let s = into_events::<Ev>(decode(owned_call(Arc::new(t), COUNT, serde_json::json!({}))));
+        let s = into_events::<Ev, _>(decode::<Ev>(owned_call(Arc::new(t), COUNT, serde_json::json!({}))));
         let got: Vec<Ev> = futures::executor::block_on(s.collect());
-        assert_eq!(got, vec![Ev::N(1), Ev::N(2), Ev::Error("remote error: no".into())]);
+        assert_eq!(got, vec![Ev::N(1), Ev::N(2), Ev::Error("remote error: execution failed: no".into())]);
     }
 }

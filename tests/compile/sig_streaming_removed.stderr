@@ -1,0 +1,5 @@
+error: `streaming` is removed: cardinality comes from the return type — remove `streaming`. A method returning `-> T` or `-> Result<T, E>` yields one item; one returning `-> impl Stream<Item = ...>` yields many.
+ --> tests/compile/sig_streaming_removed.rs:9:29
+  |
+9 |     #[plexus_macros::method(streaming)]
+  |                             ^^^^^^^^^

@@ -201,7 +201,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let bodiless = contract::take_bodiless(&mut input_impl);
 
     // MACRO-13: under the name rule every `pub async fn` on `&self`
-    // returning `impl Stream<Item = E>` is a wire method, unless the
+    // returning a signature form (RETURNS-8) is a wire method, unless the
     // activation says `methods = marked`.
     let all_public_methods = names.new_form && !args.methods_marked;
 
@@ -339,11 +339,19 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             ),
         ));
     }
-    let trait_ident: Option<syn::Ident> = names.trait_ident.clone();
-    let self_callable = match &trait_ident {
-        Some(t) => contract::check_trait_methods(&methods, t)?,
-        None => true,
+    // RETURNS-36: the trait is emitted when the activation's methods have
+    // its shape (every one `impl Stream<Item = E>` of one `E`); a contract
+    // must have it, an activation that gives its methods their own return
+    // types has its client and aggregate alone.
+    let trait_ident: Option<syn::Ident> = match &names.trait_ident {
+        Some(t) => match contract::trait_shape(&methods, t) {
+            Ok(()) => Some(t.clone()),
+            Err(e) if contract_mode => return Err(e),
+            Err(_) => None,
+        },
+        None => None,
     };
+    let self_callable = contract::self_callable(&methods);
     if contract_mode && !self_callable {
         let m = methods.iter().find(|m| contract::injected(m).is_some()).unwrap();
         return Err(syn::Error::new(
@@ -809,7 +817,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         TokenStream::new()
     };
     let client_impl = match &client_path {
-        Some(path) => client::generate(&names.client_ident, &namespace, &methods, &child_methods, path, names.new_form)?,
+        Some(path) => client::generate(&names.client_ident, &namespace, &methods, &child_methods, path)?,
         None => TokenStream::new(),
     };
 
