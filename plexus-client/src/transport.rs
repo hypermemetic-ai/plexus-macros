@@ -1,9 +1,10 @@
 //! The transport seam: one small trait every wire implementation satisfies,
 //! and the strongly-typed method reference the generated client hands it.
 
-use crate::envelope::StreamItem;
+use crate::envelope::{RawItem, StreamItem};
 use crate::error::TransportError;
 use futures_core::Stream;
+use futures_util::StreamExt;
 use serde_json::Value;
 use std::fmt;
 use std::pin::Pin;
@@ -22,6 +23,16 @@ pub type ItemStream<'a> =
 /// `Send`-bound rationale.
 #[cfg(target_arch = "wasm32")]
 pub type ItemStream<'a> = Pin<Box<dyn Stream<Item = Result<StreamItem, TransportError>> + 'a>>;
+
+/// A boxed stream of a typed client's items ([`RawItem`], PERF.115-36). The
+/// same `Send` bound as [`ItemStream`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type RawItemStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<RawItem, TransportError>> + Send + 'a>>;
+
+/// A boxed stream of a typed client's items. See the non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub type RawItemStream<'a> = Pin<Box<dyn Stream<Item = Result<RawItem, TransportError>> + 'a>>;
 
 /// A fully qualified Plexus method — the activation namespace and the method
 /// name, kept as separate fields because the transports need them
@@ -136,6 +147,16 @@ pub fn join_path(parent: &'static str, segment: &'static str) -> &'static str {
 /// has already built the by-name object the schema expects.
 pub trait Transport {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_>;
+
+    /// [`call`](Self::call) for a typed client (PERF.115-36): the same items,
+    /// each data item's content still the wire's JSON, which
+    /// [`decode_raw`](crate::decode_raw) decodes straight into the method's
+    /// event. The default is `call`'s items, each content the `Value` it
+    /// carries; a transport that has the wire's text (`WsTransport`) hands it
+    /// over unread.
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        Box::pin(self.call(method, params).map(|item| item.map(RawItem::from)))
+    }
 }
 
 /// So a client can be handed `&T`, `Arc<T>`, `Box<T>`, … interchangeably.
@@ -143,11 +164,19 @@ impl<T: Transport + ?Sized> Transport for &T {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
     }
+
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        (**self).call_raw(method, params)
+    }
 }
 
 impl<T: Transport + ?Sized> Transport for Box<T> {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
+    }
+
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        (**self).call_raw(method, params)
     }
 }
 
@@ -155,10 +184,18 @@ impl<T: Transport + ?Sized> Transport for std::rc::Rc<T> {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
     }
+
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        (**self).call_raw(method, params)
+    }
 }
 
 impl<T: Transport + ?Sized> Transport for std::sync::Arc<T> {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
+    }
+
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        (**self).call_raw(method, params)
     }
 }

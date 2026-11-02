@@ -89,11 +89,10 @@ mod backend;
 #[path = "web.rs"]
 mod backend;
 
-use crate::envelope::StreamItem;
 use crate::error::TransportError;
-use crate::transport::{ItemStream, MethodRef, Transport};
-use futures_util::{stream, StreamExt};
-use registry::{subscribe_frame, Items, Registry, SubSlot};
+use crate::transport::{ItemStream, MethodRef, RawItemStream, Transport};
+use futures_util::{stream, Stream, StreamExt};
+use registry::{subscribe_frame, Delivered, Items, Registry, SubSlot};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -214,10 +213,10 @@ impl WsTransport {
 
     /// Write the subscribe frame and hand back what the returned stream
     /// needs to drain it.
-    fn subscribe(&self, method: MethodRef, params: Value) -> Result<Awaiting, TransportError> {
+    fn subscribe(&self, method: MethodRef, params: Value, raw: bool) -> Result<Awaiting, TransportError> {
         let request_id = self.registry.next_request_id();
         let slot = SubSlot::new();
-        let reply = self.registry.register_pending(request_id, slot.clone())?;
+        let reply = self.registry.register_pending(request_id, slot.clone(), raw)?;
 
         let frame = subscribe_frame(
             request_id,
@@ -246,14 +245,27 @@ impl WsTransport {
 
 impl Transport for WsTransport {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
+        Box::pin(self.items(method, params, false).map(|item| item.map(Delivered::into_item)))
+    }
+
+    /// The items with their content as the wire's text, for a typed client
+    /// (PERF.115-36).
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        Box::pin(self.items(method, params, true).map(|item| item.map(Delivered::into_raw)))
+    }
+}
+
+impl WsTransport {
+    /// One call's items, as `raw` says it reads them.
+    fn items(&self, method: MethodRef, params: Value, raw: bool) -> impl Stream<Item = Result<Delivered, TransportError>> + '_ {
         // The subscribe goes out NOW, not on first poll — see the module
         // docs: `watch` then mutate is the shape every menger client uses.
-        let start = match self.subscribe(method, params) {
+        let start = match self.subscribe(method, params, raw) {
             Ok(awaiting) => CallState::Awaiting(awaiting),
-            Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+            Err(e) => CallState::Failed(e),
         };
 
-        Box::pin(stream::unfold(start, |state| async move {
+        stream::unfold(start, |state| async move {
             match state {
                 CallState::Awaiting(awaiting) => match awaiting.established().await {
                     Err(e) => Some((Err(e), CallState::Ended)),
@@ -266,9 +278,10 @@ impl Transport for WsTransport {
                     .next_item()
                     .await
                     .map(|item| (item, CallState::Active(active))),
+                CallState::Failed(e) => Some((Err(e), CallState::Ended)),
                 CallState::Ended => None,
             }
-        }))
+        })
     }
 }
 
@@ -277,6 +290,8 @@ impl Transport for WsTransport {
 enum CallState {
     Awaiting(Awaiting),
     Active(Active),
+    /// The subscribe could not be written: one error, then the end.
+    Failed(TransportError),
     Ended,
 }
 
@@ -310,7 +325,7 @@ struct Active {
 }
 
 impl Active {
-    async fn next_item(&mut self) -> Option<Result<StreamItem, TransportError>> {
+    async fn next_item(&mut self) -> Option<Result<Delivered, TransportError>> {
         match self.items.next().await {
             // `done` / `error` end the subscription server-side, so there is
             // nothing left to unsubscribe from.

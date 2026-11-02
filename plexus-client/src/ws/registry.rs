@@ -7,7 +7,7 @@
 //! (`web_sys::WebSocket`) backends share one protocol implementation
 //! instead of two that drift.
 
-use crate::envelope::StreamItem;
+use crate::envelope::{RawItem, StreamItem};
 use crate::error::TransportError;
 use futures_channel::{mpsc, oneshot};
 use serde_json::{json, Value};
@@ -15,9 +15,43 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// An item as a call reads it: a [`StreamItem`] for `call`, a [`RawItem`]
+/// for `call_raw`, a typed client's (PERF.115-36). Which one is the call's
+/// own, fixed when it subscribes.
+#[derive(Debug)]
+pub(crate) enum Delivered {
+    Item(StreamItem),
+    Raw(RawItem),
+}
+
+impl Delivered {
+    pub(crate) fn is_terminal(&self) -> bool {
+        match self {
+            Delivered::Item(item) => item.is_terminal(),
+            Delivered::Raw(item) => item.is_terminal(),
+        }
+    }
+
+    /// The item a `call` reads. A call reads one kind only.
+    pub(crate) fn into_item(self) -> StreamItem {
+        match self {
+            Delivered::Item(item) => item,
+            Delivered::Raw(_) => unreachable!("a call is handed the items it asked for"),
+        }
+    }
+
+    /// The item a `call_raw` reads.
+    pub(crate) fn into_raw(self) -> RawItem {
+        match self {
+            Delivered::Raw(item) => item,
+            Delivered::Item(item) => RawItem::from(item),
+        }
+    }
+}
+
 /// The receiving half of one subscription's item channel.
-pub(crate) type Items = mpsc::UnboundedReceiver<Result<StreamItem, TransportError>>;
-type ItemsTx = mpsc::UnboundedSender<Result<StreamItem, TransportError>>;
+pub(crate) type Items = mpsc::UnboundedReceiver<Result<Delivered, TransportError>>;
+type ItemsTx = mpsc::UnboundedSender<Result<Delivered, TransportError>>;
 
 /// One call's cancellation state, shared between the caller's stream and the
 /// connection's reader.
@@ -92,6 +126,8 @@ impl SubSlot {
 struct Pending {
     slot: Arc<SubSlot>,
     waiter: oneshot::Sender<Result<Items, TransportError>>,
+    /// The call reads [`RawItem`]s (a typed client).
+    raw: bool,
 }
 
 /// A live subscription: where its items go, and its cancellation state.
@@ -105,6 +141,8 @@ struct Pending {
 struct Sub {
     sink: ItemsTx,
     slot: Arc<SubSlot>,
+    /// The call reads [`RawItem`]s (a typed client).
+    raw: bool,
 }
 
 #[derive(Debug, Default)]
@@ -173,13 +211,14 @@ impl Registry {
         &self,
         request_id: u64,
         slot: Arc<SubSlot>,
+        raw: bool,
     ) -> Result<oneshot::Receiver<Result<Items, TransportError>>, TransportError> {
         let mut state = self.lock();
         if let Some(err) = &state.closed {
             return Err(err.clone());
         }
         let (waiter, reply) = oneshot::channel();
-        state.pending.insert(request_id, Pending { slot, waiter });
+        state.pending.insert(request_id, Pending { slot, waiter, raw });
         Ok(reply)
     }
 
@@ -266,6 +305,7 @@ impl Registry {
             Sub {
                 sink,
                 slot: pending.slot.clone(),
+                raw: pending.raw,
             },
         );
         drop(state);
@@ -302,10 +342,10 @@ impl Registry {
     fn on_notification(&self, subscription: &Value, frame: &Value, text: &str) {
         let key = key_of(subscription);
         let mut state = self.lock();
-        let Some((sink, slot)) = state
+        let Some((sink, slot, raw)) = state
             .subs
             .get(&key)
-            .map(|sub| (sub.sink.clone(), sub.slot.clone()))
+            .map(|sub| (sub.sink.clone(), sub.slot.clone(), sub.raw))
         else {
             // An id no subscription has: a call still waiting for its reply
             // may be about to learn it (spec/02 rule 4), so it is kept while
@@ -328,6 +368,7 @@ impl Registry {
         match serde_json::from_value::<StreamItem>(payload) {
             Ok(item) => {
                 let terminal = item.is_terminal();
+                let item = if raw { Delivered::Raw(RawItem::from(item)) } else { Delivered::Item(item) };
                 let _ = sink.unbounded_send(Ok(item));
                 if terminal {
                     // The server ended it; there is nothing left to cancel,
@@ -443,7 +484,12 @@ mod tests {
     /// A subscribe written as request `id` and answered with `subscription`:
     /// the channel its items arrive on.
     fn subscribed(registry: &Registry, id: u64, subscription: &str) -> Items {
-        let reply = registry.register_pending(id, SubSlot::new()).unwrap();
+        subscribed_as(registry, id, subscription, false)
+    }
+
+    /// The same, for a call that reads [`RawItem`]s (`raw`) or [`StreamItem`]s.
+    fn subscribed_as(registry: &Registry, id: u64, subscription: &str, raw: bool) -> Items {
+        let reply = registry.register_pending(id, SubSlot::new(), raw).unwrap();
         let answer = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{subscription}}}"#);
         assert!(registry.on_text(&answer).is_none());
         reply.now_or_never().expect("answered").expect("not dropped").expect("subscribed")
@@ -459,7 +505,12 @@ mod tests {
 
     /// Everything the channel holds now.
     fn drain(items: &mut Items) -> Vec<Result<StreamItem, TransportError>> {
-        std::iter::from_fn(|| items.next().now_or_never().flatten()).collect()
+        std::iter::from_fn(|| items.next().now_or_never().flatten()).map(|item| item.map(Delivered::into_item)).collect()
+    }
+
+    /// Everything a typed call's channel holds now.
+    fn drain_raw(items: &mut Items) -> Vec<Result<RawItem, TransportError>> {
+        std::iter::from_fn(|| items.next().now_or_never().flatten()).map(|item| item.map(Delivered::into_raw)).collect()
     }
 
     /// spec/03: a client SHOULD treat an item `type` it does not know as
@@ -488,7 +539,7 @@ mod tests {
     #[test]
     fn an_item_before_its_subscription_id_is_kept_until_the_id_arrives() {
         let registry = Registry::new(Arc::from("kit"));
-        let reply = registry.register_pending(1, SubSlot::new()).unwrap();
+        let reply = registry.register_pending(1, SubSlot::new(), false).unwrap();
         assert!(registry.on_text(&note("7", DATA)).is_none());
         assert!(registry.on_text(r#"{"jsonrpc":"2.0","id":1,"result":7}"#).is_none());
         assert!(registry.on_text(&note("7", DONE)).is_none());
@@ -509,6 +560,64 @@ mod tests {
         assert!(registry.on_text(&note("8", DONE)).is_none());
         let got = drain(&mut items);
         assert!(matches!(got[..], [Ok(StreamItem::Done { .. })]), "{got:?}");
+    }
+
+    /// PERF.115-36: a typed call is handed its data item's content as the
+    /// wire's text, to decode straight into its event, and its content type.
+    #[test]
+    fn a_typed_call_is_handed_the_content_as_the_wires_text() {
+        let registry = Registry::new(Arc::from("kit"));
+        let mut items = subscribed_as(&registry, 1, "7", true);
+        for item in [DATA, DONE] {
+            assert!(registry.on_text(&note("7", item)).is_none());
+        }
+        match &drain_raw(&mut items)[..] {
+            [Ok(RawItem::Data { content, content_type }), Ok(RawItem::Done)] => {
+                assert_eq!(content.as_text(), Some(r#"{"type":"said","text":"hi"}"#));
+                assert_eq!(content_type.as_deref(), Some("kit.say"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A typed call and a call that reads `StreamItem`s read the same items
+    /// from the same frames.
+    #[test]
+    fn a_typed_call_and_a_value_call_read_the_same_items() {
+        let registry = Registry::new(Arc::from("kit"));
+        let mut values = subscribed_as(&registry, 1, "7", false);
+        let mut raws = subscribed_as(&registry, 2, "\"s-8\"", true);
+        let items = [
+            DATA,
+            r#"{"type":"data","content":{"n":[1,2.5,"x\"y"]},"content_type":"kit.n"}"#,
+            r#"{"type":"progress","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"half","percentage":50.0}"#,
+            r#"{"type":"progress","message":"none yet"}"#,
+            r#"{"type":"request","requestId":"r-1","requestData":{"type":"confirm"},"timeoutMs":30000}"#,
+            r#"{"type":"error","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"no","code":"forbidden","recoverable":true}"#,
+        ];
+        for item in items {
+            assert!(registry.on_text(&note("7", item)).is_none());
+            assert!(registry.on_text(&note("\"s-8\"", item)).is_none());
+        }
+        let (values, raws) = (drain(&mut values), drain_raw(&mut raws));
+        assert_eq!(values.len(), items.len(), "{values:?}");
+        assert_eq!(raws.len(), items.len(), "{raws:?}");
+        for (value, raw) in values.into_iter().zip(raws) {
+            match (value.unwrap(), raw.unwrap()) {
+                (StreamItem::Data { content: v, content_type: a, .. }, RawItem::Data { content: r, content_type: b }) => {
+                    assert_eq!(r.into_value().unwrap(), v);
+                    assert_eq!(a.as_deref(), b.as_deref());
+                }
+                (StreamItem::Progress { message: m, percentage: p, .. }, RawItem::Progress { message, percentage }) => {
+                    assert_eq!((m, p), (message, percentage));
+                }
+                (StreamItem::Request { .. }, RawItem::Request) => {}
+                (StreamItem::Error { message: m, code: c, recoverable: r, .. }, RawItem::Error { message, code, recoverable }) => {
+                    assert_eq!((m, c, r), (message, code, recoverable));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     /// What the spec does not excuse stays an error: an item with no `type`,

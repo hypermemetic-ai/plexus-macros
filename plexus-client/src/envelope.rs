@@ -33,8 +33,11 @@
 //! which round-trips every `PlexusStreamItem` variant produced by
 //! `plexus-core` through this type.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Value;
+use std::sync::Arc;
 
 /// Provenance metadata the calling layer stamps onto each item.
 ///
@@ -139,6 +142,108 @@ impl StreamItem {
             | StreamItem::Error { metadata, .. }
             | StreamItem::Done { metadata } => metadata.as_ref(),
             StreamItem::Request { .. } => None,
+        }
+    }
+}
+
+/// An item's content as a typed client reads it (PERF.115-36): the JSON text
+/// the wire carried, decoded straight into the method's event when it is
+/// read, never into a [`Value`] first. A transport that has no text (one in
+/// process, a script) hands over the `Value` it holds.
+#[derive(Debug, Clone)]
+pub struct Content(Repr);
+
+#[derive(Debug, Clone)]
+enum Repr {
+    Text(Box<RawValue>),
+    Value(Value),
+}
+
+impl Content {
+    /// The JSON text the wire carried, when the transport kept it.
+    pub fn as_text(&self) -> Option<&str> {
+        match &self.0 {
+            Repr::Text(text) => Some(text.get()),
+            Repr::Value(_) => None,
+        }
+    }
+
+    /// The content decoded into `E`: from the text, or from the `Value`.
+    pub fn decode<E: DeserializeOwned>(self) -> Result<E, serde_json::Error> {
+        match self.0 {
+            Repr::Text(text) => serde_json::from_str(text.get()),
+            Repr::Value(value) => serde_json::from_value(value),
+        }
+    }
+
+    /// The content as a `Value`, for a caller that wants one.
+    pub fn into_value(self) -> Result<Value, serde_json::Error> {
+        match self.0 {
+            Repr::Text(text) => serde_json::from_str(text.get()),
+            Repr::Value(value) => Ok(value),
+        }
+    }
+}
+
+impl From<Box<RawValue>> for Content {
+    fn from(text: Box<RawValue>) -> Self {
+        Content(Repr::Text(text))
+    }
+}
+
+impl From<Value> for Content {
+    fn from(value: Value) -> Self {
+        Content(Repr::Value(value))
+    }
+}
+
+/// One item of a response stream as a typed client reads it (PERF.115-36):
+/// a [`StreamItem`] whose content is still the wire's JSON ([`Content`]), and
+/// nothing read that a typed decode does not use: no metadata, no request's
+/// data. [`Transport::call_raw`](crate::Transport::call_raw) yields these and
+/// [`decode_raw`](crate::decode_raw) turns them into events; a consumer that
+/// wants the metadata, or answers requests, reads [`StreamItem`]s.
+#[derive(Debug, Clone)]
+pub enum RawItem {
+    /// A payload item: its content, and its `content_type`, which every item
+    /// of a call shares.
+    Data {
+        content_type: Option<Arc<str>>,
+        content: Content,
+    },
+    /// A progress report. Never terminates the stream.
+    Progress { message: String, percentage: Option<f32> },
+    /// An in-band error raised by the service. Terminates the stream.
+    Error {
+        message: String,
+        code: Option<String>,
+        recoverable: bool,
+    },
+    /// A server-to-client request. A typed client has no answer channel and
+    /// skips it.
+    Request,
+    /// Normal end of stream.
+    Done,
+}
+
+impl RawItem {
+    /// `true` for the two variants after which no further item may arrive.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, RawItem::Done | RawItem::Error { .. })
+    }
+}
+
+impl From<StreamItem> for RawItem {
+    fn from(item: StreamItem) -> Self {
+        match item {
+            StreamItem::Data { content_type, content, .. } => RawItem::Data {
+                content_type: content_type.map(Arc::from),
+                content: content.into(),
+            },
+            StreamItem::Progress { message, percentage, .. } => RawItem::Progress { message, percentage },
+            StreamItem::Error { message, code, recoverable, .. } => RawItem::Error { message, code, recoverable },
+            StreamItem::Request { .. } => RawItem::Request,
+            StreamItem::Done { .. } => RawItem::Done,
         }
     }
 }

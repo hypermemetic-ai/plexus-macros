@@ -83,13 +83,13 @@ pub mod watch;
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub mod ws;
 
-pub use contract::{error_events, into_events, owned_call, BoxStream, FromClientError};
-pub use decode::{collect_data, decode, error_stream, EventStream};
-pub use envelope::{StreamItem, StreamMetadata};
+pub use contract::{error_events, into_events, owned_call, owned_call_raw, BoxStream, FromClientError};
+pub use decode::{collect_data, decode, decode_raw, error_stream, EventStream};
+pub use envelope::{Content, RawItem, StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};
 pub use event::ClientEvent;
 pub use memory::MemoryTransport;
-pub use transport::{ItemStream, MethodRef, Transport};
+pub use transport::{ItemStream, MethodRef, RawItemStream, Transport};
 pub use watch::{
     watch, watch_with, Errors, Fallible, StopOnError, Watch, Watched10, Watched11, Watched12, Watched2, Watched3,
     Watched4, Watched5, Watched6, Watched7, Watched8, Watched9, Watching10, Watching11, Watching12, Watching2,

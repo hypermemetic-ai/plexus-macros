@@ -4,10 +4,10 @@
 //! above it is the activation's own types, everything below it is a
 //! [`Transport`](crate::Transport).
 
-use crate::envelope::StreamItem;
+use crate::envelope::{RawItem, StreamItem};
 use crate::error::ClientError;
 use crate::event::ClientEvent;
-use crate::transport::ItemStream;
+use crate::transport::{ItemStream, RawItemStream};
 use futures_core::Stream;
 use futures_util::{stream, StreamExt};
 use serde::de::DeserializeOwned;
@@ -108,6 +108,57 @@ where
             }
         }
     }))
+}
+
+/// [`decode`] for a typed client's items (PERF.115-36): the same mapping,
+/// each data item's content decoded straight from the wire's JSON into `E`,
+/// never into a `Value` first. What a generated client calls, on
+/// [`Transport::call_raw`](crate::Transport::call_raw)'s items. A decode error
+/// says what [`decode`] says of the same content.
+pub fn decode_raw<'a, E>(items: RawItemStream<'a>) -> EventStream<'a, E>
+where
+    E: DeserializeOwned + 'a,
+{
+    Box::pin(stream::unfold(Some(items), |state| async move {
+        let mut items = state?;
+        loop {
+            return match items.next().await? {
+                Err(e) => Some((Err(ClientError::Transport(e)), None)),
+                Ok(RawItem::Done) => None,
+                Ok(RawItem::Data { content, content_type }) => Some(match content.decode::<E>() {
+                    Ok(event) => (Ok(ClientEvent::Data(event)), Some(items)),
+                    Err(e) => (
+                        Err(ClientError::Decode {
+                            content_type: content_type.map(|c| c.to_string()),
+                            message: message_of(&e),
+                        }),
+                        None,
+                    ),
+                }),
+                Ok(RawItem::Progress { message, percentage }) => {
+                    Some((Ok(ClientEvent::Progress { message, percentage }), Some(items)))
+                }
+                Ok(RawItem::Error { message, code, recoverable }) => {
+                    Some((Err(ClientError::Remote { message, code, recoverable }), None))
+                }
+                Ok(RawItem::Request) => continue,
+            };
+        }
+    }))
+}
+
+/// A decode error as [`decode`] words it: serde_json's message, without the
+/// position a decode from text adds to it.
+fn message_of(e: &serde_json::Error) -> String {
+    let message = e.to_string();
+    if e.line() == 0 {
+        return message;
+    }
+    let at = format!(" at line {} column {}", e.line(), e.column());
+    match message.strip_suffix(&at) {
+        Some(bare) => bare.to_owned(),
+        None => message,
+    }
 }
 
 /// A typed stream that yields exactly one error and then ends.
