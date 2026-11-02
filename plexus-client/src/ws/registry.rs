@@ -125,6 +125,9 @@ pub(crate) struct Registry {
     state: Mutex<State>,
 }
 
+/// The item `type`s this client reads (spec/03); any other is skipped.
+const KINDS: [&str; 5] = ["data", "progress", "error", "request", "done"];
+
 /// The routing key for a subscription id.
 ///
 /// Rendered as JSON text rather than "the string if it is one", so a server
@@ -274,6 +277,11 @@ impl Registry {
         drop(state);
 
         let payload = frame.pointer("/params/result").cloned().unwrap_or(Value::Null);
+        // spec/03: an item of a `type` this client does not know is not
+        // terminal; it is skipped, and the stream goes on.
+        if payload.get("type").and_then(Value::as_str).is_some_and(|kind| !KINDS.contains(&kind)) {
+            return;
+        }
         match serde_json::from_value::<StreamItem>(payload) {
             Ok(item) => {
                 let terminal = item.is_terminal();
