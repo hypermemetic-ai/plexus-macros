@@ -684,3 +684,30 @@ fn a_fault_inside_a_value_is_named_as_a_struct_is_told() {
     assert_eq!(printed(serde_json::from_str::<S>(json)), Err("invalid type: integer `5`, expected string or map".into()));
     assert_eq!(printed(serde_json::from_str::<F>(json)), printed(serde_json::from_str::<Holder>(r#"{"status":5}"#)));
 }
+
+twins! { united:
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum United {
+        Marked { mark: () },
+    }
+}
+
+/// A field of type `()` written `{}`: serde's buffer kept it as an empty map,
+/// which it then took for a unit; read straight from the text it is refused,
+/// as serde_json refuses it for a struct holding that field. (No house event
+/// has a `()` field.)
+#[test]
+fn a_unit_written_as_an_object_is_refused_as_a_struct_is_told() {
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Holder {
+        mark: (),
+    }
+    type S = united::serde_reads::United;
+    type F = united::type_first::United;
+    both_read::<S, F>(r#"{"type":"marked","mark":null}"#);
+    let json = r#"{"type":"marked","mark":{}}"#;
+    assert_eq!(printed(serde_json::from_str::<S>(json)), Ok("Marked { mark: () }".into()));
+    assert_eq!(printed(serde_json::from_str::<F>(json)), printed(serde_json::from_str::<Holder>(r#"{"mark":{}}"#)));
+    assert!(printed(serde_json::from_str::<F>(json)).is_err());
+}
