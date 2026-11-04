@@ -310,7 +310,7 @@ async fn with_progress_on_a_method_without_progress_yields_only_items() {
 async fn every_call_failure_is_a_typed_remote_error() {
     let errors = frames("errors.jsonl");
     let transport = InProcessTransport::new(ConformanceActivation);
-    let mut seen: BTreeMap<&'static str, RemoteError> = BTreeMap::new();
+    let mut seen: BTreeMap<String, RemoteError> = BTreeMap::new();
 
     let error_calls: Vec<Call> = calls().into_iter().filter(|c| c.line.is_some()).collect();
     assert_eq!(error_calls.len(), 3);
@@ -330,10 +330,10 @@ async fn every_call_failure_is_a_typed_remote_error() {
             call.method,
             call.params
         );
-        seen.insert(expected.kind(), expected.clone());
+        seen.insert(expected.kind().to_string(), expected.clone());
     }
     assert_eq!(
-        seen.keys().copied().collect::<Vec<_>>(),
+        seen.keys().map(String::as_str).collect::<Vec<_>>(),
         ["invalid_params", "method_not_found"],
         "the kinds errors.jsonl covers"
     );
