@@ -5,13 +5,14 @@
 use futures::{Stream, TryStreamExt};
 use plexus_client::{ClientError, MemoryTransport};
 
+#[derive(Clone)]
 pub struct CounterActivation;
 
 #[plexus_macros::activation]
 impl CounterActivation {
     #[plexus_macros::method]
-    async fn count(&self, to: u32) -> impl Stream<Item = u32> + Send + 'static {
-        futures::stream::iter(1..=to)
+    async fn count(&self, to: u32) -> impl Stream<Item = String> + Send + 'static {
+        futures::stream::iter((1..=to).map(|n| n.to_string()))
     }
 
     #[plexus_macros::method]
@@ -21,7 +22,7 @@ impl CounterActivation {
 }
 
 async fn use_it(client: &CounterClient<MemoryTransport>) -> Result<(), ClientError> {
-    let ticks: Vec<u32> = client.count(3).try_collect::<Vec<_>>().await?;
+    let ticks: Vec<String> = client.count(3).try_collect::<Vec<_>>().await?;
     let total: Result<u32, String> = client.total().await?;
     let _ = (ticks, total);
     Ok(())

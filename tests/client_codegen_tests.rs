@@ -71,6 +71,34 @@ pub enum ImportError {
     Unreadable { chunk: u32 },
 }
 
+// RETURNS-36 (review #8): the activation's trait is always emitted and its
+// client implements it, so a client failure becomes each method's item.
+impl plexus_client::FromClientError for Health {
+    fn from_client_error(e: ClientError) -> Self {
+        Health { version: e.to_string(), ticket_count: 0 }
+    }
+}
+impl plexus_client::FromClientError for Ticket {
+    fn from_client_error(e: ClientError) -> Self {
+        Ticket { id: String::new(), title: e.to_string(), parent: None }
+    }
+}
+impl plexus_client::FromClientError for GetError {
+    fn from_client_error(e: ClientError) -> Self {
+        GetError::NotFound { id: e.to_string() }
+    }
+}
+impl plexus_client::FromClientError for WatchError {
+    fn from_client_error(_: ClientError) -> Self {
+        WatchError::Lagged { missed: 0 }
+    }
+}
+impl plexus_client::FromClientError for ImportError {
+    fn from_client_error(_: ClientError) -> Self {
+        ImportError::Unreadable { chunk: 0 }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct TicketsActivation;
 

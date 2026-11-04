@@ -604,8 +604,8 @@ impl DriverActivation {
 |---|---|
 | the trait, always | every activation has one; a type not named `…Activation` names it with `trait = "Bar"` (which also names the client `BarClient` and, absent `namespace`, the namespace `bar`). Without either it does not compile — except an activation written before MACRO-13, which says its `namespace`: it expands as it did, with a deprecation warning asking for the rename |
 | wire methods | every `pub async fn` on `&self` returning `impl Stream<Item = E>`, no `#[method]` needed (it stays for its overrides); a `pub async fn` on `&self` returning anything else is a compile error; `methods = marked` restores the `#[method]`-only rule |
-| one event type | the trait's methods yield one `E` across the activation |
-| the client | emitted whenever the crate depends on `plexus-client`, no flag (`client` is accepted with a deprecation warning); its trait impl yields a `ClientError` as `E::from_client_error(err)` and ends, so `E: plexus_client::FromClientError` (`String` has it) |
+| each method's own type | the trait's methods are the activation's, each under its own return type, boxed: `-> T` / `-> Result<T, E>` as `BoxFuture<'static, …>`, a stream form as `BoxStream<'static, item>` (RETURNS-36) |
+| the client | emitted whenever the crate depends on `plexus-client`, no flag (`client` is accepted with a deprecation warning); its trait impl yields a `ClientError` as the method's item (`E::from_client_error(err)`, ending a stream), so each item type is `plexus_client::FromClientError` (`String` has it; a `Result<T, E>` has it when `E` does, a `Progress<T, P>` when `T` does) |
 | injected parameters | a method taking `auth`, `reach`, `#[from_auth]`, `#[activation_param]` or a bidirectional `ctx` is on the trait with what a caller passes; the client implements the trait and the activation does not (it has no caller to take them from) |
 | the `server` feature | a crate whose manifest declares `server` gets the server half under `#[cfg(feature = "server")]`; `server_cfg` overrides; the trait and the client are never gated |
 | a contract | every wire method bodiless (`pub async fn f(&self) -> impl Stream<…>;`) and no struct written: the macro emits `pub struct FooActivation<D: Foo>(Arc<D>)`, delegating, and `Foo::server(self)`, so `hub.register(Local::new().server())` serves an implementation and `hub.register(FooClient::new(t).server())` a remote one as a proxy. A mix of bodied and bodiless is refused at the first bodiless method |
@@ -931,11 +931,9 @@ Bidirectional methods, `#[child]` list/search methods, `#[activation_param]`
 
 On `impl FooActivation` the stem names the namespace (`foo`), the trait
 (`trait Foo`) and the client (`FooClient<T>`); `namespace = "..."` overrides
-the namespace, `trait = "..."` the stem. The trait carries one event type
-across the activation (`fn m(&self, ..) -> BoxStream<'static, E>`), so it is
-emitted when every wire method is `impl Stream<Item = E>` of one `E`; an
-activation that gives its methods their own return types has its client and
-its aggregate `{Ns}Event` alone (RETURNS-36).
+the namespace, `trait = "..."` the stem. The trait is always emitted, each
+method in it under its own return type (RETURNS-36), beside the client and
+its aggregate `{Ns}Event`.
 
 ### `#[plexus_macros::child]` / `#[plexus_macros::child(list = "...", search = "...", forward = "...")]`
 

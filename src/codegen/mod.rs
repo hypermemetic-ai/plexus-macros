@@ -339,18 +339,10 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             ),
         ));
     }
-    // RETURNS-36: the trait is emitted when the activation's methods have
-    // its shape (every one `impl Stream<Item = E>` of one `E`); a contract
-    // must have it, an activation that gives its methods their own return
-    // types has its client and aggregate alone.
-    let trait_ident: Option<syn::Ident> = match &names.trait_ident {
-        Some(t) => match contract::trait_shape(&methods, t) {
-            Ok(()) => Some(t.clone()),
-            Err(e) if contract_mode => return Err(e),
-            Err(_) => None,
-        },
-        None => None,
-    };
+    // MACRO-13 (`always`, the owner, 2026-10-16): every activation the name
+    // rule names has its trait — RETURNS-36: each method in it under its own
+    // return type, so every signature form is in it.
+    let trait_ident: Option<syn::Ident> = names.trait_ident.clone();
     let self_callable = contract::self_callable(&methods);
     if contract_mode && !self_callable {
         let m = methods.iter().find(|m| contract::injected(m).is_some()).unwrap();
@@ -849,8 +841,9 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let mut trait_server_items = TokenStream::new();
     let mut trait_items = TokenStream::new();
     if let Some(trait_ident) = &trait_ident {
-        let box_stream = contract::box_stream_path(
+        let boxes = contract::boxes(
             client_path.as_ref(),
+            &crate_path,
             args.trait_span.unwrap_or_else(Span::call_site),
         )?;
         trait_items.extend(contract::trait_def(
@@ -858,7 +851,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             &struct_name,
             &resolved_description,
             &methods,
-            &box_stream,
+            &boxes,
             contract_mode,
             server_gate.as_ref(),
         ));
@@ -867,7 +860,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 trait_ident,
                 &struct_name,
                 &methods,
-                &box_stream,
+                &boxes,
             ));
         } else if self_callable {
             trait_server_items.extend(contract::activation_trait_impl(
@@ -877,7 +870,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 &impl_generics,
                 where_clause,
                 &methods,
-                &box_stream,
+                &boxes,
                 &deps,
             ));
         }
@@ -887,6 +880,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 &names.client_ident,
                 &methods,
                 path,
+                &boxes,
             ));
         }
     }

@@ -14,6 +14,7 @@ use futures::StreamExt;
 use plexus_core::plexus::{Activation, PlexusStreamItem};
 
 /// `InfoActivation` → `info`.
+#[derive(Clone)]
 pub struct InfoActivation;
 
 #[plexus_macros::activation]

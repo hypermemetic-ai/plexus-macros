@@ -20,9 +20,9 @@ This file starts at 0.7.0; earlier changes are in the git history.
   `path` and child accessors are kept.
 - The aggregate `{Ns}Event` (`{Ns}Aggregate` when an item type already has
   that name) is derived beside every client.
-- MACRO-13's trait is emitted when every wire method is `impl Stream<Item =
-  E>` of one `E` (its shape); an activation using the other forms has no
-  trait. A contract (bodiless activation) must have the shape.
+- MACRO-13's trait is always emitted, each method under its own return type
+  (`BoxFuture` for a one-item method, `BoxStream` of its item for a stream);
+  its client needs each item type to be `FromClientError`.
 - plexus-client: `StreamItem::Progress { content_type, content }`;
   `StreamItem::Error` gains `error: RemoteError` beside `message`, `code`
   and the flattened spec/05 fields. `RemoteError` adds `TooManyCalls`,

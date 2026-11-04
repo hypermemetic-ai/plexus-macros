@@ -116,7 +116,10 @@ pub mod wire_result;
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub mod ws;
 
-pub use contract::{error_events, into_events, owned_call, BoxStream, FromClientError};
+pub use contract::{
+    error_events, into_events, owned_call, trait_many, trait_one, trait_progress, trait_result_progress, BoxFuture,
+    BoxStream, FromClientError, MaybeSend,
+};
 pub use decode::{decode, decode_result, decode_with_progress};
 pub use envelope::{StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};

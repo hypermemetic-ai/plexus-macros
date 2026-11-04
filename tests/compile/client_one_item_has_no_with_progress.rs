@@ -7,6 +7,7 @@
 
 use plexus_client::MemoryTransport;
 
+#[derive(Clone)]
 pub struct PingerActivation;
 
 #[plexus_macros::activation]
