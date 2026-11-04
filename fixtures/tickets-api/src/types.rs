@@ -11,10 +11,14 @@
 //! variant per method — RETURNS-1 pin 13), so an activation that keeps a
 //! hand-written shared enum renames it first. This fixture keeps one to show
 //! that a 0.6-shaped activation still compiles with the client on.
+//!
+//! PERF.115-43: the event derives `plexus_macros::Deserialize` in place of
+//! serde's, as a house event does, so its generated client (and its wasm32
+//! consumer) reads each item with its `type` first, without serde's buffer.
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, plexus_macros::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TicketEvent {
     Health {
