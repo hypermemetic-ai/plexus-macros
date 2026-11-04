@@ -1086,6 +1086,54 @@ What the macro emits (consumed downstream for schema + redaction):
 
 `#[derive(Credentials)]` cannot be applied to a union.
 
+### `#[derive(plexus_macros::Deserialize)]` — a house event read with its `type` first
+
+An internally tagged event's `Deserialize`, written where serde's goes (PERF.115-43):
+
+```rust
+#[derive(Debug, Clone, serde::Serialize, plexus_macros::Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TicketsEvent {
+    Health { version: String, count: u64 },
+    Ready,
+    Error { message: String },
+}
+```
+
+serde reads an internally tagged enum whole into a private buffer before it reads the tag, then reads
+the variant out of the buffer. This reads the first key: when it is the tag, the tag's value names the
+variant and its fields are read straight from the rest of the object; when it is not, serde reads the
+object as it always has. plexus-core writes `type` first, so a generated client, a hop and a service
+reading another's events all read them without the buffer: a ticket row's decode in a generated client
+fell from 16,312 instructions to 12,011, the event alone from 12,043 to 7,740.
+
+Everything else is serde's. The derive has serde derive the enum twice more beside it
+(`#[serde(remote = …)]`), once as written and once without its tag, so every `#[serde]` attribute
+(`rename_all`, `rename_all_fields`, `rename`, `alias`, `other`, `default`, `skip`, `with`, `flatten`,
+`deny_unknown_fields`, `expecting`) is read by serde's own code:
+
+| the object | read |
+|---|---|
+| `type` first, a struct variant | its fields straight from the object |
+| `type` first, a unit variant | the rest read and dropped, as serde drops it |
+| `type` first, a newtype variant, a flattened field, a variant read `with` a function | by serde's read: the object handed to it again, `type` first |
+| `type` anywhere else, a sequence | by serde's read, as before |
+
+What serde refuses is refused in serde's words: a second `type` wherever it comes, an unknown variant,
+a missing or mistyped field. Two things differ, both because a value is read by the deserializer itself
+rather than out of serde's buffer: a value only the input can carry (a `RawValue`, a map keyed by
+numbers) reaches a variant whose `type` comes first, where serde's buffer refused it; and a fault inside
+a field's value is named as the deserializer names it for a struct holding that field (an enum field
+given a number: `expected value`, not `expected string or map`). Where an object has two faults, the one
+met first is named; serde names a second `type` first. A `serde_json::Value` keeps its keys sorted, so
+`type` comes first there only when its name sorts first; elsewhere a `Value` is read by serde, as before.
+
+It is for an internally tagged enum that is not generic and has no untagged variant (one is tried on the
+whole object once the tagged ones fail, which needs the buffer); anything else is a compile error
+telling you to derive serde's `Deserialize`. Its runtime is plexus-client's
+(`plexus_client::__rt::type_first`), so the deriving crate depends on plexus-client, as every crate with
+a generated client does.
+
 ### `#[derive(StreamEvent)]` — **removed in 0.7**
 
 The derive no longer exists. Item types are plain `Serialize + Deserialize + JsonSchema` types.
