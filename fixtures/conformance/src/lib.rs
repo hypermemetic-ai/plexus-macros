@@ -3,7 +3,7 @@
 //!
 //! Every generator is tested against this one activation: the macro's server
 //! half (RETURNS-8) and client half (RETURNS-9), the Haskell protocol
-//! (RETURNS-12), synapse's IR (RETURNS-13), and hub-codegen's TS and Rust
+//! (RETURNS-12), synapse's IR (RETURNS-13), and service-codegen's TS and Rust
 //! clients (RETURNS-17, RETURNS-18). `expected/` holds what it must produce.
 //! The calls and their params are in `expected/calls.json`; `README.md`
 //! says who round-trips what.

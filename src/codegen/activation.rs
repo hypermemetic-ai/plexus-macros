@@ -738,7 +738,7 @@ pub fn generate(
     // `Activation::plugin_schema(&self.child()).hash`, computed at runtime the
     // way DynamicHub's `plugin_children` does it (it used to be `""`, so a
     // change inside a static child reached no ancestor's hash). It rolls up
-    // into this hub's `children_hash` and `hash`, so a change anywhere below
+    // into this service's `children_hash` and `hash`, so a change anywhere below
     // moves every ancestor's hash and the root's. A static child that is not
     // an `Activation` — a hand-written `ChildRouter` (MACRO-20) — describes
     // nothing, and its hash is `""` as before. The child is

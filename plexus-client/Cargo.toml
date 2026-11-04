@@ -46,7 +46,7 @@ web-sys = { version = "0.3", optional = true, features = [
 # `plexus-client = "0.8"` must get the four-dependency core and nothing else,
 # and `--no-default-features` must have no tokio, jsonrpsee or schemars
 # anywhere in the tree. Both backends expose the same
-# `WsTransport::connect(url, hub)`.
+# `WsTransport::connect(url, service)`.
 [features]
 default = []
 # RETURNS-4: `schemars::JsonSchema` impls for the wire vocabulary (`Note`,

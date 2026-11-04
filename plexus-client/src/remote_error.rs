@@ -1,7 +1,7 @@
 //! The typed, exhaustive vocabulary of call failures.
 //!
 //! A call fails — as opposed to an activation saying no, which is an `err`
-//! item and therefore data — when the hub could not or would not run it:
+//! item and therefore data — when the service could not or would not run it:
 //! no such activation or method, bad params, no credentials, not allowed,
 //! or the method itself blew up. The error frame carries exactly one
 //! [`RemoteError`], and so does the `data` of a JSON-RPC-level rejection.
@@ -56,7 +56,7 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemoteError {
-    /// The hub has no activation by this name.
+    /// The service has no activation by this name.
     ActivationNotFound { activation: String },
 
     /// The activation exists but has no method by this name.

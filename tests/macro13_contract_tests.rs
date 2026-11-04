@@ -168,11 +168,11 @@ mod own_types {
 
     #[tokio::test]
     async fn each_form_is_served_through_the_contract() {
-        let hub = DynamicHub::new("svc").register(Impl.server());
-        assert_eq!(data(&hub, "forms.ping", json!({"text": "x"})).await, vec![json!("pong x")]);
-        assert_eq!(data(&hub, "forms.half", json!({"n": 4})).await, vec![json!({"ok": 2})]);
-        assert_eq!(data(&hub, "forms.half", json!({"n": 3})).await, vec![json!({"err": "3 is odd"})]);
-        assert_eq!(data(&hub, "forms.upto", json!({"n": 2})).await, vec![json!("1"), json!("2")]);
+        let service = DynamicHub::new("svc").register(Impl.server());
+        assert_eq!(data(&service, "forms.ping", json!({"text": "x"})).await, vec![json!("pong x")]);
+        assert_eq!(data(&service, "forms.half", json!({"n": 4})).await, vec![json!({"ok": 2})]);
+        assert_eq!(data(&service, "forms.half", json!({"n": 3})).await, vec![json!({"err": "3 is odd"})]);
+        assert_eq!(data(&service, "forms.upto", json!({"n": 2})).await, vec![json!("1"), json!("2")]);
         // … and the client, through the trait.
         let client = FormsClient::new(InProcessTransport::new(Impl.server()));
         assert_eq!(Forms::ping(&client, "y".into()).await, "pong y");

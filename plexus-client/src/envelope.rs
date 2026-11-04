@@ -92,7 +92,7 @@ pub enum StreamItem {
         content: Value,
     },
 
-    /// An **in-band** call failure reported by the hub — as opposed to a
+    /// An **in-band** call failure reported by the service — as opposed to a
     /// [`crate::TransportError`], which is the connection failing. Typed:
     /// its [`RemoteError`]'s `Display` is the human line. Terminates the
     /// stream.

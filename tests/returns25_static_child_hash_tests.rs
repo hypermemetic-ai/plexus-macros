@@ -7,8 +7,8 @@
 //! (`Activation::plugin_schema(&child).hash`), which rolls up into the
 //! parent's `children_hash` and `hash`.
 //!
-//! The fixture has hyperforge's shape: a top hub (`forge`) with two static
-//! children — `repo`, itself a hub over the leaf `images`, and `build`, a
+//! The fixture has hyperforge's shape: a top service (`forge`) with two static
+//! children — `repo`, itself a service over the leaf `images`, and `build`, a
 //! `const fn` accessor — served under a DynamicHub root. Two versions differ
 //! only in a field of `images.list`'s item, two static levels down.
 
@@ -49,7 +49,7 @@ mod v1 {
     use crate::prelude::*;
     use crate::item::v1::Item;
 
-    /// A leaf two static levels below the root hub: its one method's item
+    /// A leaf two static levels below the root service: its one method's item
     /// is the type that changes between versions.
     #[derive(Clone, Default)]
     pub struct Images;
@@ -76,7 +76,7 @@ mod v1 {
         }
     }
 
-    /// A hub with one static child (hyperforge's `RepoHub` → `images`).
+    /// A service with one static child (hyperforge's `RepoHub` → `images`).
     #[derive(Clone, Default)]
     pub struct Repo;
 
@@ -95,7 +95,7 @@ mod v1 {
         }
     }
 
-    /// The top hub (hyperforge's `HyperforgeHub`): two static children, one
+    /// The top service (hyperforge's `HyperforgeHub`): two static children, one
     /// of them a `const fn` with an attribute of its own, as hyperforge's
     /// `build` is.
     #[derive(Clone, Default)]
@@ -130,7 +130,7 @@ mod v2 {
     use crate::prelude::*;
     use crate::item::field_added::Item;
 
-    /// A leaf two static levels below the root hub: its one method's item
+    /// A leaf two static levels below the root service: its one method's item
     /// is the type that changes between versions.
     #[derive(Clone, Default)]
     pub struct Images;
@@ -157,7 +157,7 @@ mod v2 {
         }
     }
 
-    /// A hub with one static child (hyperforge's `RepoHub` → `images`).
+    /// A service with one static child (hyperforge's `RepoHub` → `images`).
     #[derive(Clone, Default)]
     pub struct Repo;
 
@@ -176,7 +176,7 @@ mod v2 {
         }
     }
 
-    /// The top hub (hyperforge's `HyperforgeHub`): two static children, one
+    /// The top service (hyperforge's `HyperforgeHub`): two static children, one
     /// of them a `const fn` with an attribute of its own, as hyperforge's
     /// `build` is.
     #[derive(Clone, Default)]
@@ -213,7 +213,7 @@ fn is_hash16(h: &str) -> bool {
 /// `PluginSchema::children`, where the roll-up reads child hashes from).
 #[allow(deprecated)]
 fn children(schema: &PluginSchema) -> Vec<ChildSummary> {
-    schema.children.clone().expect("a hub lists its children")
+    schema.children.clone().expect("a service lists its children")
 }
 
 fn child_hash(schema: &PluginSchema, name: &str) -> String {
@@ -269,7 +269,7 @@ fn a_field_change_in_a_static_child_moves_every_ancestors_hash() {
     assert_ne!(repo1.children_hash, repo2.children_hash, "repo's children_hash");
     assert_ne!(repo1.hash, repo2.hash, "repo's hash");
 
-    // Its grandparent, the top hub: likewise; its other child did not move.
+    // Its grandparent, the top service: likewise; its other child did not move.
     assert_eq!(forge1.self_hash, forge2.self_hash, "forge's own methods are the same");
     assert_eq!(child_hash(&forge1, "build"), child_hash(&forge2, "build"), "build did not change");
     assert_ne!(child_hash(&forge1, "repo"), child_hash(&forge2, "repo"));

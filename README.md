@@ -787,7 +787,7 @@ consumer with no wire code of its own). Both build for
 | Transport | Where | Status |
 |---|---|---|
 | `MemoryTransport` | `plexus-client` | scripted test double; wasm-safe by construction |
-| `InProcessTransport` | `plexus-core` (`plexus::in_process`) | drives an `Activation` directly — no server; a call it cannot dispatch is the typed error frame a hub would send |
+| `InProcessTransport` | `plexus-core` (`plexus::in_process`) | drives an `Activation` directly — no server; a call it cannot dispatch is the typed error frame a service would send |
 | `WsTransport` | `plexus-client`, feature `ws-native` / `ws-web` | WebSocket JSON-RPC; one connection, subscriptions multiplexed |
 | REST + SSE | — | not yet built |
 
