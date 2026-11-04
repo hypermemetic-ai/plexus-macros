@@ -6,15 +6,13 @@
 //! returning one of RETURNS-8's signature forms is a wire method (`methods =
 //! marked` restores the `#[method]`-only rule).
 //!
-//! RETURNS-36: the trait carries one event type `E` across the activation,
-//! each method `-> BoxStream<'static, E>` — the shape of an activation whose
-//! wire methods are all `impl Stream<Item = E>` of one `E`, which every
-//! activation written before 0.7 has. It is emitted for exactly those (the
-//! owner's `always`, 2026-10-16, for every activation that has the shape);
-//! an activation that gives its methods their own return types (the owner,
-//! 2026-11-02: "each method declared under its own return type") has its
-//! client and its aggregate `{Ns}Event`, and no trait. A contract (a bodiless
-//! activation) is its trait, so it must have the shape. A crate that declares a `server` feature gets its server half gated
+//! The trait is always emitted (the owner, 2026-10-16), each method in it
+//! under its own return type, boxed (RETURNS-36): `-> T` and
+//! `-> Result<T, E>` as `BoxFuture<'static, …>`, every stream form as
+//! `BoxStream<'static, item>` — so every signature form is in it, and an
+//! activation written before 0.7 (`impl Stream<Item = E>` throughout) has
+//! the trait it had. Its client folds a client failure into each method's
+//! item through `FromClientError`. A crate that declares a `server` feature gets its server half gated
 //! on it. A bodiless activation is a contract: the macro emits
 //! `FooActivation<D: Foo>`, delegating to `D`, and `Foo::server(self)`.
 //!
@@ -192,9 +190,10 @@ pub(crate) fn take_bodiless(input_impl: &mut syn::ItemImpl) -> Vec<syn::Ident> {
 }
 
 /// Under the name rule (and not `methods = marked`): is this unmarked method
-/// on the wire? `pub async fn` on `&self` returning one of the six signature
-/// forms (RETURNS-8) is; one returning anything else is refused; any other
-/// shape is a plain method.
+/// on the wire? `pub async fn` on `&self` returning `impl Stream<Item = E>`
+/// is; one returning anything else is refused (MACRO-13's guard — a
+/// one-item method, `-> T`, says so with `#[method]`); any other shape is a
+/// plain method.
 pub(crate) fn is_wire_shape(method: &ImplItemFn) -> syn::Result<bool> {
     let public = matches!(method.vis, Visibility::Public(_));
     let on_ref_self = matches!(
@@ -204,27 +203,25 @@ pub(crate) fn is_wire_shape(method: &ImplItemFn) -> syn::Result<bool> {
     if !(public && method.sig.asyncness.is_some() && on_ref_self) {
         return Ok(false);
     }
-    match classify_return(&method.sig) {
-        Ok(_) => Ok(true),
-        Err(form) => {
-            let name = &method.sig.ident;
-            let returns = match &method.sig.output {
-                syn::ReturnType::Type(_, ty) => quote!(#ty).to_string(),
-                syn::ReturnType::Default => "()".to_string(),
-            };
-            let mut e = syn::Error::new(
-                name.span(),
-                format!(
-                    "`pub async fn {name}(&self, …)` returns `{returns}`, which is not a signature \
-                     form, so it cannot go on the wire — and every `pub async fn` on `&self` of an \
-                     activation is a wire method. Make `{name}` non-`pub`, or write `methods = \
-                     marked` on the activation (then only #[plexus_macros::method]s are on the wire)."
-                ),
-            );
-            e.combine(form);
-            Err(e)
+    if let Ok(shape) = classify_return(&method.sig) {
+        if shape.cardinality == Cardinality::Many {
+            return Ok(true);
         }
     }
+    let name = &method.sig.ident;
+    let returns = match &method.sig.output {
+        syn::ReturnType::Type(_, ty) => quote!(#ty).to_string(),
+        syn::ReturnType::Default => "()".to_string(),
+    };
+    Err(syn::Error::new(
+        name.span(),
+        format!(
+            "`pub async fn {name}(&self, …)` returns `{returns}`, not `impl Stream<Item = E>`, so \
+             it cannot go on the wire — and every `pub async fn` on `&self` of an activation is a \
+             wire method. Make `{name}` non-`pub`, or write `methods = marked` on the activation \
+             (then only #[plexus_macros::method]s are on the wire)."
+        ),
+    ))
 }
 
 /// Does the consuming crate's manifest declare a `server` feature?
@@ -249,28 +246,81 @@ pub(crate) fn manifest_declares_server_feature() -> bool {
     false
 }
 
-/// The `BoxStream<'static, E>` a trait method returns: plexus-client's when
-/// the crate has it, else futures' (directly or through the umbrella).
-pub(crate) fn box_stream_path(client_path: Option<&syn::Path>, span: Span) -> syn::Result<TokenStream> {
+/// What the trait's methods are written in: the boxed stream and future
+/// (plexus-client's when the crate has it, else futures', directly or
+/// through the umbrella), and the crate `Progress` and `Note` are named
+/// through.
+pub(crate) struct Boxes {
+    pub stream: TokenStream,
+    pub future: TokenStream,
+    pub vocab: syn::Path,
+}
+
+pub(crate) fn boxes(client_path: Option<&syn::Path>, crate_path: &syn::Path, span: Span) -> syn::Result<Boxes> {
+    let vocab: syn::Path = match client_path {
+        Some(client) => client.clone(),
+        None => syn::parse_quote!(#crate_path::plexus),
+    };
     if let Some(client) = client_path {
-        return Ok(quote! { #client::BoxStream });
+        return Ok(Boxes { stream: quote! { #client::BoxStream }, future: quote! { #client::BoxFuture }, vocab });
     }
     if let Ok(found) = crate_name("futures") {
         let ident = match found {
             FoundCrate::Itself => format_ident!("futures"),
             FoundCrate::Name(n) => syn::Ident::new(&n, span),
         };
-        return Ok(quote! { ::#ident::stream::BoxStream });
+        return Ok(Boxes {
+            stream: quote! { ::#ident::stream::BoxStream },
+            future: quote! { ::#ident::future::BoxFuture },
+            vocab,
+        });
     }
     if let Some(umbrella) = crate::codegen::umbrella_crate(span) {
-        return Ok(quote! { ::#umbrella::__deps::futures::stream::BoxStream });
+        return Ok(Boxes {
+            stream: quote! { ::#umbrella::__deps::futures::stream::BoxStream },
+            future: quote! { ::#umbrella::__deps::futures::future::BoxFuture },
+            vocab,
+        });
     }
     Err(syn::Error::new(
         span,
-        "#[plexus_macros::activation]: the activation's trait returns boxed streams, and this \
-         crate depends on neither `plexus-client` nor `futures` to name one. Add `plexus-client` \
-         (which also gives you the client) or `futures`.",
+        "#[plexus_macros::activation]: the activation's trait returns boxed streams and futures, and \
+         this crate depends on neither `plexus-client` nor `futures` to name them. Add \
+         `plexus-client` (which also gives you the client) or `futures`.",
     ))
+}
+
+/// RETURNS-36: a method's item as its signature has it — `T`,
+/// `Result<T, E>`, `Progress<T, P>`, `Result<Progress<T, P>, E>`.
+fn item_ty(m: &MethodInfo, vocab: &syn::Path) -> TokenStream {
+    let ok = &m.ok_ty;
+    let inner = match &m.progress_ty {
+        Some(p) => {
+            let p = p.to_type(vocab);
+            quote! { #vocab::Progress<#ok, #p> }
+        }
+        None => quote! { #ok },
+    };
+    match &m.err_ty {
+        Some(e) => quote! { ::core::result::Result<#inner, #e> },
+        None => inner,
+    }
+}
+
+/// RETURNS-36: the trait method's return type — the method's own, boxed: a
+/// future of its item for a one-item method, a stream of its items else.
+fn ret_ty(m: &MethodInfo, b: &Boxes) -> TokenStream {
+    let item = item_ty(m, &b.vocab);
+    match m.cardinality {
+        Cardinality::One => {
+            let f = &b.future;
+            quote! { #f<'static, #item> }
+        }
+        Cardinality::Many => {
+            let s = &b.stream;
+            quote! { #s<'static, #item> }
+        }
+    }
 }
 
 /// What the server injects into a method (and a caller never passes), if
@@ -299,48 +349,6 @@ pub(crate) fn self_callable(methods: &[MethodInfo]) -> bool {
     methods.iter().all(|m| injected(m).is_none())
 }
 
-/// A method's event type on the trait: `E` of `impl Stream<Item = E>`, a
-/// plain stream (no `Result`, no `Progress`).
-fn plain_stream_item(m: &MethodInfo) -> Option<&Type> {
-    (m.cardinality == Cardinality::Many && m.err_ty.is_none() && m.progress_ty.is_none()).then_some(&m.ok_ty)
-}
-
-/// RETURNS-36: can the activation's methods be trait `trait_ident` — every
-/// one `impl Stream<Item = E>` of one `E`? `Err` says why not, on the method
-/// that breaks it.
-pub(crate) fn trait_shape(methods: &[MethodInfo], trait_ident: &syn::Ident) -> syn::Result<()> {
-    let mut first_event: Option<(String, &syn::Ident)> = None;
-    for m in methods {
-        let Some(event) = plain_stream_item(m) else {
-            return Err(syn::Error::new(
-                m.fn_name.span(),
-                format!(
-                    "`{}` does not return `impl Stream<Item = E>`, so trait `{trait_ident}` has no \
-                     event type for it: the trait's methods yield one event type across the \
-                     activation. Give it a stream return type.",
-                    m.fn_name
-                ),
-            ));
-        };
-        let event_str = quote!(#event).to_string();
-        match &first_event {
-            None => first_event = Some((event_str, &m.fn_name)),
-            Some((first, first_fn)) if *first != event_str => {
-                return Err(syn::Error::new(
-                    m.fn_name.span(),
-                    format!(
-                        "`{}` yields `{event_str}`, but `{first_fn}` yields `{first}`: the methods of \
-                         trait `{trait_ident}` yield one event type across the activation.",
-                        m.fn_name
-                    ),
-                ));
-            }
-            Some(_) => {}
-        }
-    }
-    Ok(())
-}
-
 fn sig_params(m: &MethodInfo) -> (Vec<TokenStream>, Vec<&syn::Ident>) {
     let params = m
         .params
@@ -354,31 +362,28 @@ fn sig_params(m: &MethodInfo) -> (Vec<TokenStream>, Vec<&syn::Ident>) {
     (params, names)
 }
 
-fn event_ty(m: &MethodInfo) -> &Type {
-    plain_stream_item(m).expect("checked by trait_shape")
-}
-
-/// `pub trait Foo: Send + Sync + 'static { fn m(&self, …) -> BoxStream<'static, E>; … }`,
-/// its dyn-compatibility assertion, and — for a contract — `server()`.
+/// `pub trait Foo: Send + Sync + 'static { fn m(&self, …) -> <m's own return
+/// type, boxed>; … }`, its dyn-compatibility assertion, and — for a contract
+/// — `server()`.
 pub(crate) fn trait_def(
     trait_ident: &syn::Ident,
     struct_name: &syn::Ident,
     description: &str,
     methods: &[MethodInfo],
-    box_stream: &TokenStream,
+    boxes: &Boxes,
     contract: bool,
     server_gate: Option<&syn::Meta>,
 ) -> TokenStream {
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
         let (params, _) = sig_params(m);
-        let ev = event_ty(m);
+        let ret = ret_ty(m, boxes);
         let doc = &m.description;
         let doc = if doc.is_empty() { quote! {} } else { quote! { #[doc = #doc] } };
         quote! {
             #doc
             #[allow(clippy::too_many_arguments)]
-            fn #fn_ident(&self #(, #params)*) -> #box_stream<'static, #ev>;
+            fn #fn_ident(&self #(, #params)*) -> #ret;
         }
     });
     let server = if contract {
@@ -406,17 +411,18 @@ pub(crate) fn trait_def(
         #doc
         ///
         /// Emitted by `#[plexus_macros::activation]` (MACRO-13) from the
-        /// activation's wire methods: implemented by the activation and by its
-        /// client, so anything that implements it can be served and anything
-        /// served can be called through it.
+        /// activation's wire methods, each under its own return type
+        /// (RETURNS-36): implemented by the activation and by its client, so
+        /// anything that implements it can be served and anything served can
+        /// be called through it.
         pub trait #trait_ident: ::core::marker::Send + ::core::marker::Sync + 'static {
             #(#items)*
             #server
         }
 
         // MACRO-13: the trait is dyn-compatible by construction (boxed
-        // streams, no generics, no `async fn`); this fails to compile the day
-        // it is not.
+        // streams and futures, no generics, no `async fn`); this fails to
+        // compile the day it is not.
         #[doc(hidden)]
         #[allow(dead_code, non_snake_case)]
         fn #assert_fn(_: &dyn #trait_ident) {}
@@ -434,16 +440,28 @@ pub(crate) fn activation_trait_impl(
     impl_generics: &syn::ImplGenerics,
     where_clause: Option<&syn::WhereClause>,
     methods: &[MethodInfo],
-    box_stream: &TokenStream,
+    boxes: &Boxes,
     deps: &syn::Ident,
 ) -> TokenStream {
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
         let (params, names) = sig_params(m);
-        let ev = event_ty(m);
+        let ret = ret_ty(m, boxes);
+        let body = match m.cardinality {
+            Cardinality::One => quote! {
+                ::std::boxed::Box::pin(async move { #struct_name::#fn_ident(&__this #(, #names)*).await })
+            },
+            Cardinality::Many => quote! {
+                ::std::boxed::Box::pin(#deps::futures::StreamExt::flatten(
+                    #deps::futures::stream::once(async move {
+                        #struct_name::#fn_ident(&__this #(, #names)*).await
+                    }),
+                ))
+            },
+        };
         quote! {
             #[allow(clippy::too_many_arguments)]
-            fn #fn_ident(&self #(, #params)*) -> #box_stream<'static, #ev> {
+            fn #fn_ident(&self #(, #params)*) -> #ret {
                 // The activation is cloned into the `'static` stream; a
                 // type that is not `Clone` is told so, by name.
                 #[diagnostic::on_unimplemented(
@@ -460,11 +478,7 @@ pub(crate) fn activation_trait_impl(
                     }
                 }
                 let __this = __PlexusActivationClone::__plexus_clone(self);
-                ::std::boxed::Box::pin(#deps::futures::StreamExt::flatten(
-                    #deps::futures::stream::once(async move {
-                        #struct_name::#fn_ident(&__this #(, #names)*).await
-                    }),
-                ))
+                #body
             }
         }
     });
@@ -513,9 +527,16 @@ pub(crate) fn rewrite_contract_impl(
             if let Some(m) = methods.iter().find(|m| m.fn_name == f.sig.ident) {
                 let fn_ident = &m.fn_name;
                 let (_, names) = sig_params(m);
-                f.block = syn::parse_quote!({
-                    <#d as #trait_ident>::#fn_ident(&*self.0 #(, #names)*)
-                });
+                f.block = match m.cardinality {
+                    // RETURNS-36: the trait's future, awaited in the
+                    // inherent `async fn`.
+                    Cardinality::One => syn::parse_quote!({
+                        <#d as #trait_ident>::#fn_ident(&*self.0 #(, #names)*).await
+                    }),
+                    Cardinality::Many => syn::parse_quote!({
+                        <#d as #trait_ident>::#fn_ident(&*self.0 #(, #names)*)
+                    }),
+                };
             }
         }
     }
@@ -529,7 +550,7 @@ pub(crate) fn contract_items(
     trait_ident: &syn::Ident,
     struct_name: &syn::Ident,
     methods: &[MethodInfo],
-    box_stream: &TokenStream,
+    boxes: &Boxes,
 ) -> TokenStream {
     let d = contract_param();
     let doc = format!(
@@ -540,10 +561,10 @@ pub(crate) fn contract_items(
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
         let (params, names) = sig_params(m);
-        let ev = event_ty(m);
+        let ret = ret_ty(m, boxes);
         quote! {
             #[allow(clippy::too_many_arguments)]
-            fn #fn_ident(&self #(, #params)*) -> #box_stream<'static, #ev> {
+            fn #fn_ident(&self #(, #params)*) -> #ret {
                 <#d as #trait_ident>::#fn_ident(&*self.0 #(, #names)*)
             }
         }
@@ -581,33 +602,66 @@ pub(crate) fn contract_items(
     }
 }
 
-/// `impl<T: Transport + Clone + Send + Sync + 'static> Foo for FooClient<T>`.
+/// `impl<T: Transport + Clone + Send + Sync + 'static> Foo for FooClient<T>`:
+/// each method the call made from an owned transport, its answer the
+/// method's own return type, a client failure folded in by
+/// `FromClientError` (RETURNS-36: `plexus_client::trait_one`, `trait_many`,
+/// `trait_progress`, `trait_result_progress`).
 pub(crate) fn client_trait_impl(
     trait_ident: &syn::Ident,
     client_ident: &syn::Ident,
     methods: &[MethodInfo],
     client: &syn::Path,
+    boxes: &Boxes,
 ) -> TokenStream {
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
         let (params, _) = sig_params(m);
-        let ev = event_ty(m);
+        let ret = ret_ty(m, boxes);
         let const_ident = crate::codegen::client::method_const_ident(m);
-        let inserts = m.params.iter().map(|p| {
-            crate::codegen::client::param_insert_with(p, client, |err| {
-                quote! { return #client::error_events::<#ev>(#err); }
-            })
-        });
-        quote! {
-            #[allow(clippy::too_many_arguments)]
-            fn #fn_ident(&self #(, #params)*) -> #client::BoxStream<'static, #ev> {
-                let mut __params = #client::__rt::serde_json::Map::new();
-                #(#inserts)*
-                #client::into_events::<#ev, _>(#client::decode::<#ev>(#client::owned_call(
+        let links: Vec<TokenStream> = m.params.iter().map(crate::codegen::client::param_link).collect();
+        let call_params = quote! { #client::Params::new() #(#links)* .build() };
+        let ok = &m.ok_ty;
+        let decoder = match &m.err_ty {
+            None => quote! { #client::Content::decode::<#ok> },
+            Some(e) => quote! { #client::wire_result::from_content::<#ok, #e> },
+        };
+        let items = quote! {
+            // PERF.115-36: the items with their content still the wire's
+            // text, decoded straight into the item.
+            #call_params.map(|__p| #client::owned_call_raw(
+                ::core::clone::Clone::clone(&self.transport),
+                Self::#const_ident.at(self.path),
+                __p,
+            ))
+        };
+        // The item named with the signature's own tokens, so a type that
+        // does not implement `FromClientError` is pointed at where it is
+        // written.
+        let item = item_ty(m, client);
+        let body = match (m.cardinality, &m.progress_ty, &m.err_ty) {
+            (Cardinality::One, _, _) => quote! {
+                #client::trait_one::<_, #item>(
                     ::core::clone::Clone::clone(&self.transport),
                     Self::#const_ident.at(self.path),
-                    #client::__rt::serde_json::Value::Object(__params),
-                )))
+                    #call_params,
+                    #decoder,
+                )
+            },
+            (Cardinality::Many, None, _) => quote! { #client::trait_many::<#item>(#items, #decoder) },
+            (Cardinality::Many, Some(p), None) => {
+                let p = p.to_type(client);
+                quote! { #client::trait_progress::<#ok, #p>(#items, #decoder) }
+            }
+            (Cardinality::Many, Some(p), Some(e)) => {
+                let p = p.to_type(client);
+                quote! { #client::trait_result_progress::<#ok, #p, #e>(#items, #decoder) }
+            }
+        };
+        quote! {
+            #[allow(clippy::too_many_arguments)]
+            fn #fn_ident(&self #(, #params)*) -> #ret {
+                #body
             }
         }
     });
@@ -646,6 +700,32 @@ pub(crate) fn client_flag_warning(span: Span, struct_name: &syn::Ident) -> Token
             let _ = #const_name;
         }
     }
+}
+
+/// RETURNS-36: `#[method(streaming)]` on a stream form — a deprecated no-op,
+/// said as a deprecation warning at the attribute.
+pub(crate) fn streaming_warnings(methods: &[MethodInfo], struct_name: &syn::Ident) -> TokenStream {
+    methods
+        .iter()
+        .filter_map(|m| {
+            let span = m.streaming_deprecated?;
+            let const_name = format_ident!("_PLEXUS_MACROS_DEPRECATED_STREAMING_{}_{}", struct_name, m.fn_name, span = span);
+            let touch = format_ident!("_plexus_macros_touch_streaming_{}_{}", struct_name, m.fn_name, span = span);
+            let note = crate::parse::STREAMING_DEPRECATED;
+            Some(quote::quote_spanned! { span =>
+                #[doc(hidden)]
+                #[allow(non_upper_case_globals, non_snake_case, dead_code)]
+                #[deprecated(since = "0.8.0", note = #note)]
+                const #const_name: () = ();
+
+                #[doc(hidden)]
+                #[allow(non_snake_case, dead_code)]
+                fn #touch() {
+                    let _ = #const_name;
+                }
+            })
+        })
+        .collect()
 }
 
 /// The cfg predicate the server half is gated on, parsed.

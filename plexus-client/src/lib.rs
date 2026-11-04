@@ -109,6 +109,8 @@ pub mod method_stream;
 pub mod params;
 pub mod progress;
 pub mod remote_error;
+/// RETURNS-36: a peer on plexus-wire's spec as main wrote it, read as 0.8.
+pub mod spec05;
 pub mod transport;
 pub mod watch;
 pub mod wire_result;
@@ -116,17 +118,20 @@ pub mod wire_result;
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub mod ws;
 
-pub use contract::{error_events, into_events, owned_call, BoxStream, FromClientError};
-pub use decode::{decode, decode_result, decode_with_progress};
-pub use envelope::{StreamItem, StreamMetadata};
+pub use contract::{
+    error_events, into_events, owned_call, owned_call_raw, trait_many, trait_one, trait_progress, trait_result_progress,
+    BoxFuture, BoxStream, FromClientError, MaybeSend,
+};
+pub use decode::{decode, decode_raw, decode_result, decode_with_progress};
+pub use envelope::{Content, RawItem, StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};
 pub use frame::Frame;
 pub use memory::MemoryTransport;
 pub use method_stream::{call_one, Decoder, Events, MethodStream, NoProgress, WithProgress};
 pub use params::Params;
 pub use progress::{Note, Progress};
-pub use remote_error::{DenyReason, ParamProblem, RemoteError};
-pub use transport::{ItemStream, MethodRef, Transport};
+pub use remote_error::{DenyReason, OtherError, ParamProblem, RemoteError};
+pub use transport::{ItemStream, MethodRef, RawItemStream, Transport};
 pub use watch::{
     watch, watch_with, Errors, Fallible, StopOnError, Watch, Watched10, Watched11, Watched12, Watched2, Watched3,
     Watched4, Watched5, Watched6, Watched7, Watched8, Watched9, Watching10, Watching11, Watching12, Watching2,

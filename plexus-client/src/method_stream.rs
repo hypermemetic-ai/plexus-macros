@@ -48,18 +48,20 @@ use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::envelope::StreamItem;
+use crate::envelope::{Content, RawItem};
 use crate::error::ClientError;
 use crate::frame::Frame;
-use crate::transport::{ItemStream, MethodRef, Transport};
+use crate::transport::{MethodRef, RawItemStream, Transport};
 
-/// Decodes one data frame's `content` into a method's item `I`.
+/// Decodes one data frame's `content` into a method's item `I` — straight
+/// from the wire's text where the transport kept it (PERF.115-36's
+/// [`Content`]), never through a `Value` first.
 ///
-/// A plain-`T` method's is `serde_json::from_value::<T>`; a Result method's
-/// is [`wire_result::from_value::<T, E>`](crate::wire_result::from_value),
+/// A plain-`T` method's is `Content::decode::<T>`; a Result method's is
+/// [`wire_result::from_content::<T, E>`](crate::wire_result::from_content),
 /// which reads `{"ok"}` / `{"err"}`. A function pointer, so it is `Send`,
 /// `Sync` and `Copy` whatever `I` is.
-pub type Decoder<I> = fn(Value) -> Result<I, serde_json::Error>;
+pub type Decoder<I> = fn(Content) -> Result<I, serde_json::Error>;
 
 /// The progress type of a method that reports none. Uninhabited: no value of
 /// it exists, so a stream typed `Frame<I, NoProgress>` can only ever yield
@@ -89,7 +91,7 @@ impl<'de> Deserialize<'de> for NoProgress {
 /// The wire items behind a typed stream, and where they stand.
 enum State<'a> {
     /// Items still arriving.
-    Live(ItemStream<'a>),
+    Live(RawItemStream<'a>),
     /// The call failed before anything was sent (a parameter that would not
     /// encode); yielded once, then finished.
     Failed(ClientError),
@@ -137,42 +139,34 @@ impl<'a, I> Core<'a, I> {
                 // Normal completion is the stream ending; a `done` is not an
                 // item. A transport that ends without one has said all it
                 // will say.
-                None | Some(Ok(StreamItem::Done { .. })) => {
+                None | Some(Ok(RawItem::Done)) => {
                     self.state = State::Finished;
                     return Poll::Ready(None);
                 }
                 Some(Err(e)) => (Err(ClientError::Transport(e)), true),
-                Some(Ok(StreamItem::Error { error, .. })) => (Err(ClientError::Remote(error)), true),
+                Some(Ok(RawItem::Error { error, .. })) => (Err(ClientError::Remote(*error)), true),
                 // Bidirectional server→client requests need an answer channel
                 // the typed client does not have. Skip rather than fail: an
                 // activation may interleave them with real data.
-                Some(Ok(StreamItem::Request { .. })) => continue,
-                Some(Ok(StreamItem::Data {
-                    content,
-                    content_type,
-                    ..
-                })) => match (self.item)(content) {
+                Some(Ok(RawItem::Request)) => continue,
+                Some(Ok(RawItem::Data { content, content_type })) => match (self.item)(content) {
                     Ok(item) => (Ok(Frame::Item(item)), false),
                     Err(e) => (
                         Err(ClientError::Decode {
-                            content_type,
-                            message: e.to_string(),
+                            content_type: content_type.map(|c| c.to_string()),
+                            message: message_of(&e),
                         }),
                         true,
                     ),
                 },
-                Some(Ok(StreamItem::Progress {
-                    content,
-                    content_type,
-                    ..
-                })) => match progress {
+                Some(Ok(RawItem::Progress { content, content_type })) => match progress {
                     None => continue,
                     Some(decode) => match decode(content) {
                         Ok(p) => (Ok(Frame::Progress(p)), false),
                         Err(e) => (
                             Err(ClientError::Decode {
-                                content_type,
-                                message: format!("progress: {e}"),
+                                content_type: content_type.map(|c| c.to_string()),
+                                message: format!("progress: {}", message_of(&e)),
                             }),
                             true,
                         ),
@@ -201,6 +195,20 @@ impl<'a, I> Core<'a, I> {
 
 fn identity<T>(t: T) -> T {
     t
+}
+
+/// A decode error as a `Value`'s decode words it: serde_json's message,
+/// without the position a decode from text adds (PERF.115-36).
+fn message_of(e: &serde_json::Error) -> String {
+    let message = e.to_string();
+    if e.line() == 0 {
+        return message;
+    }
+    let at = format!(" at line {} column {}", e.line(), e.column());
+    match message.strip_suffix(&at) {
+        Some(bare) => bare.to_owned(),
+        None => message,
+    }
 }
 
 /// One call of a many-item method: a stream of its items.
@@ -237,7 +245,7 @@ impl<'a, I, P, A> MethodStream<'a, I, P, A> {
     /// Type a transport's wire items as one method's stream: `item` decodes
     /// each data frame's `content`, `event` wraps an item in the
     /// aggregate (`TicketsEvent::List`) for [`events`](Self::events).
-    pub fn new(items: ItemStream<'a>, item: Decoder<I>, event: fn(I) -> A) -> Self {
+    pub fn new(items: RawItemStream<'a>, item: Decoder<I>, event: fn(I) -> A) -> Self {
         Self::from_core(Core::new(State::Live(items), item), event)
     }
 
@@ -256,7 +264,9 @@ impl<'a, I, P, A> MethodStream<'a, I, P, A> {
         T: Transport + ?Sized,
     {
         let state = match params {
-            Ok(params) => State::Live(transport.call(method, params)),
+            // PERF.115-36: the items with their content still the wire's
+            // text, decoded straight into the item.
+            Ok(params) => State::Live(transport.call_raw(method, params)),
             Err(e) => State::Failed(e),
         };
         Self::from_core(Core::new(state, item), event)
@@ -357,7 +367,7 @@ impl<I, P: DeserializeOwned> Stream for WithProgress<'_, I, P> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.get_mut()
             .core
-            .poll_frame(cx, Some(serde_json::from_value::<P> as Decoder<P>))
+            .poll_frame(cx, Some(Content::decode::<P> as Decoder<P>))
     }
 }
 
@@ -465,11 +475,11 @@ where
 
 /// The `Decoder` for a plain item, as a function pointer.
 pub(crate) fn plain<I: DeserializeOwned>() -> Decoder<I> {
-    serde_json::from_value::<I>
+    Content::decode::<I>
 }
 
 /// `MethodStream::new` with the identity aggregate, for the macro-free path.
-pub(crate) fn untagged<'a, I>(items: ItemStream<'a>, item: Decoder<I>) -> MethodStream<'a, I> {
+pub(crate) fn untagged<'a, I>(items: RawItemStream<'a>, item: Decoder<I>) -> MethodStream<'a, I> {
     MethodStream::new(items, item, identity::<I>)
 }
 

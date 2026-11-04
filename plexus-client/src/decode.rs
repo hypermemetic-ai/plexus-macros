@@ -27,8 +27,28 @@
 
 use serde::de::DeserializeOwned;
 
+use crate::envelope::RawItem;
 use crate::method_stream::{plain, untagged, MethodStream, WithProgress};
-use crate::transport::ItemStream;
+use crate::transport::{ItemStream, RawItemStream};
+
+/// A transport's [`StreamItem`](crate::StreamItem)s as a typed call reads
+/// them ([`RawItem`]s), each content the `Value` it carries.
+fn raw(items: ItemStream<'_>) -> RawItemStream<'_> {
+    use futures_util::StreamExt;
+    Box::pin(items.map(|item| item.map(RawItem::from)))
+}
+
+/// [`decode`] on a typed call's items (PERF.115-36): each data item's
+/// content decoded straight from the wire's JSON into `I`, never into a
+/// `Value` first — what a generated client reads, on
+/// [`Transport::call_raw`](crate::Transport::call_raw)'s items. A decode
+/// error says what [`decode`] says of the same content.
+pub fn decode_raw<'a, I>(items: RawItemStream<'a>) -> MethodStream<'a, I>
+where
+    I: DeserializeOwned,
+{
+    untagged(items, plain::<I>())
+}
 
 /// A plain-`T` method's items: each data frame's `content` decodes as `I`;
 /// progress frames are dropped. The stream's aggregate is `I` itself
@@ -37,7 +57,7 @@ pub fn decode<'a, I>(items: ItemStream<'a>) -> MethodStream<'a, I>
 where
     I: DeserializeOwned,
 {
-    untagged(items, plain::<I>())
+    untagged(raw(items), plain::<I>())
 }
 
 /// [`decode`], opted in to progress: items as `Frame::Item(i)`, progress
@@ -48,7 +68,7 @@ where
     I: DeserializeOwned,
     P: DeserializeOwned,
 {
-    MethodStream::<'a, I, P, I>::new(items, plain::<I>(), |i| i).with_progress()
+    MethodStream::<'a, I, P, I>::new(raw(items), plain::<I>(), |i| i).with_progress()
 }
 
 /// A Result method's items: each data frame's `content` is `{"ok": t}` or
@@ -60,5 +80,5 @@ where
     T: DeserializeOwned,
     E: DeserializeOwned,
 {
-    untagged(items, crate::wire_result::from_value::<T, E>)
+    untagged(raw(items), crate::wire_result::from_content::<T, E>)
 }

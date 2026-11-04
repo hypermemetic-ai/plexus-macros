@@ -1,6 +1,5 @@
 //! MACRO-13: every `pub async fn` on `&self` is a wire method, so one that
-//! returns no signature form is named. (RETURNS-36: `-> u32` is now a form —
-//! one item, RETURNS-8 — so the case is a boxed stream, which is not.)
+//! does not return the event stream is named.
 
 use futures::Stream;
 
@@ -13,8 +12,8 @@ impl CounterActivation {
         futures::stream::empty()
     }
 
-    pub async fn total(&self) -> futures::stream::BoxStream<'static, u32> {
-        Box::pin(futures::stream::empty())
+    pub async fn total(&self) -> u32 {
+        7
     }
 }
 

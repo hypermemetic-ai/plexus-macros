@@ -3,7 +3,7 @@
 //! `ConformanceActivation` is served in-process and what it sends is compared with
 //! `expected/`: its schema RPC with `schema.json`, every call of
 //! `calls.json` with its `wire/*.jsonl` file or its `errors.jsonl` line, over
-//! both dispatch paths — `Activation::call` (what a hub routes to) and the
+//! both dispatch paths — `Activation::call` (what a service routes to) and the
 //! jsonrpsee subscriptions the activation registers itself.
 //!
 //! Comparison rules (the fixture's README): `timestamp` is normalized to 0;
@@ -105,23 +105,23 @@ fn normalized(item: &PlexusStreamItem) -> Value {
     v
 }
 
-/// What a hub does before it serves (`DynamicHub::into_rpc_module`): put its
+/// What a service does before it serves (`DynamicHub::into_rpc_module`): put its
 /// own hash in the context every frame's `plexus_hash` is read from. The
-/// fixture is its own hub, so that is its plugin hash — the one
+/// fixture is its own service, so that is its plugin hash — the one
 /// `schema.json` pins (RETURNS-10).
 fn init_context() {
     PlexusContext::init(ConformanceActivation.plugin_schema().hash);
 }
 
-/// Serve one call the way a hub's `call` route does with the fixture as its
-/// own hub: `Activation::call`'s stream when the call dispatches, one error
+/// Serve one call the way a service's `call` route does with the fixture as its
+/// own service: `Activation::call`'s stream when the call dispatches, one error
 /// frame (provenance the activation, not recoverable, no `done`) when it does
 /// not.
 async fn serve(method: &str, params: Value) -> Vec<Value> {
     init_context();
     match Activation::call(&ConformanceActivation, method, params, None, None).await {
         Ok(stream) => stream.map(|item| normalized(&item)).collect().await,
-        // RETURNS-36: as a hub's `error_item` builds it — spec/05's
+        // RETURNS-36: as a service's `error_item` builds it — spec/05's
         // `message` (the server's own line), `code` and `error_kind` beside
         // the typed `error`.
         Err(e) => vec![normalized(&PlexusStreamItem::from_plexus_error(

@@ -121,9 +121,87 @@ async fn the_served_contract_is_itself_a_contract() {
     }
 }
 
+/// A transport that has each item's text and no `Value`s.
+#[derive(Clone)]
+struct TextOnly;
+
+impl plexus_client::Transport for TextOnly {
+    fn call(&self, _: plexus_client::MethodRef, _: Value) -> plexus_client::ItemStream<'_> {
+        panic!("a client's contract reads its items through call_raw")
+    }
+
+    fn call_raw(&self, _: plexus_client::MethodRef, _: Value) -> plexus_client::RawItemStream<'_> {
+        let text = serde_json::value::RawValue::from_string(r#"{"type":"sum","value":5}"#.to_owned()).unwrap();
+        Box::pin(futures::stream::iter(vec![
+            Ok(plexus_client::RawItem::Data { content_type: Some("contract.add".into()), content: plexus_client::Content::from(text) }),
+            Ok(plexus_client::RawItem::Done),
+        ]))
+    }
+}
+
+/// PERF.115-36: a client's contract reads through `call_raw` too, the content
+/// decoded straight from the wire's text.
+#[tokio::test]
+async fn a_clients_contract_decodes_the_wires_text_through_call_raw() {
+    let got: Vec<ContractEvent> = Contract::add(&ContractClient::new(TextOnly), 2, 3).collect().await;
+    assert_eq!(got, vec![ContractEvent::Sum { value: 5 }]);
+}
+
 #[test]
 fn the_contracts_schema_carries_its_doc_comments() {
     let schema = serde_json::to_string(&Impl::new().server().plugin_schema()).unwrap();
     assert!(schema.contains("Answer with the text."), "{schema}");
     assert!(schema.contains("what to answer"), "{schema}");
+}
+
+// ------------------------------------------------- RETURNS-36: every form
+
+/// A contract whose methods have their own return types (RETURNS-36, the
+/// owner's rule of 2026-10-16: the trait always): a one-item method is a
+/// boxed future in the trait, and an implementation served through the
+/// contract answers it with one data item.
+mod own_types {
+    use super::*;
+    use plexus_client::BoxFuture;
+
+    #[plexus_macros::activation]
+    impl FormsActivation {
+        /// One item.
+        #[plexus_macros::method]
+        pub async fn ping(&self, text: String) -> String;
+
+        /// One item, fallible.
+        #[plexus_macros::method]
+        pub async fn half(&self, n: i64) -> Result<i64, String>;
+
+        /// Many.
+        pub async fn upto(&self, n: i64) -> impl Stream<Item = String> + Send + 'static;
+    }
+
+    struct Impl;
+
+    impl Forms for Impl {
+        fn ping(&self, text: String) -> BoxFuture<'static, String> {
+            Box::pin(async move { format!("pong {text}") })
+        }
+        fn half(&self, n: i64) -> BoxFuture<'static, Result<i64, String>> {
+            Box::pin(async move { if n % 2 == 0 { Ok(n / 2) } else { Err(format!("{n} is odd")) } })
+        }
+        fn upto(&self, n: i64) -> BoxStream<'static, String> {
+            Box::pin(futures::stream::iter((1..=n).map(|i| i.to_string())))
+        }
+    }
+
+    #[tokio::test]
+    async fn each_form_is_served_through_the_contract() {
+        let service = DynamicHub::new("svc").register(Impl.server());
+        assert_eq!(data(&service, "forms.ping", json!({"text": "x"})).await, vec![json!("pong x")]);
+        assert_eq!(data(&service, "forms.half", json!({"n": 4})).await, vec![json!({"ok": 2})]);
+        assert_eq!(data(&service, "forms.half", json!({"n": 3})).await, vec![json!({"err": "3 is odd"})]);
+        assert_eq!(data(&service, "forms.upto", json!({"n": 2})).await, vec![json!("1"), json!("2")]);
+        // … and the client, through the trait.
+        let client = FormsClient::new(InProcessTransport::new(Impl.server()));
+        assert_eq!(Forms::ping(&client, "y".into()).await, "pong y");
+        assert_eq!(Forms::half(&client, 3).await, Err("3 is odd".to_string()));
+    }
 }

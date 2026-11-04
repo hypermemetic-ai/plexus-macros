@@ -1,0 +1,11 @@
+error: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_STREAMING_TickerActivation_tick`: `streaming` is deprecated: cardinality comes from the return type, which already says this method yields many items. Remove `streaming`.
+  --> tests/compile/sig_streaming_deprecated.rs:12:29
+   |
+12 |     #[plexus_macros::method(streaming)]
+   |                             ^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> tests/compile/sig_streaming_deprecated.rs:4:9
+   |
+ 4 | #![deny(deprecated)]
+   |         ^^^^^^^^^^

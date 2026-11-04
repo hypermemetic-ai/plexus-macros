@@ -8,12 +8,13 @@
 //! cannot name, without `namespace`, is refused (MACRO-13's
 //! `macro13_cannot_name_the_trait` compile test). So `Tickets` → `tickets`
 //! and `HyperforgeHub` → `hyperforge` are gone — the first is refused, the
-//! second names a *hub*, which NAMING-10 retired.
+//! second ends in `Hub`, a word NAMING-10 retired.
 
 use futures::StreamExt;
 use plexus_core::plexus::{Activation, PlexusStreamItem};
 
 /// `InfoActivation` → `info`.
+#[derive(Clone)]
 pub struct InfoActivation;
 
 #[plexus_macros::activation]

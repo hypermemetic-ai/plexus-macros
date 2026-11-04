@@ -17,13 +17,14 @@
 //!   yielded, an error is yielded as `E::from_client_error(err)` and ends the
 //!   stream.
 //!
-//! RETURNS-36: the trait is emitted for an activation whose wire methods are
-//! all `impl Stream<Item = E>` of one `E` — the shape it has always had; an
-//! activation using RETURNS-8's other signature forms has its client alone.
+//! RETURNS-36: the trait is always emitted, each method under its own return
+//! type: a one-item method's is a [`BoxFuture`] of its item, a stream form's a
+//! [`BoxStream`] of its items. [`trait_one`], [`trait_many`],
+//! [`trait_progress`] and [`trait_result_progress`] are the client half's.
 
-use crate::envelope::StreamItem;
+use crate::envelope::{RawItem, StreamItem};
 use crate::error::{ClientError, TransportError};
-use crate::transport::{ItemStream, MethodRef, Transport};
+use crate::transport::{ItemStream, MethodRef, RawItemStream, Transport};
 use futures_core::Stream;
 use futures_util::{stream, StreamExt};
 use serde_json::Value;
@@ -41,6 +42,27 @@ pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
 /// A boxed stream of `T`. See the non-wasm32 variant.
 #[cfg(target_arch = "wasm32")]
 pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + 'a>>;
+
+/// A boxed future of `T` — what a one-item method of an emitted trait
+/// returns (RETURNS-36). `Send` off wasm32, as [`BoxStream`] is.
+#[cfg(not(target_arch = "wasm32"))]
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// A boxed future of `T`. See the non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+/// `Send` off wasm32, nothing on it: the bound a trait's client half puts
+/// on what it moves into a boxed future or stream.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> MaybeSend for T {}
+/// See the non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSend for T {}
 
 /// An event type that can carry a client failure in band.
 ///
@@ -70,6 +92,21 @@ pub trait FromClientError {
 /// A stream of strings carries a client failure as its message — so an
 /// activation whose events are plain `String`s (a type no crate but this one
 /// may implement the trait for) still has its trait implemented by its client.
+/// A Result item carries a client failure as its error (RETURNS-36): what
+/// the trait's client half yields for a fallible method.
+impl<T, E: FromClientError> FromClientError for Result<T, E> {
+    fn from_client_error(error: ClientError) -> Self {
+        Err(E::from_client_error(error))
+    }
+}
+
+/// A progress item carries a client failure as its item (RETURNS-36).
+impl<T: FromClientError, P> FromClientError for crate::progress::Progress<T, P> {
+    fn from_client_error(error: ClientError) -> Self {
+        crate::progress::Progress::Item(T::from_client_error(error))
+    }
+}
+
 impl FromClientError for String {
     fn from_client_error(error: ClientError) -> Self {
         error.to_string()
@@ -120,7 +157,121 @@ where
     Box::pin(stream::once(async move { E::from_client_error(error) }))
 }
 
-type Slot = Arc<Mutex<Option<Result<StreamItem, TransportError>>>>;
+// ---------------------------------------------------------------------------
+// RETURNS-36: the trait's client half, one helper per signature form. Each
+// takes its call already made (`owned_call`, or a params error) and yields
+// the method's own return type, a client failure folded in by
+// `FromClientError`.
+// ---------------------------------------------------------------------------
+
+/// `-> T` / `-> Result<T, E>`: one item.
+pub fn trait_one<T, I>(
+    transport: T,
+    method: MethodRef,
+    params: Result<Value, ClientError>,
+    item: crate::method_stream::Decoder<I>,
+) -> BoxFuture<'static, I>
+where
+    T: Transport + MaybeSend + Sync + 'static,
+    I: FromClientError + MaybeSend + 'static,
+{
+    Box::pin(async move {
+        match crate::method_stream::call_one(&transport, method, params, item).await {
+            Ok(i) => i,
+            Err(e) => I::from_client_error(e),
+        }
+    })
+}
+
+/// `-> impl Stream<Item = T>` / `Item = Result<T, E>`: many items.
+pub fn trait_many<I>(
+    items: Result<RawItemStream<'static>, ClientError>,
+    item: crate::method_stream::Decoder<I>,
+) -> BoxStream<'static, I>
+where
+    I: FromClientError + MaybeSend + 'static,
+{
+    match items {
+        Ok(items) => fold(crate::method_stream::MethodStream::<'static, I>::new(items, item, std::convert::identity)),
+        Err(e) => Box::pin(stream::once(async move { I::from_client_error(e) })),
+    }
+}
+
+/// `-> impl Stream<Item = Progress<T, P>>`: items and progress updates.
+pub fn trait_progress<T, P>(
+    items: Result<RawItemStream<'static>, ClientError>,
+    item: crate::method_stream::Decoder<T>,
+) -> BoxStream<'static, crate::progress::Progress<T, P>>
+where
+    T: FromClientError + MaybeSend + 'static,
+    P: serde::de::DeserializeOwned + MaybeSend + 'static,
+{
+    use crate::frame::Frame;
+    use crate::progress::Progress;
+    match items {
+        Ok(items) => fold(
+            crate::method_stream::MethodStream::<'static, T, P, T>::new(items, item, std::convert::identity)
+                .with_progress()
+                .map(|r| {
+                    r.map(|f| match f {
+                        Frame::Item(t) => Progress::Item(t),
+                        Frame::Progress(p) => Progress::Update(p),
+                    })
+                }),
+        ),
+        Err(e) => Box::pin(stream::once(async move { Progress::Item(T::from_client_error(e)) })),
+    }
+}
+
+/// `-> impl Stream<Item = Result<Progress<T, P>, E>>`.
+pub fn trait_result_progress<T, P, E>(
+    items: Result<RawItemStream<'static>, ClientError>,
+    item: crate::method_stream::Decoder<Result<T, E>>,
+) -> BoxStream<'static, Result<crate::progress::Progress<T, P>, E>>
+where
+    T: MaybeSend + 'static,
+    E: FromClientError + MaybeSend + 'static,
+    P: serde::de::DeserializeOwned + MaybeSend + 'static,
+{
+    use crate::frame::Frame;
+    use crate::progress::Progress;
+    match items {
+        Ok(items) => fold(
+            crate::method_stream::MethodStream::<'static, Result<T, E>, P, Result<T, E>>::new(
+                items,
+                item,
+                std::convert::identity,
+            )
+            .with_progress()
+            .map(|r| {
+                r.map(|f| match f {
+                    Frame::Item(Ok(t)) => Ok(Progress::Item(t)),
+                    Frame::Item(Err(e)) => Err(e),
+                    Frame::Progress(p) => Ok(Progress::Update(p)),
+                })
+            }),
+        ),
+        Err(e) => Box::pin(stream::once(async move { Err(E::from_client_error(e)) })),
+    }
+}
+
+/// A client stream as a trait method's: each item as is, the first failure
+/// folded into the item type and the end.
+fn fold<I, S>(events: S) -> BoxStream<'static, I>
+where
+    I: FromClientError + MaybeSend + 'static,
+    S: Stream<Item = Result<I, ClientError>> + Unpin + MaybeSend + 'static,
+{
+    Box::pin(stream::unfold(Some(events), |state| async move {
+        let mut events = state?;
+        match events.next().await? {
+            Ok(e) => Some((e, Some(events))),
+            Err(err) => Some((I::from_client_error(err), None)),
+        }
+    }))
+}
+
+type Slot<I> = Arc<Mutex<Option<Result<I, TransportError>>>>;
 
 #[cfg(not(target_arch = "wasm32"))]
 type Driver = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -139,11 +290,31 @@ pub fn owned_call<T>(transport: T, method: MethodRef, params: Value) -> ItemStre
 where
     T: Transport + Send + Sync + 'static,
 {
-    let slot: Slot = Arc::new(Mutex::new(None));
+    let slot: Slot<StreamItem> = Arc::new(Mutex::new(None));
     let tx = slot.clone();
     let driver: Driver = Box::pin(async move {
         let transport = transport;
         let mut items = transport.call(method, params);
+        while let Some(item) = items.next().await {
+            *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
+            HandOff(false).await;
+        }
+    });
+    Box::pin(Owned { driver: Some(driver), slot })
+}
+
+/// [`owned_call`] for a typed client: `Transport::call_raw` on a transport
+/// the stream owns (PERF.115-36).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn owned_call_raw<T>(transport: T, method: MethodRef, params: Value) -> RawItemStream<'static>
+where
+    T: Transport + Send + Sync + 'static,
+{
+    let slot: Slot<RawItem> = Arc::new(Mutex::new(None));
+    let tx = slot.clone();
+    let driver: Driver = Box::pin(async move {
+        let transport = transport;
+        let mut items = transport.call_raw(method, params);
         while let Some(item) = items.next().await {
             *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
             HandOff(false).await;
@@ -158,11 +329,30 @@ pub fn owned_call<T>(transport: T, method: MethodRef, params: Value) -> ItemStre
 where
     T: Transport + 'static,
 {
-    let slot: Slot = Arc::new(Mutex::new(None));
+    let slot: Slot<StreamItem> = Arc::new(Mutex::new(None));
     let tx = slot.clone();
     let driver: Driver = Box::pin(async move {
         let transport = transport;
         let mut items = transport.call(method, params);
+        while let Some(item) = items.next().await {
+            *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
+            HandOff(false).await;
+        }
+    });
+    Box::pin(Owned { driver: Some(driver), slot })
+}
+
+/// `owned_call_raw` on an owned transport. See the non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub fn owned_call_raw<T>(transport: T, method: MethodRef, params: Value) -> RawItemStream<'static>
+where
+    T: Transport + 'static,
+{
+    let slot: Slot<RawItem> = Arc::new(Mutex::new(None));
+    let tx = slot.clone();
+    let driver: Driver = Box::pin(async move {
+        let transport = transport;
+        let mut items = transport.call_raw(method, params);
         while let Some(item) = items.next().await {
             *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
             HandOff(false).await;
@@ -188,19 +378,19 @@ impl Future for HandOff {
     }
 }
 
-struct Owned {
+struct Owned<I> {
     driver: Option<Driver>,
-    slot: Slot,
+    slot: Slot<I>,
 }
 
-impl Owned {
-    fn take_item(&self) -> Option<Result<StreamItem, TransportError>> {
+impl<I> Owned<I> {
+    fn take_item(&self) -> Option<Result<I, TransportError>> {
         self.slot.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 }
 
-impl Stream for Owned {
-    type Item = Result<StreamItem, TransportError>;
+impl<I> Stream for Owned<I> {
+    type Item = Result<I, TransportError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let Some(driver) = self.driver.as_mut() else {
@@ -260,6 +450,6 @@ mod tests {
         );
         let s = into_events::<Ev, _>(decode::<Ev>(owned_call(Arc::new(t), COUNT, serde_json::json!({}))));
         let got: Vec<Ev> = futures::executor::block_on(s.collect());
-        assert_eq!(got, vec![Ev::N(1), Ev::N(2), Ev::Error("remote error: execution failed: no".into())]);
+        assert_eq!(got, vec![Ev::N(1), Ev::N(2), Ev::Error("remote error: no".into())]);
     }
 }

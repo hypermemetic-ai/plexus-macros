@@ -71,6 +71,34 @@ pub enum ImportError {
     Unreadable { chunk: u32 },
 }
 
+// RETURNS-36 (review #8): the activation's trait is always emitted and its
+// client implements it, so a client failure becomes each method's item.
+impl plexus_client::FromClientError for Health {
+    fn from_client_error(e: ClientError) -> Self {
+        Health { version: e.to_string(), ticket_count: 0 }
+    }
+}
+impl plexus_client::FromClientError for Ticket {
+    fn from_client_error(e: ClientError) -> Self {
+        Ticket { id: String::new(), title: e.to_string(), parent: None }
+    }
+}
+impl plexus_client::FromClientError for GetError {
+    fn from_client_error(e: ClientError) -> Self {
+        GetError::NotFound { id: e.to_string() }
+    }
+}
+impl plexus_client::FromClientError for WatchError {
+    fn from_client_error(_: ClientError) -> Self {
+        WatchError::Lagged { missed: 0 }
+    }
+}
+impl plexus_client::FromClientError for ImportError {
+    fn from_client_error(_: ClientError) -> Self {
+        ImportError::Unreadable { chunk: 0 }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct TicketsActivation;
 
@@ -454,6 +482,43 @@ async fn a_one_item_method_that_sends_no_item_is_a_contract_break() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+// ---------------------------------------------------- the typed path (PERF.115-36)
+
+/// A transport that has each item's text and no `Value`s: what a generated
+/// client must read through `call_raw`.
+#[derive(Clone)]
+struct TextOnly;
+
+impl Transport for TextOnly {
+    fn call(&self, _: MethodRef, _: serde_json::Value) -> plexus_client::ItemStream<'_> {
+        panic!("a generated client reads its items through call_raw")
+    }
+
+    fn call_raw(&self, _: MethodRef, _: serde_json::Value) -> plexus_client::RawItemStream<'_> {
+        let text = serde_json::value::RawValue::from_string(
+            r#"{"version":"0.7.0","ticket_count":2}"#.to_owned(),
+        )
+        .unwrap();
+        Box::pin(futures::stream::iter(vec![
+            Ok(plexus_client::RawItem::Data {
+                content_type: Some("tickets.health".into()),
+                content: plexus_client::Content::from(text),
+            }),
+            Ok(plexus_client::RawItem::Done),
+        ]))
+    }
+}
+
+/// PERF.115-36: a generated client reads its items through `call_raw`, each
+/// item's content still the wire's text, and decodes it straight into its
+/// event; no `Value` on the way.
+#[tokio::test]
+async fn a_generated_client_decodes_the_wires_text_through_call_raw() {
+    // RETURNS-36: `health` is a one-item method, its item the `Health`.
+    let health = TicketsClient::new(TextOnly).health().await.unwrap();
+    assert_eq!(health, Health { version: "0.7.0".into(), ticket_count: 2 });
 }
 
 // ------------------------------------------------------- transport interchange

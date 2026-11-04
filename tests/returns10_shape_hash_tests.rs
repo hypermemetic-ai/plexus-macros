@@ -815,7 +815,7 @@ fn a_rust_only_rename_keeps_the_hash() {
 }
 
 /// The roll-up: a method's hash moving moves its plugin's `self_hash` and
-/// `hash`, and the hash of a hub the plugin is registered in — the root
+/// `hash`, and the hash of a service the plugin is registered in — the root
 /// hash a backend serves as `plexus_hash`, synapse reads as `irHash` and
 /// synapse-cc locks.
 #[test]

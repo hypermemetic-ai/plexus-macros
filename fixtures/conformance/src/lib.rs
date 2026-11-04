@@ -3,7 +3,7 @@
 //!
 //! Every generator is tested against this one activation: the macro's server
 //! half (RETURNS-8) and client half (RETURNS-9), the Haskell protocol
-//! (RETURNS-12), synapse's IR (RETURNS-13), and hub-codegen's TS and Rust
+//! (RETURNS-12), synapse's IR (RETURNS-13), and service-codegen's TS and Rust
 //! clients (RETURNS-17, RETURNS-18). `expected/` holds what it must produce.
 //! The calls and their params are in `expected/calls.json`; `README.md`
 //! says who round-trips what.
@@ -138,4 +138,28 @@ impl ConformanceActivation {
             yield Progress::Item(Warmed { entries: 2 });
         }
     }
+}
+
+// RETURNS-36 (review #8): the activation's trait is always emitted, each
+// method under its own return type, and its client implements it — so a
+// client failure must become each method's item. The fixture's shapes are
+// the contract's (expected/schema.json) and stay as they are, so each folds
+// the failure into what it has.
+macro_rules! from_client_error {
+    ($($ty:ty => |$e:ident| $make:expr;)*) => {$(
+        impl plexus_client::FromClientError for $ty {
+            fn from_client_error($e: plexus_client::ClientError) -> Self {
+                $make
+            }
+        }
+    )*};
+}
+
+from_client_error! {
+    Pong => |e| Pong { message: e.to_string() };
+    LookupError => |e| LookupError::NotFound { id: e.to_string() };
+    Tick => |_e| Tick { n: 0 };
+    ScanError => |e| ScanError::Unreadable { key: e.to_string() };
+    LoadError => |_e| LoadError::TooMany { n: 0, max: 0 };
+    Warmed => |_e| Warmed { entries: 0 };
 }

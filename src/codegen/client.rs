@@ -145,7 +145,7 @@ fn is_option_type(ty: &Type) -> bool {
 }
 
 /// One parameter's link in the `Params` builder chain.
-fn param_link(param: &ParamInfo) -> TokenStream {
+pub(crate) fn param_link(param: &ParamInfo) -> TokenStream {
     let ident = &param.name;
     let wire_name = param.name.to_string();
     if is_option_type(&param.ty) {
@@ -153,52 +153,6 @@ fn param_link(param: &ParamInfo) -> TokenStream {
         quote! { .optional(#wire_name, #ident) }
     } else {
         quote! { .param(#wire_name, #ident) }
-    }
-}
-
-/// MACRO-13: the statement that puts one parameter into a `__params` map,
-/// with what to do when the parameter will not serialize given by the
-/// caller — a trait method returns a stream of events, not of `Result`s, so
-/// it answers differently from [`param_link`]'s builder.
-pub(crate) fn param_insert_with(
-    param: &ParamInfo,
-    client: &syn::Path,
-    on_err: impl Fn(TokenStream) -> TokenStream,
-) -> TokenStream {
-    let ident = &param.name;
-    let wire_name = param.name.to_string();
-    let fail = on_err(quote! {
-        #client::ClientError::Encode {
-            param: #wire_name,
-            message: __e.to_string(),
-        }
-    });
-
-    if is_option_type(&param.ty) {
-        // Omitted when None — see the module docs.
-        quote! {
-            if let ::core::option::Option::Some(__v) = #ident {
-                match #client::__rt::serde_json::to_value(__v) {
-                    ::core::result::Result::Ok(__json) => {
-                        __params.insert(#wire_name.to_string(), __json);
-                    }
-                    ::core::result::Result::Err(__e) => {
-                        #fail
-                    }
-                }
-            }
-        }
-    } else {
-        quote! {
-            match #client::__rt::serde_json::to_value(#ident) {
-                ::core::result::Result::Ok(__json) => {
-                    __params.insert(#wire_name.to_string(), __json);
-                }
-                ::core::result::Result::Err(__e) => {
-                    #fail
-                }
-            }
-        }
     }
 }
 
@@ -323,12 +277,12 @@ pub(crate) fn generate(
         let (item_ty, decoder, payload) = match &m.err_ty {
             None => (
                 quote! { #ok_ty },
-                quote! { #client_path::__rt::serde_json::from_value::<#ok_ty> },
+                quote! { #client_path::Content::decode::<#ok_ty> },
                 quote! { #ok_ty },
             ),
             Some(err_ty) => (
                 quote! { ::core::result::Result<#ok_ty, #err_ty> },
-                quote! { #client_path::wire_result::from_value::<#ok_ty, #err_ty> },
+                quote! { #client_path::wire_result::from_content::<#ok_ty, #err_ty> },
                 quote! {
                     #[serde(with = #wire_result_path)]
                     ::core::result::Result<#ok_ty, #err_ty>
