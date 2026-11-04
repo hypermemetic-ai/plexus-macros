@@ -29,4 +29,7 @@ fn client_compile_fail() {
     // RETURNS-9: a one-item method's client is an `async fn` — no stream, so
     // no `.with_progress()`.
     t.compile_fail("tests/compile/client_one_item_has_no_with_progress.rs");
+    // RETURNS-46: methods and children share one route namespace and one
+    // aggregate; a method renamed onto a child's segment is refused.
+    t.compile_fail("tests/compile/returns46_method_and_child_share_a_name.rs");
 }

@@ -1,0 +1,8 @@
+[
+  {"path":"tree","method":"ping","params":{}},
+  {"path":"tree","method":"count","params":{"to":2}},
+  {"path":"tree.branch","method":"grow","params":{"n":3}},
+  {"path":"tree.branch.leaf","method":"fall","params":{"n":2}},
+  {"path":"tree.a","method":"watch","params":{"n":2}},
+  {"path":"tree.b","method":"watch","params":{"n":1}}
+]

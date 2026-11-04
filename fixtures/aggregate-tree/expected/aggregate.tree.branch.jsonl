@@ -1,0 +1,5 @@
+{"method":"grow","event":{"ok":{"bud":1}}}
+{"method":"grow","event":{"err":{"type":"frost","at":2}}}
+{"method":"grow","event":{"ok":{"bud":3}}}
+{"method":"leaf","event":{"method":"fall","event":{"leaf":1}}}
+{"method":"leaf","event":{"method":"fall","event":{"leaf":2}}}

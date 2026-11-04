@@ -1,0 +1,11 @@
+{"method":"ping","event":{"message":"pong"}}
+{"method":"count","event":{"n":1}}
+{"method":"count","event":{"n":2}}
+{"method":"branch","event":{"method":"grow","event":{"ok":{"bud":1}}}}
+{"method":"branch","event":{"method":"grow","event":{"err":{"type":"frost","at":2}}}}
+{"method":"branch","event":{"method":"grow","event":{"ok":{"bud":3}}}}
+{"method":"branch","event":{"method":"leaf","event":{"method":"fall","event":{"leaf":1}}}}
+{"method":"branch","event":{"method":"leaf","event":{"method":"fall","event":{"leaf":2}}}}
+{"method":"item","event":{"name":"a","event":{"method":"watch","event":{"seen":"a","n":1}}}}
+{"method":"item","event":{"name":"a","event":{"method":"watch","event":{"seen":"a","n":2}}}}
+{"method":"item","event":{"name":"b","event":{"method":"watch","event":{"seen":"b","n":1}}}}
