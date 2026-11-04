@@ -1,0 +1,5 @@
+error: `returns(..)` is removed: a method's return type is its contract. Instead of filtering a shared event enum's variants, give each method its own return type — e.g. `-> Result<Ticket, GetError>` or `-> impl Stream<Item = ListItem>`.
+ --> tests/compile/sig_returns_removed.rs:9:29
+  |
+9 |     #[plexus_macros::method(returns(Ticket, NotFound))]
+  |                             ^^^^^^^

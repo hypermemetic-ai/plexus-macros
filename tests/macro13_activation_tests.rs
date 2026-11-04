@@ -9,7 +9,8 @@
 //! the client's methods are the ones MACRO-4 emitted for that type.
 
 use futures::{Stream, StreamExt};
-use plexus_client::{ClientError, EventStream, FromClientError, MemoryTransport, MethodRef, StreamItem, Transport};
+use futures::TryStreamExt;
+use plexus_client::{ClientError, FromClientError, MemoryTransport, MethodRef, StreamItem, Transport};
 use plexus_core::plexus::{Activation, InProcessTransport};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -162,17 +163,17 @@ fn the_client_is_the_one_macro_4_emitted_for_a_type_named_echo() {
 
     // … the same signatures (a change to either is a compile error here) …
     fn now_sigs<T: Transport>(c: &EchoClient<T>) {
-        let _: EventStream<'_, EchoEvent> = c.say(String::new());
-        let _: EventStream<'_, EchoEvent> = c.count(0);
-        let _ = c.say_all(String::new());
-        let _ = c.count_all(0);
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.say(String::new());
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.count(0);
+        let _ = c.say(String::new()).try_collect::<Vec<_>>();
+        let _ = c.count(0).try_collect::<Vec<_>>();
         let _: &T = c.transport();
     }
     fn before_sigs<T: Transport>(c: &before::EchoClient<T>) {
-        let _: EventStream<'_, EchoEvent> = c.say(String::new());
-        let _: EventStream<'_, EchoEvent> = c.count(0);
-        let _ = c.say_all(String::new());
-        let _ = c.count_all(0);
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.say(String::new());
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.count(0);
+        let _ = c.say(String::new()).try_collect::<Vec<_>>();
+        let _ = c.count(0).try_collect::<Vec<_>>();
         let _: &T = c.transport();
     }
     let _ = (now_sigs::<MemoryTransport>, before_sigs::<MemoryTransport>);
@@ -183,8 +184,8 @@ fn the_client_is_the_one_macro_4_emitted_for_a_type_named_echo() {
     let t2 = MemoryTransport::new().script_events(say, &[EchoEvent::Said { text: "x".into() }]);
     let (a, b) = futures::executor::block_on(async {
         (
-            EchoClient::new(&t1).say_all("x".into()).await.unwrap(),
-            before::EchoClient::new(&t2).say_all("x".into()).await.unwrap(),
+            EchoClient::new(&t1).say("x".into()).try_collect::<Vec<_>>().await.unwrap(),
+            before::EchoClient::new(&t2).say("x".into()).try_collect::<Vec<_>>().await.unwrap(),
         )
     });
     assert_eq!(a, b);
@@ -219,8 +220,15 @@ async fn a_client_failure_is_the_event_types_own_error_and_ends_the_stream() {
     let t = MemoryTransport::new().script(
         say,
         vec![
-            StreamItem::Progress { metadata: None, message: "thinking".into(), percentage: None },
-            StreamItem::Error { metadata: None, message: "no".into(), code: None, recoverable: false },
+            StreamItem::Progress { metadata: None, content_type: None, content: serde_json::json!({"message": "thinking"}) },
+            StreamItem::Error {
+                metadata: None,
+                recoverable: false,
+                message: Some("no".into()),
+                code: None,
+                error: plexus_client::RemoteError::Execution { message: "no".into() },
+                fields: Default::default(),
+            },
             StreamItem::data(serde_json::json!({"type": "said", "text": "late"})),
         ],
     );
@@ -335,7 +343,7 @@ fn a_mounted_client_through_the_trait_keeps_its_path() {
     let at = EchoClient::<MemoryTransport>::METHOD_SAY.at("host.echo");
     let t = Arc::new(MemoryTransport::new().script_events(at, &[EchoEvent::Said { text: "x".into() }]));
     let client = EchoClient::at(t, "host.echo");
-    let inherent = futures::executor::block_on(client.say_all("x".into())).unwrap();
+    let inherent = futures::executor::block_on(client.say("x".into()).try_collect::<Vec<_>>()).unwrap();
     assert_eq!(inherent, vec![EchoEvent::Said { text: "x".into() }]);
     let through: Vec<EchoEvent> = futures::executor::block_on(Echo::say(&client, "x".into()).collect());
     assert_eq!(through, vec![EchoEvent::Said { text: "x".into() }]);

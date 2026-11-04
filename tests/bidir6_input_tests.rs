@@ -26,6 +26,17 @@ impl plexus_client::FromClientError for IngestEvent {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub enum CountError {
+    Client(String),
+}
+
+impl plexus_client::FromClientError for CountError {
+    fn from_client_error(error: plexus_client::ClientError) -> Self {
+        CountError::Client(error.to_string())
+    }
+}
+
 #[derive(Clone)]
 pub struct IngestActivation;
 
@@ -52,6 +63,12 @@ impl IngestActivation {
     pub async fn first(&self, tokens: Input<Token>, run: String) -> impl Stream<Item = IngestEvent> + Send + 'static {
         let _ = (tokens, run);
         futures::stream::empty()
+    }
+
+    /// RETURNS-36's one-item form with an input half: the count, once
+    #[plexus_macros::method]
+    pub async fn count(&self, tokens: Input<Token>) -> Result<u32, CountError> {
+        Ok(tokens.into_stream().count().await as u32)
     }
 
     /// No input
@@ -95,7 +112,7 @@ async fn with_no_call_under_it_the_method_is_refused_and_named() {
 #[tokio::test]
 async fn the_params_are_read_before_the_input_opens() {
     let refused = IngestActivation.call("tokens", serde_json::json!({}), None, None).await;
-    assert!(matches!(refused, Err(PlexusError::InvalidParams(m)) if m.contains("run")));
+    assert!(matches!(&refused, Err(e @ PlexusError::InvalidParams { .. }) if e.to_string().contains("run")));
 }
 
 #[tokio::test]
@@ -110,7 +127,8 @@ async fn the_trait_takes_a_stream_of_the_items() {
 async fn a_transport_with_no_input_half_says_so() {
     let client = IngestClient::new(Arc::new(plexus_client::MemoryTransport::new()));
     let tokens = futures::stream::iter(vec![Token { t: "a".into() }]);
-    let err = client.tokens_all("r1".into(), tokens).await.unwrap_err();
+    // RETURNS-36: a many-item method's client is a stream of `Result`s.
+    let err = futures::TryStreamExt::try_collect::<Vec<_>>(client.tokens("r1".into(), tokens)).await.unwrap_err();
     assert!(err.to_string().contains("ingest.tokens") && err.to_string().contains("input stream"), "{err}");
 }
 
@@ -126,4 +144,19 @@ async fn the_emitted_client_takes_a_stream_in_its_place() {
     assert_eq!(got.len(), 1, "one refusal, no hang");
     let got = client.plain("r1".into()).next().await;
     assert!(got.is_some());
+}
+
+/// RETURNS-36 beside BIDIR-6: a one-item method with an input half is an
+/// `async fn` on the client and a future on the trait, its input a stream.
+#[tokio::test]
+async fn a_one_item_method_takes_its_input_too() {
+    use futures::stream::BoxStream;
+    let m = method("count");
+    assert!(m.input.is_some());
+    assert_eq!(serde_json::to_value(&m).unwrap()["cardinality"], "one");
+    let tokens: BoxStream<'static, Token> = futures::stream::iter(vec![Token { t: "a".into() }; 3]).boxed();
+    assert!(matches!(Ingest::count(&IngestActivation, tokens).await, Ok(3)));
+    let client = IngestClient::new(plexus_client::MemoryTransport::new());
+    let err = client.count(futures::stream::iter(vec![Token { t: "a".into() }])).await.unwrap_err();
+    assert!(err.to_string().contains("ingest.count") && err.to_string().contains("input stream"), "{err}");
 }

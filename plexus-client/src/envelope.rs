@@ -12,10 +12,10 @@
 //! data: {"content": <event JSON>}
 //! ```
 //!
-//! — dropping `metadata` and `content_type` entirely (likewise
-//! `event: error` carries only `{"message", "code"}`, with no `recoverable`).
-//! A client type that made those fields mandatory could therefore not
-//! represent what the REST transport actually receives.
+//! — dropping `metadata` and `content_type` entirely (and a REST unary
+//! body carries an error's `RemoteError` with no `recoverable`). A client
+//! type that made those fields mandatory could therefore not represent what
+//! the REST transport actually receives.
 //!
 //! So [`StreamItem`] is deliberately the **looser** type: every field the
 //! REST bridge drops is `Option` / `#[serde(default)]`. It deserializes the
@@ -29,12 +29,25 @@
 //! reassembles *into*.)
 //!
 //! Wire compatibility with the server envelope is a regression gate, not an
-//! assumption — see `tests/client_envelope_compat.rs` in `plexus-macros`,
-//! which round-trips every `PlexusStreamItem` variant produced by
-//! `plexus-core` through this type.
+//! assumption — see `tests/client_envelope_compat.rs` in `plexus-core`,
+//! which round-trips every `PlexusStreamItem` 0.7 frame produced by
+//! `plexus-core` through this type, byte for byte.
+//!
+//! # 0.7 (RETURNS-6)
+//!
+//! The progress frame carries the method's typed progress value as
+//! `content` (beside the call's `content_type`, as a data frame does); the
+//! error frame carries a typed [`RemoteError`] — beside spec/05's
+//! `message`, `code` and flattened `error_kind` fields, which main's typed
+//! refusals (AUTH-2, POLYGLOT-5) put there and RETURNS-36 kept.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Value;
+use std::sync::Arc;
+
+use crate::remote_error::RemoteError;
 
 /// Provenance metadata the calling layer stamps onto each item.
 ///
@@ -69,27 +82,45 @@ pub enum StreamItem {
         content: Value,
     },
 
-    /// A progress report. Carries no payload; never terminates the stream.
+    /// A progress report: the method's progress value `P` as JSON
+    /// (`{"message", "percentage"}` for the default [`crate::Note`]). Never
+    /// terminates the stream.
     Progress {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<StreamMetadata>,
-        message: String,
+        /// e.g. `"tickets.import"` — the call's method, as on its data
+        /// items. Optional for the same reason `Data`'s is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        percentage: Option<f32>,
+        content_type: Option<String>,
+        content: Value,
     },
 
-    /// An **in-band** error raised by the hub or the activation — as opposed
-    /// to a [`crate::TransportError`], which is the connection failing.
-    /// Terminates the stream.
+    /// An **in-band** call failure reported by the service — as opposed to a
+    /// [`crate::TransportError`], which is the connection failing. Typed:
+    /// its [`RemoteError`]'s `Display` is the human line. Terminates the
+    /// stream.
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<StreamMetadata>,
-        message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<String>,
-        /// The REST bridge does not emit this field; it defaults to `false`.
+        /// A REST unary body carries no `recoverable`; it defaults to
+        /// `false`.
         #[serde(default)]
         recoverable: bool,
+        /// spec/05's human line (never parsed for meaning). Absent from a
+        /// REST unary body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// spec/05's code: the JSON-RPC code in decimal, or the refusal's
+        /// kind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        /// RETURNS-6: why the call failed, typed — what a typed client
+        /// decodes.
+        error: RemoteError,
+        /// spec/05's flattened fields beside the others (`error_kind`,
+        /// `grant`, `scope`, `roles`, `held_on`, `max`, …), kept whole.
+        #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+        fields: serde_json::Map<String, Value>,
     },
 
     /// A server-to-client request (bidirectional activations). The typed
@@ -139,6 +170,175 @@ impl StreamItem {
             | StreamItem::Error { metadata, .. }
             | StreamItem::Done { metadata } => metadata.as_ref(),
             StreamItem::Request { .. } => None,
+        }
+    }
+}
+
+/// An item's content as a typed client reads it (PERF.115-36): the JSON text
+/// the wire carried, decoded straight into the method's event when it is
+/// read, never into a [`Value`] first. A transport that has no text (one in
+/// process, a script) hands over the `Value` it holds.
+#[derive(Debug, Clone)]
+pub struct Content(Repr);
+
+#[derive(Debug, Clone)]
+enum Repr {
+    Text(Box<RawValue>),
+    Value(Value),
+    /// The whole notification the item came in, its content at
+    /// `params.result.content`, which is read only when it is decoded: once,
+    /// straight into the event. Where the reader found it by the frame's
+    /// bytes, its span, which is decoded alone first. Only a WebSocket reader
+    /// makes one.
+    #[cfg_attr(not(any(feature = "ws-native", feature = "ws-web")), allow(dead_code))]
+    Frame(Box<str>, Option<(usize, usize)>),
+}
+
+/// A notification read for its item's content alone; everything else in it
+/// is passed over.
+#[derive(Deserialize)]
+struct InFrame<C> {
+    params: InParams<C>,
+}
+
+#[derive(Deserialize)]
+struct InParams<C> {
+    result: InItem<C>,
+}
+
+#[derive(Deserialize)]
+struct InItem<C> {
+    content: C,
+}
+
+impl Content {
+    /// A data item's content inside its whole notification (`text`), read
+    /// when it is decoded; at `span`, where the reader found it there.
+    #[cfg_attr(not(any(feature = "ws-native", feature = "ws-web")), allow(dead_code))]
+    pub(crate) fn frame(text: &str, span: Option<std::ops::Range<usize>>) -> Self {
+        Content(Repr::Frame(text.into(), span.map(|s| (s.start, s.end))))
+    }
+
+    /// Whether the content is still inside its whole notification, and
+    /// whether the reader said where.
+    #[cfg(test)]
+    pub(crate) fn in_frame(&self) -> Option<bool> {
+        match self.0 {
+            Repr::Frame(_, span) => Some(span.is_some()),
+            _ => None,
+        }
+    }
+
+    /// The JSON text the wire carried, when the transport kept it.
+    pub fn as_text(&self) -> Option<&str> {
+        match &self.0 {
+            Repr::Text(text) => Some(text.get()),
+            Repr::Value(_) => None,
+            Repr::Frame(frame, _) => serde_json::from_str::<InFrame<&RawValue>>(frame).ok().map(|f| f.params.result.content.get()),
+        }
+    }
+
+    /// The content decoded into `E`: from the text, or from the `Value`.
+    pub fn decode<E: DeserializeOwned>(self) -> Result<E, serde_json::Error> {
+        match self.0 {
+            Repr::Text(text) => serde_json::from_str(text.get()),
+            Repr::Value(value) => serde_json::from_value(value),
+            Repr::Frame(frame, span) => {
+                // The span is where the content begins and the frame's three
+                // closing braces; it is the content alone, or no one value,
+                // which the frame's own reading answers.
+                if let Some(event) = span.and_then(|(start, end)| serde_json::from_str(&frame[start..end]).ok()) {
+                    return Ok(event);
+                }
+                serde_json::from_str::<InFrame<E>>(&frame).map(|f| f.params.result.content)
+            }
+        }
+    }
+
+    /// The content as a `Value`, for a caller that wants one.
+    pub fn into_value(self) -> Result<Value, serde_json::Error> {
+        match self.0 {
+            Repr::Text(text) => serde_json::from_str(text.get()),
+            Repr::Value(value) => Ok(value),
+            Repr::Frame(..) => self.decode(),
+        }
+    }
+}
+
+impl From<Box<RawValue>> for Content {
+    fn from(text: Box<RawValue>) -> Self {
+        Content(Repr::Text(text))
+    }
+}
+
+impl From<Value> for Content {
+    fn from(value: Value) -> Self {
+        Content(Repr::Value(value))
+    }
+}
+
+/// One item of a response stream as a typed client reads it (PERF.115-36):
+/// a [`StreamItem`] whose content is still the wire's JSON ([`Content`]), and
+/// nothing read that a typed decode does not use: no metadata, no request's
+/// data. [`Transport::call_raw`](crate::Transport::call_raw) yields these and
+/// [`decode_raw`](crate::decode_raw) turns them into events; a consumer that
+/// wants the metadata, or answers requests, reads [`StreamItem`]s.
+#[derive(Debug, Clone)]
+pub enum RawItem {
+    /// A payload item: its content, and its `content_type`, which every item
+    /// of a call shares.
+    Data {
+        content_type: Option<Arc<str>>,
+        content: Content,
+    },
+    /// A progress report: the method's progress value `P` (a [`Content`],
+    /// decoded when an opted-in caller reads it), its `content_type` the
+    /// call's. Never terminates the stream.
+    Progress {
+        content_type: Option<Arc<str>>,
+        content: Content,
+    },
+    /// The call failed: its typed [`RemoteError`] (RETURNS-6), beside
+    /// spec/05's `message` and `code`. Terminates the stream.
+    Error {
+        message: Option<String>,
+        code: Option<String>,
+        recoverable: bool,
+        error: Box<RemoteError>,
+    },
+    /// A server-to-client request. A typed client has no answer channel and
+    /// skips it.
+    Request,
+    /// Normal end of stream.
+    Done,
+}
+
+impl RawItem {
+    /// `true` for the two variants after which no further item may arrive.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, RawItem::Done | RawItem::Error { .. })
+    }
+}
+
+impl From<StreamItem> for RawItem {
+    fn from(item: StreamItem) -> Self {
+        match item {
+            StreamItem::Data { content_type, content, .. } => RawItem::Data {
+                content_type: content_type.map(Arc::from),
+                content: content.into(),
+            },
+            StreamItem::Progress { content_type, content, .. } => RawItem::Progress {
+                content_type: content_type.map(Arc::from),
+                content: content.into(),
+            },
+            StreamItem::Error { message, code, recoverable, error, .. } => RawItem::Error {
+                message,
+                code,
+                recoverable,
+                error: Box::new(error),
+            },
+            StreamItem::Request { .. } => RawItem::Request,
+            StreamItem::Done { .. } => RawItem::Done,
         }
     }
 }

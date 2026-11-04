@@ -99,12 +99,10 @@ mod backend;
 #[path = "web.rs"]
 mod backend;
 
-use crate::envelope::StreamItem;
 use crate::error::TransportError;
-use crate::transport::{InputItem, InputItems, ItemStream, MethodRef, Transport};
-use futures_core::Stream;
-use futures_util::{stream, StreamExt};
-use registry::{end_frame, input_frame, subscribe_frame, Inbound, InputSignal, Items, Registry, SubSlot};
+use crate::transport::{InputItem, InputItems, ItemStream, MethodRef, RawItemStream, Transport};
+use futures_util::{stream, Stream, StreamExt};
+use registry::{end_frame, input_frame, subscribe_frame, Delivered, InputSignal, Items, Registry, SubSlot};
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -227,10 +225,10 @@ impl WsTransport {
 
     /// Write the subscribe frame and hand back what the returned stream
     /// needs to drain it.
-    fn subscribe(&self, method: MethodRef, params: Value) -> Result<Awaiting, TransportError> {
+    fn subscribe(&self, method: MethodRef, params: Value, raw: bool) -> Result<Awaiting, TransportError> {
         let request_id = self.registry.next_request_id();
         let slot = SubSlot::new();
-        let reply = self.registry.register_pending(request_id, slot.clone())?;
+        let reply = self.registry.register_pending(request_id, slot.clone(), raw)?;
 
         let frame = subscribe_frame(
             request_id,
@@ -259,14 +257,37 @@ impl WsTransport {
 
 impl Transport for WsTransport {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
+        Box::pin(self.items(method, params, false).map(|item| item.map(Delivered::into_item)))
+    }
+
+    /// The items with their content as the wire's text, for a typed client
+    /// (PERF.115-36).
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        Box::pin(self.items(method, params, true).map(|item| item.map(Delivered::into_raw)))
+    }
+
+    fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
+        Box::pin(self.items_with_input(method, params, input, false).map(|item| item.map(Delivered::into_item)))
+    }
+
+    /// BIDIR-6 on RETURNS-36's typed path: the items with their content as
+    /// the wire's text.
+    fn call_raw_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> RawItemStream<'a> {
+        Box::pin(self.items_with_input(method, params, input, true).map(|item| item.map(Delivered::into_raw)))
+    }
+}
+
+impl WsTransport {
+    /// One call's items, as `raw` says it reads them.
+    fn items(&self, method: MethodRef, params: Value, raw: bool) -> impl Stream<Item = Result<Delivered, TransportError>> + '_ {
         // The subscribe goes out NOW, not on first poll — see the module
         // docs: `watch` then mutate is the shape every menger client uses.
-        let start = match self.subscribe(method, params) {
+        let start = match self.subscribe(method, params, raw) {
             Ok(awaiting) => CallState::Awaiting(awaiting),
-            Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+            Err(e) => CallState::Failed(e),
         };
 
-        Box::pin(stream::unfold(start, |state| async move {
+        stream::unfold(start, |state| async move {
             match state {
                 CallState::Awaiting(awaiting) => match awaiting.established().await {
                     Err(e) => Some((Err(e), CallState::Ended)),
@@ -279,30 +300,36 @@ impl Transport for WsTransport {
                     .next_item()
                     .await
                     .map(|item| (item, CallState::Active(active))),
+                CallState::Failed(e) => Some((Err(e), CallState::Ended)),
                 CallState::Ended => None,
             }
-        }))
+        })
     }
 
-    fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
-        let start = match self.subscribe(method, params) {
-            Ok(awaiting) => awaiting,
-            Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+    /// One call's items with its input half fed as they are read, as `raw`
+    /// says it reads them.
+    fn items_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>, raw: bool) -> impl Stream<Item = Result<Delivered, TransportError>> + 'a {
+        let start = match self.subscribe(method, params, raw) {
+            Ok(awaiting) => {
+                let feed = Feed { input: Some(input), credit: 0, seq: 0, conn: self.conn.clone(), registry: self.registry.clone(), failed: false };
+                Feeding::Awaiting(awaiting, feed)
+            }
+            Err(e) => Feeding::Failed(e),
         };
-        let feed = Feed { input: Some(input), credit: 0, seq: 0, conn: self.conn.clone(), registry: self.registry.clone(), failed: false };
-        Box::pin(stream::unfold(Feeding::Awaiting(start, feed), |state| async move {
+        stream::unfold(start, |state| async move {
             let (mut active, mut feed) = match state {
                 Feeding::Awaiting(awaiting, feed) => match awaiting.established().await {
                     Err(e) => return Some((Err(e), Feeding::Ended)),
                     Ok(active) => (active, feed),
                 },
                 Feeding::Active(active, feed) => (active, feed),
+                Feeding::Failed(e) => return Some((Err(e), Feeding::Ended)),
                 Feeding::Ended => return None,
             };
             let item = std::future::poll_fn(|cx| feed.poll_next(&mut active, cx)).await?;
             let failed = feed.failed;
             Some((item, if failed { Feeding::Ended } else { Feeding::Active(active, feed) }))
-        }))
+        })
     }
 }
 
@@ -310,6 +337,8 @@ impl Transport for WsTransport {
 enum Feeding<'a> {
     Awaiting(Awaiting, Feed<'a>),
     Active(Active, Feed<'a>),
+    /// The subscribe could not be written: one error, then the end.
+    Failed(TransportError),
     Ended,
 }
 
@@ -334,19 +363,19 @@ struct Feed<'a> {
 impl Feed<'_> {
     /// The call's next item: the socket first, and between its items
     /// whatever the input has ready and credit allows.
-    fn poll_next(&mut self, active: &mut Active, cx: &mut Context<'_>) -> Poll<Option<Result<StreamItem, TransportError>>> {
+    fn poll_next(&mut self, active: &mut Active, cx: &mut Context<'_>) -> Poll<Option<Result<Delivered, TransportError>>> {
         loop {
             let read = match active.items.poll_next_unpin(cx) {
-                Poll::Ready(Some(Inbound::Input(InputSignal::Credit(n)))) => {
+                Poll::Ready(Some(Ok(Delivered::Input(InputSignal::Credit(n))))) => {
                     self.credit = self.credit.saturating_add(n);
                     true
                 }
-                Poll::Ready(Some(Inbound::Input(InputSignal::Ack))) => true,
-                Poll::Ready(Some(Inbound::Input(InputSignal::Closed))) => {
+                Poll::Ready(Some(Ok(Delivered::Input(InputSignal::Ack)))) => true,
+                Poll::Ready(Some(Ok(Delivered::Input(InputSignal::Closed)))) => {
                     self.input = None;
                     true
                 }
-                Poll::Ready(Some(Inbound::Item(item))) => {
+                Poll::Ready(Some(item)) => {
                     if let Ok(item) = &item {
                         if item.is_terminal() {
                             self.input = None;
@@ -449,6 +478,8 @@ fn binary_frame(subscription: &Value, seq: u64, payload: &[u8]) -> Result<Vec<u8
 enum CallState {
     Awaiting(Awaiting),
     Active(Active),
+    /// The subscribe could not be written: one error, then the end.
+    Failed(TransportError),
     Ended,
 }
 
@@ -482,12 +513,14 @@ struct Active {
 }
 
 impl Active {
-    async fn next_item(&mut self) -> Option<Result<StreamItem, TransportError>> {
+    async fn next_item(&mut self) -> Option<Result<Delivered, TransportError>> {
         loop {
             match self.items.next().await {
+                // A plain call of a method with an input half: nothing to feed.
+                Some(Ok(Delivered::Input(_))) => continue,
                 // `done` / `error` end the subscription server-side, so there
                 // is nothing left to unsubscribe from.
-                Some(Inbound::Item(Ok(item))) => {
+                Some(Ok(item)) => {
                     if item.is_terminal() {
                         self.guard.slot.mark_finished();
                     }
@@ -497,9 +530,7 @@ impl Active {
                 // socket survived (a malformed item, say) the subscription is
                 // still live and the guard must still cancel it. On a dead
                 // socket the unsubscribe write simply fails and is ignored.
-                Some(Inbound::Item(Err(e))) => return Some(Err(e)),
-                // A plain call of a method with an input half: nothing to feed.
-                Some(Inbound::Input(_)) => continue,
+                Some(Err(e)) => return Some(Err(e)),
                 None => return None,
             }
         }

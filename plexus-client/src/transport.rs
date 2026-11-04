@@ -1,9 +1,10 @@
 //! The transport seam: one small trait every wire implementation satisfies,
 //! and the strongly-typed method reference the generated client hands it.
 
-use crate::envelope::StreamItem;
+use crate::envelope::{RawItem, StreamItem};
 use crate::error::TransportError;
 use futures_core::Stream;
+use futures_util::StreamExt;
 use serde_json::Value;
 use std::fmt;
 use std::pin::Pin;
@@ -23,6 +24,16 @@ pub type ItemStream<'a> =
 #[cfg(target_arch = "wasm32")]
 pub type ItemStream<'a> = Pin<Box<dyn Stream<Item = Result<StreamItem, TransportError>> + 'a>>;
 
+/// A boxed stream of a typed client's items ([`RawItem`], PERF.115-36). The
+/// same `Send` bound as [`ItemStream`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type RawItemStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<RawItem, TransportError>> + Send + 'a>>;
+
+/// A boxed stream of a typed client's items. See the non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub type RawItemStream<'a> = Pin<Box<dyn Stream<Item = Result<RawItem, TransportError>> + 'a>>;
+
 /// BIDIR-6: what a transport sends for a call's input half: each item, or
 /// why an item would not serialize (which ends the call).
 pub type InputItems<'a> = crate::contract::BoxStream<'a, Result<InputItem, TransportError>>;
@@ -39,26 +50,13 @@ pub enum InputItem {
     Binary(bytes::Bytes),
 }
 
-/// `Send` where a client stream is: off wasm32. The bound a generated client
-/// method puts on the stream it takes.
-#[cfg(not(target_arch = "wasm32"))]
-pub trait MaybeSend: Send {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T: Send> MaybeSend for T {}
-
-/// `Send` where a client stream is. See the non-wasm32 variant.
-#[cfg(target_arch = "wasm32")]
-pub trait MaybeSend {}
-#[cfg(target_arch = "wasm32")]
-impl<T> MaybeSend for T {}
-
 /// A stream of items as [`InputItems`]: what a generated client method
 /// hands [`Transport::call_with_input`]. `Bytes` items are
 /// [`InputItem::Binary`] (with a WebSocket backend); anything else is JSON.
 pub fn encode_input<'a, T, S>(input: S) -> InputItems<'a>
 where
     T: serde::Serialize + 'static,
-    S: Stream<Item = T> + MaybeSend + 'a,
+    S: Stream<Item = T> + crate::contract::MaybeSend + 'a,
 {
     use futures_util::StreamExt;
     Box::pin(input.map(|item| {
@@ -195,6 +193,16 @@ pub fn join_path(parent: &'static str, segment: &'static str) -> &'static str {
 pub trait Transport {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_>;
 
+    /// [`call`](Self::call) for a typed client (PERF.115-36): the same items,
+    /// each data item's content still the wire's JSON, which
+    /// [`decode_raw`](crate::decode_raw) decodes straight into the method's
+    /// event. The default is `call`'s items, each content the `Value` it
+    /// carries; a transport that has the wire's text (`WsTransport`) hands it
+    /// over unread.
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        Box::pin(self.call(method, params).map(|item| item.map(RawItem::from)))
+    }
+
     /// BIDIR-6: [`call`](Self::call), for a method with an input half:
     /// `input` is sent as the call runs, under the callee's credit, and ended
     /// when it ends. A transport that carries no input half (the default)
@@ -204,6 +212,14 @@ pub trait Transport {
         let refused = TransportError::protocol(format!("`{method}` takes an input stream, and this transport carries none"));
         Box::pin(futures_util::stream::once(async move { Err(refused) }))
     }
+
+    /// BIDIR-6: [`call_raw`](Self::call_raw), for a method with an input
+    /// half: what a typed client's method with an `Input` calls. The default
+    /// is [`call_with_input`](Self::call_with_input)'s items, each content
+    /// the `Value` it carries.
+    fn call_raw_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> RawItemStream<'a> {
+        Box::pin(self.call_with_input(method, params, input).map(|item| item.map(RawItem::from)))
+    }
 }
 
 /// So a client can be handed `&T`, `Arc<T>`, `Box<T>`, … interchangeably.
@@ -211,8 +227,17 @@ impl<T: Transport + ?Sized> Transport for &T {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
     }
+
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        (**self).call_raw(method, params)
+    }
+
     fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
         (**self).call_with_input(method, params, input)
+    }
+
+    fn call_raw_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> RawItemStream<'a> {
+        (**self).call_raw_with_input(method, params, input)
     }
 }
 
@@ -220,8 +245,17 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
     }
+
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        (**self).call_raw(method, params)
+    }
+
     fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
         (**self).call_with_input(method, params, input)
+    }
+
+    fn call_raw_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> RawItemStream<'a> {
+        (**self).call_raw_with_input(method, params, input)
     }
 }
 
@@ -229,8 +263,17 @@ impl<T: Transport + ?Sized> Transport for std::rc::Rc<T> {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
     }
+
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        (**self).call_raw(method, params)
+    }
+
     fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
         (**self).call_with_input(method, params, input)
+    }
+
+    fn call_raw_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> RawItemStream<'a> {
+        (**self).call_raw_with_input(method, params, input)
     }
 }
 
@@ -238,7 +281,16 @@ impl<T: Transport + ?Sized> Transport for std::sync::Arc<T> {
     fn call(&self, method: MethodRef, params: Value) -> ItemStream<'_> {
         (**self).call(method, params)
     }
+
+    fn call_raw(&self, method: MethodRef, params: Value) -> RawItemStream<'_> {
+        (**self).call_raw(method, params)
+    }
+
     fn call_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> ItemStream<'a> {
         (**self).call_with_input(method, params, input)
+    }
+
+    fn call_raw_with_input<'a>(&'a self, method: MethodRef, params: Value, input: InputItems<'a>) -> RawItemStream<'a> {
+        (**self).call_raw_with_input(method, params, input)
     }
 }

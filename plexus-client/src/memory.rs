@@ -22,7 +22,8 @@ type Script = Vec<Result<StreamItem, TransportError>>;
 /// A [`Transport`] that answers from a script and records what it was asked.
 ///
 /// ```
-/// use plexus_client::{collect_data, decode, MemoryTransport, MethodRef, Transport};
+/// use futures::TryStreamExt;
+/// use plexus_client::{decode, MemoryTransport, MethodRef, Transport};
 ///
 /// #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
 /// struct Ev { n: u8 }
@@ -31,7 +32,7 @@ type Script = Vec<Result<StreamItem, TransportError>>;
 ///
 /// let t = MemoryTransport::new().script_events(COUNT, &[Ev { n: 1 }, Ev { n: 2 }]);
 /// let events = futures::executor::block_on(async {
-///     collect_data(decode::<Ev>(t.call(COUNT, serde_json::json!({})))).await
+///     decode::<Ev>(t.call(COUNT, serde_json::json!({}))).try_collect::<Vec<_>>().await
 /// })
 /// .unwrap();
 ///

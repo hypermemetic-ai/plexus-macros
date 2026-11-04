@@ -1,18 +1,31 @@
-//! MACRO-2 · the typed client half of `#[plexus_macros::activation]`.
+//! The typed client half of `#[plexus_macros::activation]` (MACRO-2; 0.7
+//! shapes RETURNS-9).
 //!
 //! The macro already knows, at the moment it runs, everything a Rust
 //! consumer needs to call the activation it is expanding: every
 //! `#[method]`'s wire name, its parameters (names, types, optionality) and
-//! its `Stream<Item = E>` event type. Before this module that knowledge went
-//! only into the schema; now it also produces a client, so no consumer ever
-//! hand-writes a call site or hand-mirrors an event type.
+//! its precise contract — cardinality, item `T`, error `E`, progress `P`
+//! (RETURNS-8's `MethodInfo`). That knowledge goes into the schema and, with
+//! the `client` flag, into a client, so no consumer ever hand-writes a call
+//! site or hand-mirrors an item type.
 //!
 //! # Shape of the emitted code
 //!
-//! For `#[plexus_macros::activation(namespace = "tickets", client)] impl
-//! Tickets`, beside the activation's own items:
+//! For `#[plexus_macros::activation] impl TicketsActivation` (namespace
+//! `tickets`; MACRO-13: emitted whenever the crate depends on
+//! plexus-client), beside the activation's own items:
 //!
 //! ```ignore
+//! /// The aggregate rule (RETURNS-1 decisions 1, 5; pin 13).
+//! #[derive(Debug, Serialize, Deserialize)]
+//! #[serde(tag = "method", content = "event")]
+//! pub enum TicketsEvent {
+//!     #[serde(rename = "health")] Health(Health),
+//!     #[serde(rename = "get")]    Get(#[serde(with = "plexus_client::wire_result")] Result<Ticket, GetError>),
+//!     #[serde(rename = "list")]   List(#[serde(with = "plexus_client::wire_result")] Result<ListItem, ListError>),
+//!     #[serde(rename = "import")] Import(#[serde(with = "plexus_client::wire_result")] Result<ImportSummary, ImportError>),
+//! }
+//!
 //! pub struct TicketsClient<T> { transport: T, path: &'static str }
 //!
 //! impl<T> TicketsClient<T> {
@@ -25,22 +38,36 @@
 //! }
 //!
 //! impl<T: plexus_client::Transport> TicketsClient<T> {
-//!     pub const METHOD_LIST: plexus_client::MethodRef = ..;
-//!     pub fn list(&self, epic: Option<String>, ..) -> EventStream<'_, TicketsEvent>;
-//!     pub async fn list_all(&self, epic: Option<String>, ..)
-//!         -> Result<Vec<TicketsEvent>, ClientError>;
-//!     pub fn inputs(&self) -> InputsClient<&T>;   // a static #[child], MACRO-16
+//!     pub const METHOD_GET: plexus_client::MethodRef = ..;          // one per method
+//!     pub async fn health(&self) -> Result<Health, ClientError>;     // one
+//!     pub async fn get(&self, id: String)
+//!         -> Result<Result<Ticket, GetError>, ClientError>;          // one, fallible
+//!     pub fn list(&self, epic: Option<String>)                       // many
+//!         -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent>;
+//!     pub fn import(&self, source: String)                           // many, with progress
+//!         -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent>;
+//!     pub fn inputs(&self) -> InputsClient<&T>;                     // a static #[child], MACRO-16
 //! }
 //! ```
 //!
-//! # Three decisions worth knowing
+//! | method form (server) | client method | yields |
+//! |---|---|---|
+//! | one: `-> T` / `-> Result<T, E>` | `async fn m(&self, ..) -> Result<I, ClientError>` | `I` = `T` / `Result<T, E>` |
+//! | many: `-> impl Stream<Item = …>` | `fn m(&self, ..) -> MethodStream<'_, I, P, {Ns}Event>` | `Result<I, ClientError>`; `.with_progress()`, `.events()` |
+//!
+//! `P` is the declared progress type (`Note` for `Progress<T>`), or
+//! `plexus_client::NoProgress` when the item is not a `Progress`. A one-item
+//! method has no progress (RETURNS-1 decision 10), so it is a plain `async
+//! fn` and has no `.with_progress()`.
+//!
+//! # Decisions worth knowing
 //!
 //! **Emitted at the impl block's own scope, not inside a module.** A module
-//! would need `use super::*` to reach the activation's event and parameter
+//! would need `use super::*` to reach the activation's item and parameter
 //! types, and a glob import is exactly the thing that breaks in a consumer's
 //! crate for reasons the consumer cannot see.
 //!
-//! **Generic over the transport.** The three transports have irreconcilable
+//! **Generic over the transport.** The transports have irreconcilable
 //! dependency sets (jsonrpsee's ws-client, an HTTP stack, `plexus-core`
 //! itself). Naming one here would drag it into every consumer, including the
 //! wasm32 one. `T: Transport` costs one type parameter and keeps the emitted
@@ -54,8 +81,24 @@
 //! serializes `severity`/`parent` with `skip_serializing_if`, and its REST
 //! tests assert absence rather than null. A client that sent `"parent":
 //! null` would be sending a shape the server never sends.
+//!
+//! **The aggregate derives through `plexus_client::__rt::serde`**
+//! (`#[serde(crate = "…")]`), so the emitted code needs nothing in the
+//! consumer's `Cargo.toml` beyond `plexus-client`. It derives `Debug`, so
+//! every item type of an activation with a client implements it. Not `Clone`
+//! (RETURNS-36): under MACRO-13 the client is emitted whenever the crate
+//! depends on plexus-client, so the aggregate asks no more of an existing
+//! activation's item types than its client does.
+//!
+//! **The aggregate's name is `{Ns}Event`, unless an item type of the
+//! activation is already called that** (RETURNS-36): an activation written
+//! before 0.7 yields one shared event enum, usually named so (`EchoEvent`
+//! for `echo`), and under MACRO-13 its client — and so the aggregate — is
+//! emitted without asking. Then the aggregate is `{Ns}Aggregate`.
 
-use crate::parse::{ChildMethodInfo, ChildMethodKind, MethodInfo, ParamInfo};
+use std::collections::HashMap;
+
+use crate::parse::{Cardinality, ChildMethodInfo, ChildMethodKind, MethodInfo, ParamInfo};
 use proc_macro2::{Span, TokenStream};
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote};
@@ -105,53 +148,15 @@ fn is_option_type(ty: &Type) -> bool {
             .is_some_and(|s| s.ident == "Option" && matches!(s.arguments, syn::PathArguments::AngleBracketed(_)))
 }
 
-/// The statement that puts one parameter into the params object.
-fn param_insert(param: &ParamInfo, client: &syn::Path) -> TokenStream {
-    param_insert_with(param, client, |err| quote! { return #client::error_stream(#err); })
-}
-
-/// [`param_insert`], with what to do when the parameter will not serialize
-/// given by the caller (MACRO-13: a trait method returns a stream of events,
-/// not of `Result`s, so it answers differently).
-pub(crate) fn param_insert_with(
-    param: &ParamInfo,
-    client: &syn::Path,
-    on_err: impl Fn(TokenStream) -> TokenStream,
-) -> TokenStream {
+/// One parameter's link in the `Params` builder chain.
+pub(crate) fn param_link(param: &ParamInfo) -> TokenStream {
     let ident = &param.name;
     let wire_name = param.name.to_string();
-    let fail = on_err(quote! {
-        #client::ClientError::Encode {
-            param: #wire_name,
-            message: __e.to_string(),
-        }
-    });
-
     if is_option_type(&param.ty) {
         // Omitted when None — see the module docs.
-        quote! {
-            if let ::core::option::Option::Some(__v) = #ident {
-                match #client::__rt::serde_json::to_value(__v) {
-                    ::core::result::Result::Ok(__json) => {
-                        __params.insert(#wire_name.to_string(), __json);
-                    }
-                    ::core::result::Result::Err(__e) => {
-                        #fail
-                    }
-                }
-            }
-        }
+        quote! { .optional(#wire_name, #ident) }
     } else {
-        quote! {
-            match #client::__rt::serde_json::to_value(#ident) {
-                ::core::result::Result::Ok(__json) => {
-                    __params.insert(#wire_name.to_string(), __json);
-                }
-                ::core::result::Result::Err(__e) => {
-                    #fail
-                }
-            }
-        }
+        quote! { .param(#wire_name, #ident) }
     }
 }
 
@@ -161,62 +166,144 @@ pub(crate) fn method_const_ident(m: &MethodInfo) -> syn::Ident {
     format_ident!("METHOD_{}", m.method_name.to_uppercase().replace(['.', '-'], "_"))
 }
 
-/// Emit the whole client for one activation.
-///
-/// Returns an empty token stream when the activation did not opt in, so a
-/// non-opted-in expansion is byte-identical to before this build.
+/// PascalCase of a wire name: `get_status` → `GetStatus`, `claude_code` →
+/// `ClaudeCode`. Words split at `_`, `-` and `.`; each word's first letter is
+/// uppercased and the rest kept as written.
+fn pascal(name: &str) -> String {
+    name.split(['_', '-', '.'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// `name` as an identifier, or an error naming what it was derived from.
+fn derived_ident(name: &str, what: &str, span: Span) -> syn::Result<syn::Ident> {
+    syn::parse_str::<syn::Ident>(name)
+        .map(|mut ident| {
+            ident.set_span(span);
+            ident
+        })
+        .map_err(|_| {
+            syn::Error::new(
+                span,
+                format!(
+                    "#[plexus_macros::activation(client)]: {what} derives the \
+                     identifier `{name}`, which is not a valid Rust identifier"
+                ),
+            )
+        })
+}
+
+/// The aggregate's name: Pascal(namespace) + `Event` (RETURNS-1 decision 7).
+pub(crate) fn aggregate_name(namespace: &str) -> String {
+    format!("{}Event", pascal(namespace))
+}
+
+/// A path as the string a serde attribute takes (`crate = "…"`, `with =
+/// "…"`), without the spaces `TokenStream`'s `Display` puts between tokens.
+fn path_string(tokens: TokenStream) -> String {
+    tokens.to_string().replace(' ', "")
+}
+
+/// The aggregate's name, given the activation's methods: `{Ns}Event`, or
+/// `{Ns}Aggregate` when an item type of a method is already named
+/// `{Ns}Event` (see the module docs).
+pub(crate) fn aggregate_name_for(namespace: &str, methods: &[MethodInfo]) -> String {
+    let name = aggregate_name(namespace);
+    let named = |ty: &Type| match ty {
+        Type::Path(tp) => tp.path.segments.last().is_some_and(|s| s.ident == name),
+        _ => false,
+    };
+    if methods.iter().any(|m| named(&m.ok_ty) || m.err_ty.as_ref().is_some_and(named)) {
+        format!("{}Aggregate", pascal(namespace))
+    } else {
+        name
+    }
+}
+
+/// Emit the whole client for one activation: the `{Ns}Event` aggregate, the
+/// client struct (`{Stem}Client<T>`, MACRO-13's name), its methods and its
+/// static children's accessors (MACRO-16).
 pub(crate) fn generate(
     client_ty: &syn::Ident,
     namespace: &str,
     methods: &[MethodInfo],
     children: &[ChildMethodInfo],
     client_path: &syn::Path,
-    // MACRO-13: the client came from the manifest, not from a `client` flag.
-    unflagged: bool,
 ) -> syn::Result<TokenStream> {
     let child_accessors = children
         .iter()
         .filter(|c| matches!(c.kind, ChildMethodKind::Static))
         .map(|c| child_accessor(c, namespace, client_path))
         .collect::<syn::Result<Vec<TokenStream>>>()?;
+    let event_ty = derived_ident(
+        &aggregate_name_for(namespace, methods),
+        &format!("the namespace `{namespace}`"),
+        Span::call_site(),
+    )?;
+    let wire_result_path = path_string(quote! { #client_path::wire_result });
+    let serde_path = path_string(quote! { #client_path::__rt::serde });
 
+    let mut variants: Vec<TokenStream> = Vec::new();
     let mut method_items: Vec<TokenStream> = Vec::new();
     let mut consts: Vec<TokenStream> = Vec::new();
+    let mut seen: HashMap<String, String> = HashMap::new();
 
     for m in methods {
-        // A method whose return type is not `impl Stream<Item = E>` has no
-        // event type to give a caller. Silently omitting it from the client
-        // would recreate exactly the drift this ticket removes — a consumer
-        // would find the method missing and hand-write it again.
-        let Some(event_ty) = &m.stream_item_type else {
-            if unflagged {
-                return Err(syn::Error::new(
-                    m.fn_name.span(),
-                    format!(
-                        "#[plexus_macros::activation]: method `{}` does not return \
-                         `impl Stream<Item = ..>`, so the client (emitted because this crate \
-                         depends on plexus-client) has no event type for it. Give it a stream \
-                         return type.",
-                        m.method_name
-                    ),
-                ));
-            }
+        let wire_method = &m.method_name;
+
+        // ---------------------------------------------- the aggregate variant
+        let variant_name = pascal(wire_method);
+        if let Some(other) = seen.insert(variant_name.clone(), wire_method.clone()) {
             return Err(syn::Error::new(
                 m.fn_name.span(),
                 format!(
-                    "#[plexus_macros::activation(client)]: method `{}` does not return \
-                     `impl Stream<Item = ..>`, so the generated client has no event type \
-                     for it. Give it a stream return type, or remove the `client` flag \
-                     from the activation.",
-                    m.method_name
+                    "#[plexus_macros::activation(client)]: methods `{other}` and \
+                     `{wire_method}` both derive the `{event_ty}::{variant_name}` \
+                     variant of the activation's aggregate; rename one of them"
                 ),
             ));
+        }
+        let variant = derived_ident(
+            &variant_name,
+            &format!("the method `{wire_method}`"),
+            m.fn_name.span(),
+        )?;
+
+        // I = T, or Result<T, E> with its {"ok"} / {"err"} wire form.
+        let ok_ty = &m.ok_ty;
+        let (item_ty, decoder, payload) = match &m.err_ty {
+            None => (
+                quote! { #ok_ty },
+                quote! { #client_path::Content::decode::<#ok_ty> },
+                quote! { #ok_ty },
+            ),
+            Some(err_ty) => (
+                quote! { ::core::result::Result<#ok_ty, #err_ty> },
+                quote! { #client_path::wire_result::from_content::<#ok_ty, #err_ty> },
+                quote! {
+                    #[serde(with = #wire_result_path)]
+                    ::core::result::Result<#ok_ty, #err_ty>
+                },
+            ),
         };
 
+        let variant_doc = format!("An item of `{namespace}.{wire_method}`.");
+        variants.push(quote! {
+            #[doc = #variant_doc]
+            #[serde(rename = #wire_method)]
+            #variant(#payload),
+        });
+
+        // ------------------------------------------------- the client method
         let fn_ident = &m.fn_name;
-        let all_ident = format_ident!("{}_all", m.fn_name);
         let const_ident = method_const_ident(m);
-        let wire_method = &m.method_name;
 
         // Parameters, in signature order, minus the ones the server injects:
         // `#[activation_param]`, `#[from_auth]` and `auth:`/`ctx:` are
@@ -231,54 +318,31 @@ pub(crate) fn generate(
                 quote! { #name: #ty }
             })
             .collect();
-        let mut arg_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
         // BIDIR-6: the input half is a parameter of the client too, as any
         // stream of the method's items; it is drained under credit as the
-        // returned stream is read.
+        // returned stream (or the future) is read.
         let lifetime = m.input.as_ref().map(|_| quote! { <'__plexus_a> });
         let this = if m.input.is_some() { quote! { &'__plexus_a self } } else { quote! { &self } };
-        let events = if m.input.is_some() { quote! { '__plexus_a } } else { quote! { '_ } };
+        let items_life = if m.input.is_some() { quote! { '__plexus_a } } else { quote! { '_ } };
         if let Some(i) = &m.input {
             let (name, item) = (&i.name, &i.item);
             sig_params.insert(i.at, quote! {
                 #name: impl #client_path::__rt::Stream<Item = #item> + #client_path::MaybeSend + '__plexus_a
             });
-            arg_names.insert(i.at, name);
         }
-        let call = match &m.input {
-            None => quote! {
-                #client_path::Transport::call(
-                    &self.transport,
-                    Self::#const_ident.at(self.path),
-                    #client_path::__rt::serde_json::Value::Object(__params),
-                )
-            },
-            Some(i) => {
-                let name = &i.name;
-                quote! {
-                    #client_path::Transport::call_with_input(
-                        &self.transport,
-                        Self::#const_ident.at(self.path),
-                        #client_path::__rt::serde_json::Value::Object(__params),
-                        #client_path::encode_input(#name),
-                    )
-                }
-            }
-        };
-        let inserts: Vec<TokenStream> = m
-            .params
-            .iter()
-            .map(|p| param_insert(p, client_path))
-            .collect();
+        let input_arg = m.input.as_ref().map(|i| {
+            let name = &i.name;
+            quote! { #client_path::encode_input(#name), }
+        });
+        let links: Vec<TokenStream> = m.params.iter().map(param_link).collect();
+        let params = quote! { #client_path::Params::new() #(#links)* .build() };
 
+        let calls = format!("Calls `{namespace}.{wire_method}`.");
         let doc = if m.description.is_empty() {
-            format!("Calls `{namespace}.{wire_method}`.")
+            calls
         } else {
-            format!("{}\n\nCalls `{namespace}.{wire_method}`.", m.description)
+            format!("{}\n\n{calls}", m.description)
         };
-        let doc_all = format!(
-            "{doc}\n\nDrives the stream to completion and collects every data event."
-        );
 
         consts.push(quote! {
             #[doc = #doc]
@@ -286,33 +350,85 @@ pub(crate) fn generate(
                 #client_path::MethodRef::new(#namespace, #wire_method);
         });
 
-        method_items.push(quote! {
-            // The parameter list is the activation's, not ours: menger's
-            // `create` takes seven. A lint the consumer cannot act on
-            // without changing the *server* has no business firing in the
-            // crate that merely opted into a client.
-            #[allow(clippy::too_many_arguments)]
-            #[doc = #doc]
-            pub fn #fn_ident #lifetime (#this #(, #sig_params)*)
-                -> #client_path::EventStream<#events, #event_ty>
-            {
-                let mut __params = #client_path::__rt::serde_json::Map::new();
-                #(#inserts)*
-                #client_path::decode::<#event_ty>(#call)
+        // BIDIR-6: a method with an input half calls through the input's
+        // twin of each.
+        let (call_one, call_many) = if m.input.is_some() {
+            (quote! { call_one_with_input }, quote! { call_with_input })
+        } else {
+            (quote! { call_one }, quote! { call })
+        };
+        // The parameter list is the activation's, not ours: menger's
+        // `create` takes seven. A lint the consumer cannot act on without
+        // changing the *server* has no business firing in the crate that
+        // merely opted into a client.
+        let method = match m.cardinality {
+            Cardinality::One => {
+                let doc = format!(
+                    "{doc}\n\nOne item: `Ok(item)` is the activation's answer; `Err` is \
+                     the call failing (`ClientError::Remote` for the server's typed \
+                     error frame)."
+                );
+                quote! {
+                    #[allow(clippy::too_many_arguments)]
+                    #[doc = #doc]
+                    pub async fn #fn_ident #lifetime (#this #(, #sig_params)*)
+                        -> ::core::result::Result<#item_ty, #client_path::ClientError>
+                    {
+                        #client_path::#call_one(
+                            &self.transport,
+                            Self::#const_ident.at(self.path),
+                            #params,
+                            #input_arg
+                            #decoder,
+                        )
+                        .await
+                    }
+                }
             }
-
-            #[allow(clippy::too_many_arguments)]
-            #[doc = #doc_all]
-            pub async fn #all_ident #lifetime (#this #(, #sig_params)*)
-                -> ::core::result::Result<
-                    ::std::vec::Vec<#event_ty>,
-                    #client_path::ClientError,
-                >
-            {
-                #client_path::collect_data(self.#fn_ident(#(#arg_names),*)).await
+            Cardinality::Many => {
+                let progress_ty = match &m.progress_ty {
+                    Some(p) => {
+                        let p = p.to_type(client_path);
+                        quote! { #p }
+                    }
+                    None => quote! { #client_path::NoProgress },
+                };
+                let doc = format!(
+                    "{doc}\n\nMany items, as a stream of `Result<item, ClientError>`; \
+                     progress is dropped unless opted in with `.with_progress()`, and \
+                     `.events()` yields `{event_ty}::{variant}`."
+                );
+                quote! {
+                    #[allow(clippy::too_many_arguments)]
+                    #[doc = #doc]
+                    pub fn #fn_ident #lifetime (#this #(, #sig_params)*)
+                        -> #client_path::MethodStream<#items_life, #item_ty, #progress_ty, #event_ty>
+                    {
+                        #client_path::MethodStream::#call_many(
+                            &self.transport,
+                            Self::#const_ident.at(self.path),
+                            #params,
+                            #input_arg
+                            #decoder,
+                            #event_ty::#variant,
+                        )
+                    }
+                }
             }
-        });
+        };
+        method_items.push(method);
     }
+
+    let event_doc = format!(
+        "The `{namespace}` activation's event: one variant per method, keyed by \
+         the method's wire name, carrying that method's item — derived by \
+         `#[plexus_macros::activation(client)]`, never sent on the wire.\n\n\
+         Wire shape `{{\"method\": \"<name>\", \"event\": <item>}}`, a Result \
+         item as `{{\"ok\"}}` / `{{\"err\"}}`. A many-item call's `.events()` \
+         yields it; merging several calls into one listener is ordinary stream \
+         plumbing. Progress and call failures are not items, so they are not \
+         here."
+    );
 
     let struct_doc = format!(
         "Typed client for the `{namespace}` activation, generated by \
@@ -320,12 +436,27 @@ pub(crate) fn generate(
          Generic over the transport: construct it with any \
          `plexus_client::Transport` — in-process for tests, WebSocket \
          JSON-RPC or REST + SSE against a server.\n\n\
-         The parameter and event types are the activation's own, so a change \
-         to a method or an event is a compile error here, not a runtime \
-         surprise."
+         A one-item method is an `async fn` returning `Result<item, \
+         ClientError>`; a many-item method returns a `MethodStream`. The \
+         parameter and item types are the activation's own, so a change to \
+         either is a compile error here, not a runtime surprise."
     );
 
     Ok(quote! {
+        #[doc = #event_doc]
+        #[derive(
+            ::core::fmt::Debug,
+            #client_path::__rt::serde::Serialize,
+            #client_path::__rt::serde::Deserialize,
+        )]
+        #[serde(crate = #serde_path, tag = "method", content = "event")]
+        // RETURNS-36: the aggregate is as public as the client, whatever
+        // the activation's item types are (MACRO-13 emits it unasked).
+        #[allow(private_interfaces)]
+        pub enum #event_ty {
+            #(#variants)*
+        }
+
         #[doc = #struct_doc]
         #[derive(Debug, Clone, Copy, Default)]
         pub struct #client_ty<T> {
@@ -378,6 +509,7 @@ pub(crate) fn generate(
         }
     })
 }
+
 
 /// MACRO-16: the accessor a parent's client gets for one static `#[child]`
 /// — `fn inputs(&self) -> InputsClient<&T>`, whose calls go to
@@ -438,4 +570,35 @@ fn child_accessor(c: &ChildMethodInfo, namespace: &str, client: &syn::Path) -> s
             )
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pascal_case_of_wire_names() {
+        assert_eq!(pascal("ping"), "Ping");
+        assert_eq!(pascal("get_status"), "GetStatus");
+        assert_eq!(pascal("claude_code"), "ClaudeCode");
+        assert_eq!(pascal("claudecode"), "Claudecode");
+        assert_eq!(pascal("set-status"), "SetStatus");
+        assert_eq!(pascal("a.b"), "AB");
+        assert_eq!(pascal("getHTTP"), "GetHTTP");
+    }
+
+    #[test]
+    fn the_aggregate_is_pascal_namespace_plus_event() {
+        assert_eq!(aggregate_name("conformance"), "ConformanceEvent");
+        assert_eq!(aggregate_name("tickets"), "TicketsEvent");
+        assert_eq!(aggregate_name("claude_code"), "ClaudeCodeEvent");
+        assert_eq!(aggregate_name("hyperforge"), "HyperforgeEvent");
+    }
+
+    #[test]
+    fn an_identifier_that_is_not_one_is_an_error() {
+        assert!(derived_ident("Self", "x", Span::call_site()).is_err());
+        assert!(derived_ident("9Lives", "x", Span::call_site()).is_err());
+        assert!(derived_ident("GetStatus", "x", Span::call_site()).is_ok());
+    }
 }

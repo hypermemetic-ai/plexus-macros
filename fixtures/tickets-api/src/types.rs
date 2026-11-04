@@ -5,12 +5,18 @@
 //! `src/store.rs`, including the details that bite a hand-mirrored copy:
 //! the `#[serde(tag = "type", rename_all = "snake_case")]` event enum, and
 //! `skip_serializing_if = "Option::is_none"` on the optional ticket fields.
+//!
+//! The shared enum is `TicketEvent`, not `TicketsEvent`: on 0.7 the
+//! `client` flag derives the activation's aggregate under that name (one
+//! variant per method — RETURNS-1 pin 13), so an activation that keeps a
+//! hand-written shared enum renames it first. This fixture keeps one to show
+//! that a 0.6-shaped activation still compiles with the client on.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum TicketsEvent {
+pub enum TicketEvent {
     Health {
         version: String,
         ticket_count: u64,

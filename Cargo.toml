@@ -16,11 +16,18 @@ members = [
     # no plexus-client, which gets no client and no error.
     "fixtures/macro13-echo",
     "fixtures/macro13-no-client",
+    # RETURNS-7's conformance fixture: one activation per signature form.
+    # RETURNS-8 serves it in-process against its `expected/` JSON
+    # (`fixtures/conformance/tests/serve.rs`).
+    "fixtures/conformance",
+    # RETURNS-40's: a service of several activations, served whole — the IR
+    # plexus-core writes for it held equal to synapse's.
+    "fixtures/ir-service",
 ]
 
 [package]
 name = "plexus-macros"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 description = "Procedural macros for Plexus RPC activations"
@@ -54,7 +61,7 @@ plexus-core = { path = "../plexus-core" }
 # MACRO-2: the runtime the generated client links against. A dev-dependency
 # here because the macro only *emits* paths into it; consumers of a generated
 # client depend on it directly.
-plexus-client = { path = "plexus-client", version = "0.7.0" }
+plexus-client = { path = "plexus-client", version = "0.8.0" }
 # Needed by the AUTHZ-CRED-MACRO-1 trybuild fixtures: the macro emits code
 # that references `Credential`, `CredentialKind`, `AttachmentSite`,
 # `CredentialScheme`, `Scope`, `MethodPath`, `HeaderName`, `CookieName`,

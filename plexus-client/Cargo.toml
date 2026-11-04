@@ -1,6 +1,6 @@
 [package]
 name = "plexus-client"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 description = "wasm-safe client runtime for Plexus RPC: the wire envelope, the Transport trait, and typed event decoding"
@@ -12,9 +12,14 @@ repository = "https://github.com/hypermemetic-ai/plexus-macros"
 # `cargo build -p plexus-client --target wasm32-unknown-unknown` is the gate.
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }  # PERF.115-36: an item's content kept as the wire's text
 futures-core = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# RETURNS-4: `JsonSchema` for `Note` and `RemoteError`, so a server can
+# describe them. OPTIONAL (feature `schema`): a wasm32 consumer that only
+# decodes needs none of it. plexus-core enables it.
+schemars = { version = "1.1", optional = true }
 
 # MACRO-6: everything below is a WebSocket backend and is OPTIONAL. The
 # default feature set stays the four dependencies above.
@@ -43,11 +48,15 @@ web-sys = { version = "0.3", optional = true, features = [
 # MACRO-6: the WebSocket JSON-RPC transport, one type behind two backends.
 #
 # `default = []` is load-bearing, not decoration: a wasm32 consumer that says
-# `plexus-client = "0.7"` must get the four-dependency core and nothing else,
-# and `--no-default-features` must have no tokio and no jsonrpsee anywhere in
-# the tree. Both backends expose the same `WsTransport::connect(url, hub)`.
+# `plexus-client = "0.8"` must get the four-dependency core and nothing else,
+# and `--no-default-features` must have no tokio, jsonrpsee or schemars
+# anywhere in the tree. Both backends expose the same
+# `WsTransport::connect(url, service)`.
 [features]
 default = []
+# RETURNS-4: `schemars::JsonSchema` impls for the wire vocabulary (`Note`,
+# `RemoteError`, `ParamProblem`, `DenyReason`).
+schema = ["dep:schemars"]
 # BIDIR-17: `InputItem::Binary`, which the WebSocket backends send as binary
 # frames.
 binary = ["dep:bytes"]
@@ -64,7 +73,7 @@ ws-web = ["binary", "dep:futures-channel", "dep:wasm-bindgen", "dep:web-sys"]
 futures = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-tokio = { version = "1.0", features = ["macros", "rt", "time"] }
+tokio = { version = "1.0", features = ["macros", "rt", "time", "signal"] }
 
 # FRAME-16: tests/ws_web_adopt.rs — the ws-web backend under Node's own
 # WebSocket (wasm-bindgen-test-runner, node).
@@ -75,4 +84,11 @@ wasm-bindgen-futures = "0.4"
 # RETURNS-38: watch((a, b, c)) against a running menger (a live check).
 [[example]]
 name = "watch_live"
+required-features = ["ws-native"]
+
+# PERF.115-36: plexus-wire's conformance kit, its client role, with
+# plexus-client the client under test; the test is its own client.
+[[test]]
+name = "kit_client"
+harness = false
 required-features = ["ws-native"]

@@ -1,7 +1,8 @@
 //! Generate Activation trait implementation and RPC server
 
 use crate::parse::{
-    ChildForward, ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo, ParsedDeprecation,
+    Cardinality, ChildForward, ChildMethodInfo, ChildMethodKind, ListSearchMethodInfo, MethodInfo,
+    ParsedDeprecation,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -733,10 +734,16 @@ pub fn generate(
     // has no meaningful finite summary list; dynamic children are discoverable
     // via `ChildRouter::list_children` at runtime.
     //
-    // The `hash` field of `ChildSummary` is populated with the empty string —
-    // the macro has no compile-time hash source for the child plugin's schema.
-    // Callers that need a populated hash hand-write `plugin_children` (which
-    // suppresses synthesis) and compute the hash from the child's schema.
+    // RETURNS-25: each `ChildSummary.hash` is the child's own schema hash —
+    // `Activation::plugin_schema(&self.child()).hash`, computed at runtime the
+    // way DynamicHub's `plugin_children` does it (it used to be `""`, so a
+    // change inside a static child reached no ancestor's hash). It rolls up
+    // into this service's `children_hash` and `hash`, so a change anywhere below
+    // moves every ancestor's hash and the root's. A static child that is not
+    // an `Activation` — a hand-written `ChildRouter` (MACRO-20) — describes
+    // nothing, and its hash is `""` as before. The child is
+    // built by its accessor and its schema computed on each call; a type that
+    // is its own static descendant would recurse without end.
     let plugin_children_synth = if synthesize_plugin_children {
         let static_children: Vec<&ChildMethodInfo> = child_methods
             .iter()
@@ -747,19 +754,45 @@ pub fn generate(
             .map(|c| {
                 let name = c.fn_name.to_string();
                 let desc = &c.description;
+                let fn_name = &c.fn_name;
                 quote! {
                     #crate_path::plexus::ChildSummary {
                         namespace: ::std::string::String::from(#name),
                         description: ::std::string::String::from(#desc),
-                        hash: ::std::string::String::new(),
+                        // RETURNS-36: by autoref, the child's schema hash
+                        // when it is an `Activation` (RETURNS-25), and `""`
+                        // when it is a hand-written `ChildRouter` that
+                        // describes nothing (MACRO-20 still compiles it).
+                        hash: {
+                            struct __PlexusChildHash<'a, C>(&'a C);
+                            trait __PlexusViaActivation {
+                                fn __plexus_child_hash(&self) -> ::std::string::String;
+                            }
+                            impl<C: #crate_path::plexus::Activation> __PlexusViaActivation for __PlexusChildHash<'_, C> {
+                                fn __plexus_child_hash(&self) -> ::std::string::String {
+                                    #crate_path::plexus::Activation::plugin_schema(self.0).hash
+                                }
+                            }
+                            trait __PlexusViaRouter {
+                                fn __plexus_child_hash(&self) -> ::std::string::String;
+                            }
+                            impl<C> __PlexusViaRouter for &__PlexusChildHash<'_, C> {
+                                fn __plexus_child_hash(&self) -> ::std::string::String {
+                                    ::std::string::String::new()
+                                }
+                            }
+                            let __child = self.#fn_name();
+                            (&__PlexusChildHash(&__child)).__plexus_child_hash()
+                        },
                     }
                 }
             })
             .collect();
         quote! {
             /// Auto-generated child summary list from `#[plexus_macros::child]`
-            /// static methods. Dynamic children are not listed here; they are
-            /// enumerable at runtime via `ChildRouter::list_children`.
+            /// static methods, each with its child's schema hash. Dynamic
+            /// children are not listed here; they are enumerable at runtime
+            /// via `ChildRouter::list_children`.
             pub fn plugin_children(&self) -> ::std::vec::Vec<#crate_path::plexus::ChildSummary> {
                 ::std::vec![
                     #(#entries,)*
@@ -1002,8 +1035,10 @@ fn generate_rpc_impl_methods(
                 }
             };
 
-            // All methods use wrap_stream for consistent streaming pattern
+            // RETURNS-8: the same per-form wrapper as `Activation::call`, so
+            // both paths send the same frames.
             let content_type = format!("{}.{}", namespace, method_name_str);
+            let wrapped = wrap_return(m, quote! { __ret }, &content_type, namespace, crate_path);
 
             quote! {
                 async fn #method_name(
@@ -1015,13 +1050,11 @@ fn generate_rpc_impl_methods(
 
                     let sink = pending.accept().await?;
                     #bidir_setup
-                    let stream = #method_call;
-                    let wrapped = #crate_path::plexus::wrap_stream(
-                        stream,
-                        #content_type,
-                        vec![#namespace.into()]
-                    );
+                    let __ret = #method_call;
+                    let wrapped = #wrapped;
 
+                    // The wrapper ends the stream with its one `done`
+                    // (RETURNS-8: this task used to append a second).
                     #deps::tokio::spawn(async move {
                         let mut stream = wrapped;
                         while let Some(item) = stream.next().await {
@@ -1030,16 +1063,6 @@ fn generate_rpc_impl_methods(
                                     break;
                                 }
                             }
-                        }
-                        // Send done event
-                        let done = #crate_path::plexus::PlexusStreamItem::Done {
-                            metadata: #crate_path::plexus::StreamMetadata::new(
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ),
-                        };
-                        if let Ok(raw_value) = #deps::serde_json::value::to_raw_value(&done) {
-                            let _ = sink.send(raw_value).await;
                         }
                     });
 
@@ -1251,10 +1274,13 @@ fn generate_dispatch_arms(
                 quote! { #reach_arg #(#param_names),* }
             };
 
+            // RETURNS-8: the wrapper that matches the method's signature
+            // form turns its return value into frames.
+            let wrapped = wrap_return(m, quote! { __ret }, &content_type, namespace, crate_path);
+
             // Generate code based on bidirectional type
             match &m.bidirectional {
                 BidirType::None => {
-                    // No bidirectional - simple wrap_stream
                     quote! {
                         #method_name => {
                             #auth_injection
@@ -1264,12 +1290,8 @@ fn generate_dispatch_arms(
                             #param_extraction
                             #reach_binding
                             #input_open
-                            let stream = self.#fn_name(#method_params).await;
-                            Ok(#crate_path::plexus::wrap_stream(
-                                stream,
-                                #content_type,
-                                vec![#namespace.into()]
-                            ))
+                            let __ret = self.#fn_name(#method_params).await;
+                            Ok(#wrapped)
                         }
                     }
                 }
@@ -1298,14 +1320,10 @@ fn generate_dispatch_arms(
                             >(#content_type, vec![#namespace.into()]);
 
                             // Call the method with the bidir channel
-                            let user_stream = self.#fn_name(#bidir_params).await;
+                            let __ret = self.#fn_name(#bidir_params).await;
 
-                            // Wrap the user's stream and merge with bidir requests
-                            let wrapped_user = #crate_path::plexus::wrap_stream(
-                                user_stream,
-                                #content_type,
-                                vec![#namespace.into()]
-                            );
+                            // Wrap the method's output and merge with bidir requests
+                            let wrapped_user = #wrapped;
                             Ok(wrap_fn(wrapped_user))
                         }
                     }
@@ -1337,14 +1355,10 @@ fn generate_dispatch_arms(
                             >(#content_type, vec![#namespace.into()]);
 
                             // Call the method with the bidir channel
-                            let user_stream = self.#fn_name(#bidir_params).await;
+                            let __ret = self.#fn_name(#bidir_params).await;
 
-                            // Wrap the user's stream and merge with bidir requests
-                            let wrapped_user = #crate_path::plexus::wrap_stream(
-                                user_stream,
-                                #content_type,
-                                vec![#namespace.into()]
-                            );
+                            // Wrap the method's output and merge with bidir requests
+                            let wrapped_user = #wrapped;
                             Ok(wrap_fn(wrapped_user))
                         }
                     }
@@ -1407,23 +1421,79 @@ fn generate_unknown_key_check(m: &MethodInfo, content_type: &str, crate_path: &s
                 __plexus_unknown.sort_unstable();
                 let __plexus_named: ::std::vec::Vec<::std::string::String> =
                     __plexus_unknown.iter().map(|k| format!("`{}`", k)).collect();
-                return Err(#crate_path::plexus::PlexusError::InvalidParams(
-                    format!("unknown field {}; {}", __plexus_named.join(", "), #takes)
-                ));
+                return Err(#crate_path::plexus::PlexusError::InvalidParams {
+                    param: None,
+                    problem: #crate_path::plexus::ParamProblem::Malformed {
+                        detail: format!("unknown field {}; {}", __plexus_named.join(", "), #takes),
+                    },
+                });
             }
         }
+    }
+}
+
+/// RETURNS-8: the expression that turns a method's return value `ret` into a
+/// `PlexusStream`, by signature form (plexus-core's per-form wrappers):
+///
+/// | form | wrapper |
+/// |---|---|
+/// | `-> T` | `wrap_one` |
+/// | `-> Result<T, E>` | `wrap_one_result` |
+/// | `-> impl Stream<Item = T>` | `wrap_stream` |
+/// | `-> impl Stream<Item = Result<T, E>>` | `wrap_result_stream` |
+/// | `-> impl Stream<Item = Progress<T, P>>` | `wrap_progress_stream` |
+/// | `-> impl Stream<Item = Result<Progress<T, P>, E>>` | `wrap_result_progress_stream` |
+fn wrap_return(
+    m: &MethodInfo,
+    ret: TokenStream,
+    content_type: &str,
+    namespace: &str,
+    crate_path: &syn::Path,
+) -> TokenStream {
+    let wrapper = match (m.cardinality, m.err_ty.is_some(), m.progress_ty.is_some()) {
+        (Cardinality::One, false, _) => format_ident!("wrap_one"),
+        (Cardinality::One, true, _) => format_ident!("wrap_one_result"),
+        (Cardinality::Many, false, false) => format_ident!("wrap_stream"),
+        (Cardinality::Many, true, false) => format_ident!("wrap_result_stream"),
+        (Cardinality::Many, false, true) => format_ident!("wrap_progress_stream"),
+        (Cardinality::Many, true, true) => format_ident!("wrap_result_progress_stream"),
+    };
+    quote! {
+        #crate_path::plexus::#wrapper(#ret, #content_type, vec![#namespace.into()])
     }
 }
 
 /// Generate param extraction code and return the param names for the call.
 ///
 /// MACRO-15: a parameter that does not deserialize is `InvalidParams`
-/// prefixed with its wire name — `id: <serde's message>` — on every path
-/// (one param or many, `Option` or required, the bare-value shortcut), so a
-/// method with two parameters of one type says which was bad. A missing
-/// field keeps `missing field: <name>`.
+/// naming it — `id: <serde's message>` — on every path (one param or many,
+/// `Option` or required, the bare-value shortcut), so a method with two
+/// parameters of one type says which was bad. RETURNS-6: structured —
+/// `PlexusError::InvalidParams { param, problem }`, `Missing` when a
+/// required param is absent, `Malformed { detail }` when one does not
+/// decode, naming the param either way (`param: None` only when the params
+/// value is not an object at all).
 fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps: &syn::Ident) -> (TokenStream, Vec<&'a syn::Ident>) {
     let param_names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
+
+    // `|e| InvalidParams { param: Some(name), problem: Malformed { detail } }`
+    let malformed = |name: &str| {
+        quote! {
+            |e| #crate_path::plexus::PlexusError::InvalidParams {
+                param: Some(#name.to_string()),
+                problem: #crate_path::plexus::ParamProblem::Malformed { detail: e.to_string() },
+            }
+        }
+    };
+    // `InvalidParams { param: Some(name), problem: Missing }`
+    let missing = |name: &str| {
+        quote! {
+            #crate_path::plexus::PlexusError::InvalidParams {
+                param: Some(#name.to_string()),
+                problem: #crate_path::plexus::ParamProblem::Missing,
+            }
+        }
+    };
 
     let extraction = match m.params.len() {
         0 => quote! {},
@@ -1432,19 +1502,24 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
             let param_name = &param.name;
             let param_str = param_name.to_string();
             let is_option = crate::codegen::method_enum::is_option_type(&param.ty);
+            let malformed = malformed(&param_str);
+            let missing = missing(&param_str);
             // AUTH-13: a bare value (not an object) is this one param — a
             // shortcut, except for a method with a `target`: the gate reads
             // the target by name, and a bare value names none.
             let bare = if m.target.is_some() {
                 quote! {
-                    return Err(#crate_path::plexus::PlexusError::InvalidParams(
-                        format!("params must be an object naming `{}`: this method's target is read by name", #param_str)
-                    ))
+                    return Err(#crate_path::plexus::PlexusError::InvalidParams {
+                        param: None,
+                        problem: #crate_path::plexus::ParamProblem::Malformed {
+                            detail: format!("params must be an object naming `{}`: this method's target is read by name", #param_str),
+                        },
+                    })
                 }
             } else {
                 quote! {
                     #deps::serde_json::from_value(params.clone())
-                        .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #param_str, e)))?
+                        .map_err(#malformed)?
                 }
             };
 
@@ -1457,7 +1532,7 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                                 .filter(|v| !v.is_null())  // Treat explicit null as missing
                                 .map(|v| #deps::serde_json::from_value(v.clone()))
                                 .transpose()
-                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #param_str, e)))?
+                                .map_err(#malformed)?
                         }
                         #deps::serde_json::Value::Null => None,
                         _ => #bare,
@@ -1470,11 +1545,9 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                         #deps::serde_json::Value::Object(map) => {
                             if let Some(val) = map.get(#param_str) {
                                 #deps::serde_json::from_value(val.clone())
-                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #param_str, e)))?
+                                    .map_err(#malformed)?
                             } else {
-                                return Err(#crate_path::plexus::PlexusError::InvalidParams(
-                                    format!("missing field: {}", #param_str)
-                                ));
+                                return Err(#missing);
                             }
                         }
                         _ => #bare,
@@ -1490,6 +1563,8 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                     let name = &p.name;
                     let name_str = name.to_string();
                     let is_option = crate::codegen::method_enum::is_option_type(&p.ty);
+                    let malformed = malformed(&name_str);
+                    let missing = missing(&name_str);
 
                     if is_option {
                         // For Option<T>, missing field OR explicit null = None (not an error)
@@ -1498,17 +1573,15 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
                                 .filter(|v| !v.is_null())  // Treat explicit null as missing
                                 .map(|v| #deps::serde_json::from_value(v.clone()))
                                 .transpose()
-                                .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #name_str, e)))?;
+                                .map_err(#malformed)?;
                         }
                     } else {
                         // For required fields, error on missing
                         quote! {
                             let #name = map.get(#name_str)
-                                .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
-                                    format!("missing field: {}", #name_str)
-                                ))
+                                .ok_or_else(|| #missing)
                                 .and_then(|v| #deps::serde_json::from_value(v.clone())
-                                    .map_err(|e| #crate_path::plexus::PlexusError::InvalidParams(format!("{}: {}", #name_str, e))))?;
+                                    .map_err(#malformed))?;
                         }
                     }
                 })
@@ -1516,9 +1589,12 @@ fn generate_param_extraction<'a>(m: &'a MethodInfo, crate_path: &syn::Path, deps
 
             quote! {
                 let map = params.as_object()
-                    .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams(
-                        "expected object".to_string()
-                    ))?;
+                    .ok_or_else(|| #crate_path::plexus::PlexusError::InvalidParams {
+                        param: None,
+                        problem: #crate_path::plexus::ParamProblem::Malformed {
+                            detail: "expected object".to_string(),
+                        },
+                    })?;
                 #(#extractions)*
             }
         }

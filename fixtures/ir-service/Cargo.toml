@@ -1,0 +1,31 @@
+[package]
+name = "ir-service"
+version = "0.8.0"
+edition = "2021"
+publish = false
+description = "RETURNS-40 fixture: a service of several activations whose IR plexus-core writes and synapse builds, held equal"
+
+# A plexus-macros workspace member, as the conformance fixture is: its tests
+# serve the service in-process (`tests/schemas.rs`, `tests/ir.rs`) and compare
+# what it answers with `expected/`.
+
+[dependencies]
+plexus-macros = { path = "../.." }
+plexus-core = { path = "../../../plexus-core" }
+plexus-client = { path = "../../plexus-client" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = { version = "1.1", features = ["derive"] }
+futures = "0.3"
+async-stream = "0.3"
+# What `#[plexus_macros::activation]`'s server half expands to.
+async-trait = "0.1"
+jsonrpsee = { version = "0.26", features = ["server", "macros"] }
+tokio = { version = "1.0", features = ["full"] }
+uuid = { version = "1.0", features = ["v4", "v5"] }
+
+[dev-dependencies]
+# examples/serve.rs: the service on a WebSocket, for synapse to ask.
+plexus-transport = { path = "../../../plexus-transport", default-features = false }
+anyhow = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
