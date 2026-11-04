@@ -76,7 +76,7 @@ fn count_stream(t: &MemoryTransport) -> MethodStream<'_, Tick, Step, DemoEvent> 
         t,
         COUNT,
         Params::new().build(),
-        serde_json::from_value::<Tick>,
+        plexus_client::Content::decode::<Tick>,
         DemoEvent::Count,
     )
 }
@@ -161,7 +161,7 @@ async fn the_default_progress_type_is_a_note() {
 async fn no_progress_never_yields_a_progress_frame() {
     let t = MemoryTransport::new().script_events(COUNT, &[Tick { n: 1 }]);
     let s: MethodStream<'_, Tick, NoProgress, Tick> =
-        MethodStream::new(t.call(COUNT, json!({})), serde_json::from_value::<Tick>, |i| i);
+        MethodStream::new(t.call_raw(COUNT, json!({})), plexus_client::Content::decode::<Tick>, |i| i);
     let got: Vec<_> = s.with_progress().collect().await;
     assert!(matches!(got[..], [Ok(Frame::Item(Tick { n: 1 }))]), "{got:?}");
 
@@ -274,7 +274,7 @@ async fn two_methods_events_merge_into_one_listener() {
         &t,
         SCAN,
         Params::new().build(),
-        wire_result::from_value::<Tick, ScanError>,
+        wire_result::from_content::<Tick, ScanError>,
         DemoEvent::Scan,
     );
     let mut all = futures::stream::select_all([count_stream(&t).events(), scan.events()]);
@@ -371,7 +371,7 @@ async fn an_encode_failure_is_yielded_once_and_nothing_is_sent() {
     let t = MemoryTransport::new().script_events(COUNT, &[Tick { n: 1 }]);
     let params = Params::new().param("to", FailsToSerialize).build();
     let s: MethodStream<'_, Tick> =
-        MethodStream::call(&t, COUNT, params, serde_json::from_value::<Tick>, |i| i);
+        MethodStream::call(&t, COUNT, params, plexus_client::Content::decode::<Tick>, |i| i);
     let got: Vec<_> = s.collect().await;
     match &got[..] {
         [Err(ClientError::Encode { param: "to", .. })] => {}
@@ -390,7 +390,7 @@ impl Serialize for FailsToSerialize {
 // ---------------------------------------------------------------- one-item calls
 
 async fn ping(t: &dyn Transport) -> Result<Tick, ClientError> {
-    call_one(t, PING, Params::new().build(), serde_json::from_value::<Tick>).await
+    call_one(t, PING, Params::new().build(), plexus_client::Content::decode::<Tick>).await
 }
 
 #[tokio::test]
@@ -444,7 +444,7 @@ async fn call_one_with_an_unencodable_param_sends_nothing() {
         &t,
         PING,
         Params::new().param("x", FailsToSerialize).build(),
-        serde_json::from_value::<Tick>,
+        plexus_client::Content::decode::<Tick>,
     )
     .await;
     assert!(matches!(got, Err(ClientError::Encode { param: "x", .. })), "{got:?}");
@@ -523,7 +523,7 @@ async fn the_transport_records_the_params_it_was_handed() {
         &t,
         COUNT,
         Params::new().param("epic", "MACRO").build(),
-        serde_json::from_value::<Tick>,
+        plexus_client::Content::decode::<Tick>,
         |i| i,
     );
     let _: Vec<_> = s.collect().await;

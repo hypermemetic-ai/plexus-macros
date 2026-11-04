@@ -623,11 +623,13 @@ pub(crate) fn client_trait_impl(
         let call_params = quote! { #client::Params::new() #(#links)* .build() };
         let ok = &m.ok_ty;
         let decoder = match &m.err_ty {
-            None => quote! { #client::__rt::serde_json::from_value::<#ok> },
-            Some(e) => quote! { #client::wire_result::from_value::<#ok, #e> },
+            None => quote! { #client::Content::decode::<#ok> },
+            Some(e) => quote! { #client::wire_result::from_content::<#ok, #e> },
         };
         let items = quote! {
-            #call_params.map(|__p| #client::owned_call(
+            // PERF.115-36: the items with their content still the wire's
+            // text, decoded straight into the item.
+            #call_params.map(|__p| #client::owned_call_raw(
                 ::core::clone::Clone::clone(&self.transport),
                 Self::#const_ident.at(self.path),
                 __p,

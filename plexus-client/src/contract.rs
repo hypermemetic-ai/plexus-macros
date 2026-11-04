@@ -22,9 +22,9 @@
 //! [`BoxStream`] of its items. [`trait_one`], [`trait_many`],
 //! [`trait_progress`] and [`trait_result_progress`] are the client half's.
 
-use crate::envelope::StreamItem;
+use crate::envelope::{RawItem, StreamItem};
 use crate::error::{ClientError, TransportError};
-use crate::transport::{ItemStream, MethodRef, Transport};
+use crate::transport::{ItemStream, MethodRef, RawItemStream, Transport};
 use futures_core::Stream;
 use futures_util::{stream, StreamExt};
 use serde_json::Value;
@@ -185,7 +185,7 @@ where
 
 /// `-> impl Stream<Item = T>` / `Item = Result<T, E>`: many items.
 pub fn trait_many<I>(
-    items: Result<ItemStream<'static>, ClientError>,
+    items: Result<RawItemStream<'static>, ClientError>,
     item: crate::method_stream::Decoder<I>,
 ) -> BoxStream<'static, I>
 where
@@ -199,7 +199,7 @@ where
 
 /// `-> impl Stream<Item = Progress<T, P>>`: items and progress updates.
 pub fn trait_progress<T, P>(
-    items: Result<ItemStream<'static>, ClientError>,
+    items: Result<RawItemStream<'static>, ClientError>,
     item: crate::method_stream::Decoder<T>,
 ) -> BoxStream<'static, crate::progress::Progress<T, P>>
 where
@@ -225,7 +225,7 @@ where
 
 /// `-> impl Stream<Item = Result<Progress<T, P>, E>>`.
 pub fn trait_result_progress<T, P, E>(
-    items: Result<ItemStream<'static>, ClientError>,
+    items: Result<RawItemStream<'static>, ClientError>,
     item: crate::method_stream::Decoder<Result<T, E>>,
 ) -> BoxStream<'static, Result<crate::progress::Progress<T, P>, E>>
 where
@@ -271,7 +271,7 @@ where
     }))
 }
 
-type Slot = Arc<Mutex<Option<Result<StreamItem, TransportError>>>>;
+type Slot<I> = Arc<Mutex<Option<Result<I, TransportError>>>>;
 
 #[cfg(not(target_arch = "wasm32"))]
 type Driver = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -290,11 +290,31 @@ pub fn owned_call<T>(transport: T, method: MethodRef, params: Value) -> ItemStre
 where
     T: Transport + Send + Sync + 'static,
 {
-    let slot: Slot = Arc::new(Mutex::new(None));
+    let slot: Slot<StreamItem> = Arc::new(Mutex::new(None));
     let tx = slot.clone();
     let driver: Driver = Box::pin(async move {
         let transport = transport;
         let mut items = transport.call(method, params);
+        while let Some(item) = items.next().await {
+            *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
+            HandOff(false).await;
+        }
+    });
+    Box::pin(Owned { driver: Some(driver), slot })
+}
+
+/// [`owned_call`] for a typed client: `Transport::call_raw` on a transport
+/// the stream owns (PERF.115-36).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn owned_call_raw<T>(transport: T, method: MethodRef, params: Value) -> RawItemStream<'static>
+where
+    T: Transport + Send + Sync + 'static,
+{
+    let slot: Slot<RawItem> = Arc::new(Mutex::new(None));
+    let tx = slot.clone();
+    let driver: Driver = Box::pin(async move {
+        let transport = transport;
+        let mut items = transport.call_raw(method, params);
         while let Some(item) = items.next().await {
             *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
             HandOff(false).await;
@@ -309,11 +329,30 @@ pub fn owned_call<T>(transport: T, method: MethodRef, params: Value) -> ItemStre
 where
     T: Transport + 'static,
 {
-    let slot: Slot = Arc::new(Mutex::new(None));
+    let slot: Slot<StreamItem> = Arc::new(Mutex::new(None));
     let tx = slot.clone();
     let driver: Driver = Box::pin(async move {
         let transport = transport;
         let mut items = transport.call(method, params);
+        while let Some(item) = items.next().await {
+            *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
+            HandOff(false).await;
+        }
+    });
+    Box::pin(Owned { driver: Some(driver), slot })
+}
+
+/// `owned_call_raw` on an owned transport. See the non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub fn owned_call_raw<T>(transport: T, method: MethodRef, params: Value) -> RawItemStream<'static>
+where
+    T: Transport + 'static,
+{
+    let slot: Slot<RawItem> = Arc::new(Mutex::new(None));
+    let tx = slot.clone();
+    let driver: Driver = Box::pin(async move {
+        let transport = transport;
+        let mut items = transport.call_raw(method, params);
         while let Some(item) = items.next().await {
             *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
             HandOff(false).await;
@@ -339,19 +378,19 @@ impl Future for HandOff {
     }
 }
 
-struct Owned {
+struct Owned<I> {
     driver: Option<Driver>,
-    slot: Slot,
+    slot: Slot<I>,
 }
 
-impl Owned {
-    fn take_item(&self) -> Option<Result<StreamItem, TransportError>> {
+impl<I> Owned<I> {
+    fn take_item(&self) -> Option<Result<I, TransportError>> {
         self.slot.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 }
 
-impl Stream for Owned {
-    type Item = Result<StreamItem, TransportError>;
+impl<I> Stream for Owned<I> {
+    type Item = Result<I, TransportError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let Some(driver) = self.driver.as_mut() else {

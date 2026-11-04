@@ -67,7 +67,7 @@ fn expected_frames<I, P: DeserializeOwned>(rel: &str, item: Decoder<I>) -> Vec<F
         .into_iter()
         .filter_map(|f| match f {
             StreamItem::Data { content, .. } => {
-                Some(Frame::Item(item(content).unwrap_or_else(|e| panic!("{rel}: {e}"))))
+                Some(Frame::Item(item(plexus_client::Content::from(content)).unwrap_or_else(|e| panic!("{rel}: {e}"))))
             }
             StreamItem::Progress { content, .. } => Some(Frame::Progress(
                 serde_json::from_value(content).unwrap_or_else(|e| panic!("{rel}: {e}")),
@@ -199,7 +199,7 @@ async fn ping_returns_its_one_item() {
     assert_eq!(c.transport().last_params(), stated_params("wire/ping.jsonl"));
     assert_eq!(
         vec![pong],
-        expected_items("wire/ping.jsonl", serde_json::from_value::<Pong>)
+        expected_items("wire/ping.jsonl", plexus_client::Content::decode::<Pong>)
     );
 }
 
@@ -211,7 +211,7 @@ async fn lookup_returns_ok_or_err_as_the_activations_answer() {
     assert_eq!(c.transport().last_params(), stated_params("wire/lookup.ok.jsonl"));
     assert_eq!(
         vec![found.clone()],
-        expected_items("wire/lookup.ok.jsonl", wire_result::from_value::<Thing, LookupError>)
+        expected_items("wire/lookup.ok.jsonl", wire_result::from_content::<Thing, LookupError>)
     );
     assert!(found.is_ok());
 
@@ -220,7 +220,7 @@ async fn lookup_returns_ok_or_err_as_the_activations_answer() {
     assert_eq!(c.transport().last_params(), stated_params("wire/lookup.err.jsonl"));
     assert_eq!(
         vec![missing.clone()],
-        expected_items("wire/lookup.err.jsonl", wire_result::from_value::<Thing, LookupError>)
+        expected_items("wire/lookup.err.jsonl", wire_result::from_content::<Thing, LookupError>)
     );
     assert_eq!(missing, Err(LookupError::NotFound { id: "missing".into() }));
 }
@@ -230,7 +230,7 @@ async fn count_streams_its_items() {
     let c = client();
     let ticks: Vec<Tick> = c.count(3).try_collect().await.expect("the call succeeds");
     assert_eq!(c.transport().last_params(), stated_params("wire/count.jsonl"));
-    assert_eq!(ticks, expected_items("wire/count.jsonl", serde_json::from_value::<Tick>));
+    assert_eq!(ticks, expected_items("wire/count.jsonl", plexus_client::Content::decode::<Tick>));
     assert_eq!(ticks.len(), 3);
 }
 
@@ -241,7 +241,7 @@ async fn scan_yields_its_mid_stream_err_and_carries_on() {
     assert_eq!(c.transport().last_params(), stated_params("wire/scan.jsonl"));
     assert_eq!(
         rows,
-        expected_items("wire/scan.jsonl", wire_result::from_value::<Row, ScanError>)
+        expected_items("wire/scan.jsonl", wire_result::from_content::<Row, ScanError>)
     );
     assert!(
         matches!(&rows[..], [Ok(_), Err(ScanError::Unreadable { .. }), Ok(_)]),
@@ -257,7 +257,7 @@ async fn load_yields_its_load_steps_in_order_when_opted_in() {
     assert_eq!(c.transport().last_params(), stated_params("wire/load.jsonl"));
     assert_eq!(
         frames,
-        expected_frames("wire/load.jsonl", wire_result::from_value::<Loaded, LoadError>)
+        expected_frames("wire/load.jsonl", wire_result::from_content::<Loaded, LoadError>)
     );
     assert_eq!(
         frames,
@@ -280,7 +280,7 @@ async fn warm_yields_its_notes_in_order_when_opted_in() {
     assert_eq!(c.transport().last_params(), stated_params("wire/warm.jsonl"));
     assert_eq!(
         frames,
-        expected_frames("wire/warm.jsonl", serde_json::from_value::<Warmed>)
+        expected_frames("wire/warm.jsonl", plexus_client::Content::decode::<Warmed>)
     );
     assert_eq!(
         frames,
@@ -344,7 +344,7 @@ async fn every_call_failure_is_a_typed_remote_error() {
         &transport,
         ConformanceClient::<MemoryTransport>::METHOD_LOOKUP,
         Ok(json!({})),
-        wire_result::from_value::<Thing, LookupError>,
+        wire_result::from_content::<Thing, LookupError>,
     )
     .await;
     assert_eq!(got, Err(ClientError::Remote(missing.clone())));
@@ -359,7 +359,7 @@ async fn every_call_failure_is_a_typed_remote_error() {
         &transport,
         ConformanceClient::<MemoryTransport>::METHOD_COUNT,
         Ok(json!({"to": "three"})),
-        serde_json::from_value::<Tick>,
+        plexus_client::Content::decode::<Tick>,
         ConformanceEvent::Count,
     )
     .collect()

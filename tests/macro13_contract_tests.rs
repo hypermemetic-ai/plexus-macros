@@ -121,6 +121,32 @@ async fn the_served_contract_is_itself_a_contract() {
     }
 }
 
+/// A transport that has each item's text and no `Value`s.
+#[derive(Clone)]
+struct TextOnly;
+
+impl plexus_client::Transport for TextOnly {
+    fn call(&self, _: plexus_client::MethodRef, _: Value) -> plexus_client::ItemStream<'_> {
+        panic!("a client's contract reads its items through call_raw")
+    }
+
+    fn call_raw(&self, _: plexus_client::MethodRef, _: Value) -> plexus_client::RawItemStream<'_> {
+        let text = serde_json::value::RawValue::from_string(r#"{"type":"sum","value":5}"#.to_owned()).unwrap();
+        Box::pin(futures::stream::iter(vec![
+            Ok(plexus_client::RawItem::Data { content_type: Some("contract.add".into()), content: plexus_client::Content::from(text) }),
+            Ok(plexus_client::RawItem::Done),
+        ]))
+    }
+}
+
+/// PERF.115-36: a client's contract reads through `call_raw` too, the content
+/// decoded straight from the wire's text.
+#[tokio::test]
+async fn a_clients_contract_decodes_the_wires_text_through_call_raw() {
+    let got: Vec<ContractEvent> = Contract::add(&ContractClient::new(TextOnly), 2, 3).collect().await;
+    assert_eq!(got, vec![ContractEvent::Sum { value: 5 }]);
+}
+
 #[test]
 fn the_contracts_schema_carries_its_doc_comments() {
     let schema = serde_json::to_string(&Impl::new().server().plugin_schema()).unwrap();

@@ -277,12 +277,12 @@ pub(crate) fn generate(
         let (item_ty, decoder, payload) = match &m.err_ty {
             None => (
                 quote! { #ok_ty },
-                quote! { #client_path::__rt::serde_json::from_value::<#ok_ty> },
+                quote! { #client_path::Content::decode::<#ok_ty> },
                 quote! { #ok_ty },
             ),
             Some(err_ty) => (
                 quote! { ::core::result::Result<#ok_ty, #err_ty> },
-                quote! { #client_path::wire_result::from_value::<#ok_ty, #err_ty> },
+                quote! { #client_path::wire_result::from_content::<#ok_ty, #err_ty> },
                 quote! {
                     #[serde(with = #wire_result_path)]
                     ::core::result::Result<#ok_ty, #err_ty>

@@ -81,6 +81,23 @@ where
     deserialize(content)
 }
 
+/// [`from_value`] from a data frame's [`Content`](crate::Content): straight
+/// from the wire's text where the transport kept it (PERF.115-36). What a
+/// generated client decodes a Result method's items with.
+pub fn from_content<T, E>(content: crate::Content) -> Result<Result<T, E>, serde_json::Error>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::DeserializeOwned,
+{
+    struct Wire<T, E>(Result<T, E>);
+    impl<'de, T: Deserialize<'de>, E: Deserialize<'de>> Deserialize<'de> for Wire<T, E> {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            deserialize(d).map(Wire)
+        }
+    }
+    content.decode::<Wire<T, E>>().map(|w| w.0)
+}
+
 /// A Result item → a data frame's `content`: `Ok(t)` → `{"ok": t}`,
 /// `Err(e)` → `{"err": e}`. What a test scripts a Result method's items with.
 pub fn to_value<T, E>(item: &Result<T, E>) -> Result<serde_json::Value, serde_json::Error>
