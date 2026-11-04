@@ -28,7 +28,12 @@ fn bench_events() {
         let n3 = run(repo.tick(items).events());
         let c = t2.elapsed();
         assert_eq!((n2, n3), (n, n));
+        // the same level on its own client: its own aggregate, no lift
+        let t3 = std::time::Instant::now();
+        let n4 = run(SideClient::at(&f, "root.left").tick(items).events());
+        let d = t3.elapsed();
+        assert_eq!(n4, n);
         let ns = |d: std::time::Duration| d.as_nanos() as f64 / items as f64;
-        println!("round {round}: root.tick {:.1} ns/ev; child (left) {:.1} ns/ev; org.repo (2 dyn levels) {:.1} ns/ev", ns(a), ns(b), ns(c));
+        println!("round {round}: root.tick {:.1} ns/ev; child (left) {:.1} ns/ev; org.repo (2 dyn levels) {:.1} ns/ev; left on its own client {:.1} ns/ev", ns(a), ns(b), ns(c), ns(d));
     }
 }

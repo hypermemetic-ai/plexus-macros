@@ -89,11 +89,13 @@ async fn a_name_outside_the_services_grammar_is_refused() {
     refused(root.org("..").tick(1).events().try_collect().await, "..", NameRefusal::Dotted);
 }
 
-/// The client's rule and the service's agree, name by name.
+/// The client's rule and the service's agree, name by name. (A dotted name
+/// the grammar takes, `a.b`, the client refuses for another reason: the
+/// service would read two segments and route it past the instance.)
 #[test]
 fn the_clients_segment_rule_is_the_services() {
     use plexus_core::plexus::MethodPath;
-    for name in ["", " ", "a b", "ａcme", "LEFT", "x\n", "-", "..", "a.b", "acme", "a_1", "_a", "9lives", "acme-co", "o"] {
+    for name in ["", " ", "a b", "ａcme", "LEFT", "x\n", "-", "..", "acme", "a_1", "_a", "9lives", "acme-co", "o"] {
         let service = MethodPath::try_new(format!("root.{name}.tick")).is_ok();
         let client = plexus_client::Route::ROOT.instance("root", name, &[]).method(MethodRef::new("org", "tick")).is_ok();
         assert_eq!(client, service, "{name:?}: client {client}, service {service}");

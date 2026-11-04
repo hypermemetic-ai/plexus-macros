@@ -665,9 +665,9 @@ impl<T: plexus_client::Transport> TicketsClient<T> {
 impl<T: plexus_client::Transport, L: plexus_client::Lift<TicketsEvent>> TicketsClient<T, L> {
     // many items: a MethodStream<'_, item, progress, aggregate, lift>
     pub fn list(&self, epic: Option<String>)
-        -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent, L>;
+        -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent, L, __TicketsClientList>;
     pub fn import(&self, source: String)
-        -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent, L>;
+        -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent, L, __TicketsClientImport>;
 }
 ```
 
@@ -722,7 +722,7 @@ while let Some(ev) = all.next().await { state.reduce(ev?) }   // ev: TicketsEven
 | **Transport-generic** | any `plexus_client::Transport` — in-process, WebSocket JSON-RPC, REST + SSE. The emitted code names none of them. |
 | **Two error layers** | `ClientError::Transport` (the connection failed) vs `ClientError::Remote(RemoteError)` (the server answered with a typed `error` frame). An activation's *own* `Err` item stays data. |
 | **Zero drift** | rename a field on an item type and every consumer of the client stops compiling. |
-| **Children** (MACRO-16, RETURNS-46) | a static `#[child] fn inputs(&self) -> Inputs` gives the parent's client `fn inputs(&self) -> InputsClient<&T, Static<L, InputsEvent, TicketsEvent>>`, whose calls go to `tickets.inputs.<method>`, the path the service routes. A dynamic `#[child] fn item(&self, name: &str) -> Option<Item>` gives `fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`, whose calls go to `tickets.<name>.<method>`. `#[child(opaque)]`: neither. Accessors nest, so `client.inputs().history().tail(..)` goes to `tickets.inputs.history.tail`. The child must have a client too, or `InputsClient` does not resolve at the accessor's return type. `InputsClient::new(t)` alone still sends `inputs.<method>`; `InputsClient::at(t, "tickets.inputs")` mounts it by hand; both yield the child's own aggregate. |
+| **Children** (MACRO-16, RETURNS-46) | a static `#[child] fn inputs(&self) -> Inputs` gives the parent's client `fn inputs(&self) -> InputsClient<&T, Static<L, __TicketsClientInputs>>`, whose calls go to `tickets.inputs.<method>`, the path the service routes. A dynamic `#[child] fn item(&self, name: &str) -> Option<Item>` gives `fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`, whose calls go to `tickets.<name>.<method>`. `#[child(opaque)]`: neither. Accessors nest, so `client.inputs().history().tail(..)` goes to `tickets.inputs.history.tail`. The child must have a client too, or `InputsClient` does not resolve at the accessor's return type. `InputsClient::new(t)` alone still sends `inputs.<method>`; `InputsClient::at(t, "tickets.inputs")` mounts it by hand; both yield the child's own aggregate. |
 
 ### The aggregate up the tree (RETURNS-46)
 
@@ -759,9 +759,12 @@ level costs no allocation. A child that is the activation itself (`-> Self`,
 
 **A client reached through a parent's accessor yields the parent's
 aggregate.** Every client is `XClient<T, L = plexus_client::Root>`; `L` is
-its lift, a type: `Root` (nothing), `Static` (the parent's lift and the
-variant's constructor) or `Named` (the instance's name too, an `Arc<str>`
-every event shares). One listener over a subtree is one `select_all`,
+its lift, a type: `Root` (nothing), `Static` (the parent's lift and a
+zero-sized `Wrap`, the variant) or `Named` (the instance's name too, an
+`Arc<str>` every event shares). A many-item method's stream names its
+variant as a zero-sized `EventOf` too (`MethodStream<'_, I, P, XEvent, L,
+__XClientM>`), so the variant and the lift inline into one step per event:
+a static level costs what the level's own client does. One listener over a subtree is one `select_all`,
 matched with no wildcard:
 
 ```rust
@@ -790,11 +793,16 @@ itself.
 
 **Instance names.** `tree.item(name)` reaches `tree.<name>`; a dynamic
 instance's path is the client's own (`RoutePath`, an `Arc<str>`), freed with
-it — no process-wide set, no lock. A name the service would route elsewhere
-— empty, holding a `.`, a static child's segment, a method of the parent —
-does not fail the accessor; every call through it, and through anything
-below it, fails at once with `ClientError::InvalidName { name, reason }`,
-and nothing is sent.
+it — no process-wide set, no lock. A name that cannot reach the instance —
+empty, holding a `.`, outside the service's path grammar (`[a-z][a-z0-9_]*`),
+a static child's segment — does not fail the accessor; every call through
+it, and through anything below it, fails at once with
+`ClientError::InvalidName { name, reason }`, and nothing is sent. A name
+that is one of the parent's methods is the instance: the service takes the
+segment after the parent as a child. The static siblings checked are the
+ones this client was built against: a sibling a newer service adds is not
+known to an older client, whose instance of that name the service routes to
+the new sibling.
 
 **`#[child(opaque)]`** — a child whose type has no client (a hand-written
 `ChildRouter`, an activation without one): no accessor, no variant, routed

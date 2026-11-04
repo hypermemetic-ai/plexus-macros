@@ -161,17 +161,18 @@ fn the_client_is_the_one_macro_4_emitted_for_a_type_named_echo() {
     assert_eq!(EchoClient::<MemoryTransport>::METHOD_SAY, before::EchoClient::<MemoryTransport>::METHOD_SAY);
     assert_eq!(EchoClient::<MemoryTransport>::METHOD_COUNT, before::EchoClient::<MemoryTransport>::METHOD_COUNT);
 
-    // … the same signatures (a change to either is a compile error here) …
+    // … the same signatures (a change to either is a compile error here; the
+    // lift and the variant are RETURNS-46's, left to inference) …
     fn now_sigs<T: Transport>(c: &EchoClient<T>) {
-        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.say(String::new());
-        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.count(0);
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _, _, _> = c.say(String::new());
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _, _, _> = c.count(0);
         let _ = c.say(String::new()).try_collect::<Vec<_>>();
         let _ = c.count(0).try_collect::<Vec<_>>();
         let _: &T = c.transport();
     }
     fn before_sigs<T: Transport>(c: &before::EchoClient<T>) {
-        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.say(String::new());
-        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.count(0);
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _, _, _> = c.say(String::new());
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _, _, _> = c.count(0);
         let _ = c.say(String::new()).try_collect::<Vec<_>>();
         let _ = c.count(0).try_collect::<Vec<_>>();
         let _: &T = c.transport();

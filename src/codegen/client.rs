@@ -51,10 +51,10 @@
 //!     pub async fn get(&self, id: String)
 //!         -> Result<Result<Ticket, GetError>, ClientError>;          // one, fallible
 //!     pub fn list(&self, epic: Option<String>)                       // many
-//!         -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent, L>;
+//!         -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent, L, __TicketsClientList>;
 //!     pub fn import(&self, source: String)                           // many, with progress
-//!         -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent, L>;
-//!     pub fn inputs(&self) -> InputsClient<&T, Static<L, InputsEvent, TicketsEvent>>;   // a static #[child]
+//!         -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent, L, __TicketsClientImport>;
+//!     pub fn inputs(&self) -> InputsClient<&T, Static<L, __TicketsClientInputs>>;   // a static #[child]
 //!     pub fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>;  // a dynamic #[child]
 //! }
 //! ```
@@ -278,10 +278,36 @@ pub(crate) fn generate(
             .filter(|c| matches!(c.kind, ChildMethodKind::Static))
             .map(|c| c.fn_name.to_string())
             .collect(),
-        methods: methods.iter().map(|m| m.method_name.clone()).chain(["schema".to_string()]).collect(),
     };
     let child_accessors: Vec<TokenStream> =
-        tree.iter().map(|n| child_accessor(n, namespace, &event_ty, client_path, &reserved)).collect();
+        tree.iter().map(|n| child_accessor(n, namespace, client_ty, &event_ty, client_path, &reserved)).collect();
+    // RETURNS-46: one zero-sized `Wrap` per static child — its variant, so a
+    // static level's lift is an inlined call, not one through a pointer.
+    let wraps: Vec<TokenStream> = tree
+        .iter()
+        .filter(|n| !n.dynamic)
+        .map(|n| {
+            let wrap_ty = wrap_ident(client_ty, &n.variant);
+            let child_event = &n.child_event;
+            let variant = &n.variant;
+            let wrapped = if n.boxed { quote! { ::std::boxed::Box::new(event) } } else { quote! { event } };
+            let doc = format!("RETURNS-46: `{client_ty}`'s `{}` child's event into `{event_ty}::{variant}`.", n.segment);
+            quote! {
+                #[doc = #doc]
+                #[doc(hidden)]
+                #[derive(Debug, Clone, Copy, Default)]
+                pub struct #wrap_ty;
+
+                impl #client_path::Wrap<#child_event> for #wrap_ty {
+                    type Into = #event_ty;
+                    #[inline(always)]
+                    fn wrap(&self, event: #child_event) -> #event_ty {
+                        #event_ty::#variant(#wrapped)
+                    }
+                }
+            }
+        })
+        .collect();
     // RETURNS-46: in the server half, where the child's type exists, each
     // child is held to having a client — so a child without one is told to
     // be `#[child(opaque)]`, not only that `XClient` is not found.
@@ -303,6 +329,7 @@ pub(crate) fn generate(
 
     let mut variants: Vec<TokenStream> = Vec::new();
     let mut method_items: Vec<TokenStream> = Vec::new();
+    let mut ctors: Vec<TokenStream> = Vec::new();
     let mut consts: Vec<TokenStream> = Vec::new();
     let mut seen: HashMap<String, String> = HashMap::new();
     // RETURNS-46: methods and children share the route namespace, and so
@@ -430,17 +457,36 @@ pub(crate) fn generate(
                      `.events()` yields `{event_ty}::{variant}` — lifted by `L` into the \
                      aggregate of the client this one was reached from (RETURNS-46)."
                 );
+                // RETURNS-46: the method's variant as a zero-sized `EventOf`,
+                // so it and the lift inline into one step per event.
+                let ctor = wrap_ident(client_ty, &variant);
+                let ctor_doc = format!("RETURNS-46: an item of `{namespace}.{wire_method}` as `{event_ty}::{variant}`.");
+                ctors.push(quote! {
+                    #[doc = #ctor_doc]
+                    #[doc(hidden)]
+                    #[derive(Debug, Clone, Copy, Default)]
+                    pub struct #ctor;
+
+                    #[allow(private_interfaces)]
+                    impl #client_path::EventOf<#item_ty> for #ctor {
+                        type Aggregate = #event_ty;
+                        #[inline(always)]
+                        fn event(&self, item: #item_ty) -> #event_ty {
+                            #event_ty::#variant(item)
+                        }
+                    }
+                });
                 quote! {
                     #[allow(clippy::too_many_arguments)]
                     #[doc = #doc]
                     pub fn #fn_ident(&self #(, #sig_params)*)
-                        -> #client_path::MethodStream<'_, #item_ty, #progress_ty, #event_ty, L>
+                        -> #client_path::MethodStream<'_, #item_ty, #progress_ty, #event_ty, L, #ctor>
                     {
                         let (__method, __params) = match self.route.method(#client_ty::<T>::#const_ident) {
                             ::core::result::Result::Ok(m) => (m, #params),
                             ::core::result::Result::Err(e) => (#client_ty::<T>::#const_ident, ::core::result::Result::Err(e)),
                         };
-                        #client_path::MethodStream::call(&self.transport, __method, __params, #decoder, #event_ty::#variant)
+                        #client_path::MethodStream::call_as(&self.transport, __method, __params, #decoder, #ctor)
                             .lifted(::core::clone::Clone::clone(&self.lift))
                     }
                 }
@@ -548,6 +594,8 @@ pub(crate) fn generate(
         }
 
         #(#froms)*
+        #(#wraps)*
+        #(#ctors)*
 
         #[doc = #struct_doc]
         pub struct #client_ty<T, L = #client_path::Root> {
@@ -648,10 +696,10 @@ pub(crate) fn generate(
 }
 
 /// RETURNS-46: what an instance name may not be — a static child's segment
-/// or a method of the parent (the service routes those first).
+/// (the service routes it there first). A method of the parent may: the
+/// service takes the segment after the parent as a child, never its method.
 struct Reserved {
     statics: Vec<String>,
-    methods: Vec<String>,
 }
 
 
@@ -676,9 +724,11 @@ struct ChildNode {
     /// through its client, by the rule the client is named by, never guessed
     /// from the type (a child's aggregate is named by its namespace).
     child_event: TokenStream,
-    /// What the parent's variant carries: the child's event, boxed. Always
-    /// boxed — two activations may be each other's children (ping has the
-    /// static pong, pong the dynamic ping), a cycle no one expansion sees.
+    /// What the parent's variant carries: a dynamic or recursive child's
+    /// event boxed, a static child's as it is. Every cycle a service can
+    /// serve passes through a dynamic child (ping has the static pong, pong
+    /// the dynamic ping — a cycle no one expansion sees); a cycle of static
+    /// children has no bottom, and no service finishes describing it.
     payload: TokenStream,
     boxed: bool,
     variant: syn::Ident,
@@ -767,15 +817,15 @@ fn option_inner(ty: &Type) -> Option<&Type> {
 
 /// The accessor a parent's client gets for one `#[child]`.
 ///
-/// A static child (MACRO-16) — `fn inputs(&self) -> InputsClient<&T, Static<L, InputsEvent, TicketsEvent>>`,
+/// A static child (MACRO-16) — `fn inputs(&self) -> InputsClient<&T, Static<L, __TicketsClientInputs>>`,
 /// whose calls go to `<this client's path>.inputs.<method>`, as the service
 /// routes them. A dynamic child (RETURNS-46) — `fn item(&self, name: &str)
 /// -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`, whose calls go to
 /// `<this client's path>.<name>.<method>`: the service routes a name no
 /// static child has to the dynamic child, so the name is the segment and the
-/// accessor's own name is not on the wire. A name the service would route
-/// elsewhere — empty, dotted, a static child's segment, a method of this
-/// activation — makes a client every call of which fails at once
+/// accessor's own name is not on the wire. A name that cannot reach the
+/// instance — empty, dotted, outside the service's path grammar, a static
+/// child's segment — makes a client every call of which fails at once
 /// (`ClientError::InvalidName`); the accessor itself never fails.
 ///
 /// Either way the child's client lifts its events into this client's
@@ -788,9 +838,15 @@ fn option_inner(ty: &Type) -> Option<&Type> {
 /// keeping any module path), never from the child struct itself — a struct
 /// that is server-only (`server_cfg`) does not exist in the client half. So
 /// the child must have a client too, or be `#[child(opaque)]`.
+/// `__TreeClientBranch`: the zero-sized `Wrap` of `TreeClient`'s `branch` child.
+fn wrap_ident(client_ty: &syn::Ident, variant: &syn::Ident) -> syn::Ident {
+    format_ident!("__{}{}", client_ty, variant)
+}
+
 fn child_accessor(
     n: &ChildNode,
     namespace: &str,
+    client_ty: &syn::Ident,
     event_ty: &syn::Ident,
     client: &syn::Path,
     reserved: &Reserved,
@@ -802,14 +858,13 @@ fn child_accessor(
     let variant = &n.variant;
     if n.dynamic {
         let statics = &reserved.statics;
-        let methods = &reserved.methods;
         let routes = format!(
             "The instance `name` of the dynamic child `{segment}` — its methods go to \
              `{namespace}.<name>.<method>` (or beneath wherever this client is mounted), and \
              its events are this client's, as `{event_ty}::{variant} {{ name, event }}`. A \
-             name that is empty, holds a `.`, or is a static child's segment or a method of \
-             `{namespace}` is routed elsewhere by the service: every call through it fails at \
-             once with `ClientError::InvalidName`, and nothing is sent."
+             name that is empty, holds a `.`, is not a route segment (`[a-z][a-z0-9_]*`) or is \
+             a static child's segment of `{namespace}` cannot reach the instance: every call \
+             through it fails at once with `ClientError::InvalidName`, and nothing is sent."
         );
         let doc = if n.description.is_empty() { routes } else { format!("{}\n\n{routes}", n.description) };
         quote! {
@@ -819,7 +874,7 @@ fn child_accessor(
             {
                 #child_client::lifted(
                     &self.transport,
-                    self.route.instance(#namespace, name, &[#(#statics),*], &[#(#methods),*]),
+                    self.route.instance(#namespace, name, &[#(#statics),*]),
                     #client::Named::new(
                         ::core::clone::Clone::clone(&self.lift),
                         ::std::sync::Arc::from(name),
@@ -830,7 +885,7 @@ fn child_accessor(
         }
     } else {
         let joined = format!("{namespace}.{segment}");
-        let wrapped = if n.boxed { quote! { ::std::boxed::Box::new(event) } } else { quote! { event } };
+        let wrap_ty = wrap_ident(client_ty, variant);
         let routes = format!(
             "The `{segment}` child — its methods go to `{namespace}.{segment}.<method>` (or \
              beneath wherever this client is mounted), and its events are this client's, as \
@@ -839,11 +894,11 @@ fn child_accessor(
         let doc = if n.description.is_empty() { routes } else { format!("{}\n\n{routes}", n.description) };
         quote! {
             #[doc = #doc]
-            pub fn #fn_name(&self) -> #child_client<&T, #client::Static<L, #child_event, #event_ty>> {
+            pub fn #fn_name(&self) -> #child_client<&T, #client::Static<L, #wrap_ty>> {
                 #child_client::lifted(
                     &self.transport,
                     self.route.child(#segment, #joined),
-                    #client::Static::new(::core::clone::Clone::clone(&self.lift), |event| #event_ty::#variant(#wrapped)),
+                    #client::Static::new(::core::clone::Clone::clone(&self.lift), #wrap_ty),
                 )
             }
         }

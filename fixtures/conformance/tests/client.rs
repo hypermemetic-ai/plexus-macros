@@ -149,17 +149,19 @@ fn client() -> Client {
 
 /// Every call's result is typed precisely: one-item methods are `async fn`s
 /// returning their item, many-item methods `MethodStream<'_, I, P,
-/// ConformanceEvent>` with `P` the declared progress (`Note` by default,
-/// `NoProgress` when none). This compiles or the test does not.
+/// ConformanceEvent, L, W>` with `P` the declared progress (`Note` by default,
+/// `NoProgress` when none) — `L` the client's lift and `W` the method's
+/// zero-sized variant (RETURNS-46), left to inference here. This compiles or
+/// the test does not.
 #[allow(dead_code, clippy::let_underscore_future)]
 fn the_client_is_typed_precisely(c: &ConformanceClient<MemoryTransport>) {
     type One<'a, I> = Pin<Box<dyn Future<Output = Result<I, ClientError>> + Send + 'a>>;
     let _: One<'_, Pong> = Box::pin(c.ping());
     let _: One<'_, Result<Thing, LookupError>> = Box::pin(c.lookup("a1".into()));
-    let _: MethodStream<'_, Tick, NoProgress, ConformanceEvent> = c.count(3);
-    let _: MethodStream<'_, Result<Row, ScanError>, NoProgress, ConformanceEvent> = c.scan("a".into());
-    let _: MethodStream<'_, Result<Loaded, LoadError>, LoadStep, ConformanceEvent> = c.load(2);
-    let _: MethodStream<'_, Warmed, Note, ConformanceEvent> = c.warm();
+    let _: MethodStream<'_, Tick, NoProgress, ConformanceEvent, _, _> = c.count(3);
+    let _: MethodStream<'_, Result<Row, ScanError>, NoProgress, ConformanceEvent, _, _> = c.scan("a".into());
+    let _: MethodStream<'_, Result<Loaded, LoadError>, LoadStep, ConformanceEvent, _, _> = c.load(2);
+    let _: MethodStream<'_, Warmed, Note, ConformanceEvent, _, _> = c.warm();
 }
 
 #[test]

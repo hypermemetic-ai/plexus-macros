@@ -10,13 +10,13 @@
 //! | client | `L` | its `.events()` yield |
 //! |---|---|---|
 //! | `TreeClient::new(t)` | [`Root`] | `TreeEvent` |
-//! | `tree.branch()` | `Static<Root, BranchEvent, TreeEvent>` | `TreeEvent::Branch(..)` |
+//! | `tree.branch()` | `Static<Root, __TreeClientBranch>` | `TreeEvent::Branch(..)` |
 //! | `tree.item("a")` | `Named<Root, ItemEvent, TreeEvent>` | `TreeEvent::Item { name: "a", .. }` |
-//! | `tree.branch().leaf()` | `Static<Static<Root, ..>, FoliageEvent, BranchEvent>` | `TreeEvent::Branch(BranchEvent::Leaf(..))` |
+//! | `tree.branch().leaf()` | `Static<Static<Root, ..>, __BranchClientLeaf>` | `TreeEvent::Branch(BranchEvent::Leaf(..))` |
 //!
 //! The lift is a type: [`Root`] is nothing at all (an event of a client
 //! reached through nothing is its own, at no cost); [`Static`] is the
-//! parent's lift and a function pointer; [`Named`] adds the instance's name,
+//! parent's lift and a zero-sized [`Wrap`] (the variant, inlined); [`Named`] adds the instance's name,
 //! an `Arc<str>` each event shares. No closure, no allocation but the
 //! variant's own box.
 //!
@@ -68,25 +68,48 @@ impl<E> Lift<E> for Root {
     }
 }
 
-/// A static child's lift: wrap the child's event `C` in the parent's
-/// variant (`P`), then lift as the parent does (`L`).
-pub struct Static<L, C, P> {
-    outer: L,
-    wrap: fn(C) -> P,
+/// How a static child's event `C` becomes its parent's: the parent's variant.
+/// The activation macro emits one zero-sized type per static child that
+/// implements it, so a static level's wrapping is a direct, inlined call, not
+/// a call through a pointer; a `fn(C) -> P` is one too, for a lift by hand.
+pub trait Wrap<C>: Clone + Send + Sync + 'static {
+    /// The parent's aggregate.
+    type Into;
+    /// `event` in the parent's variant.
+    fn wrap(&self, event: C) -> Self::Into;
 }
 
-impl<L, C, P> Static<L, C, P> {
+impl<C: 'static, P: 'static> Wrap<C> for fn(C) -> P {
+    type Into = P;
+    #[inline]
+    fn wrap(&self, event: C) -> P {
+        self(event)
+    }
+}
+
+/// A static child's lift: wrap the child's event in the parent's variant
+/// (`W`), then lift as the parent does (`L`).
+pub struct Static<L, W> {
+    outer: L,
+    wrap: W,
+}
+
+impl<L, W> Static<L, W> {
     /// `wrap`, then `outer`.
-    pub fn new(outer: L, wrap: fn(C) -> P) -> Self {
+    pub fn new(outer: L, wrap: W) -> Self {
         Self { outer, wrap }
     }
 }
 
-impl<L: Lift<P>, C: 'static, P: 'static> Lift<C> for Static<L, C, P> {
+impl<C, L, W> Lift<C> for Static<L, W>
+where
+    W: Wrap<C>,
+    L: Lift<W::Into>,
+{
     type Out = L::Out;
-    #[inline]
+    #[inline(always)]
     fn lift(&self, event: C) -> L::Out {
-        self.outer.lift((self.wrap)(event))
+        self.outer.lift(self.wrap.wrap(event))
     }
 }
 
@@ -118,9 +141,9 @@ impl<L: Lift<P>, C: 'static, P: 'static> Lift<C> for Named<L, C, P> {
     }
 }
 
-impl<L: Clone, C, P> Clone for Static<L, C, P> {
+impl<L: Clone, W: Clone> Clone for Static<L, W> {
     fn clone(&self) -> Self {
-        Self { outer: self.outer.clone(), wrap: self.wrap }
+        Self { outer: self.outer.clone(), wrap: self.wrap.clone() }
     }
 }
 
@@ -130,9 +153,9 @@ impl<L: Clone, C, P> Clone for Named<L, C, P> {
     }
 }
 
-impl<L: fmt::Debug, C, P> fmt::Debug for Static<L, C, P> {
+impl<L: fmt::Debug, W> fmt::Debug for Static<L, W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Static").field("into", &std::any::type_name::<P>()).field("outer", &self.outer).finish()
+        f.debug_struct("Static").field("wrap", &std::any::type_name::<W>()).field("outer", &self.outer).finish()
     }
 }
 
@@ -166,8 +189,8 @@ mod tests {
 
     #[test]
     fn lifts_compose_one_level_at_a_time() {
-        let branch: Static<Root, Branch, Tree> = Static::new(Root, |b| Tree::Branch(Box::new(b)));
-        let leaf = Static::new(branch, |l| Branch::Leaf(Box::new(l)));
+        let branch: Static<Root, fn(Branch) -> Tree> = Static::new(Root, |b| Tree::Branch(Box::new(b)));
+        let leaf: Static<_, fn(Leaf) -> Branch> = Static::new(branch, |l| Branch::Leaf(Box::new(l)));
         assert_eq!(leaf.lift(Leaf::Fall(1)), Tree::Branch(Box::new(Branch::Leaf(Box::new(Leaf::Fall(1))))));
         let item: Named<Root, Leaf, Tree> = Named::new(Root, Arc::from("a"), |name, l| Tree::Item { name, event: Box::new(l) });
         assert_eq!(item.lift(Leaf::Fall(2)), Tree::Item { name: Arc::from("a"), event: Box::new(Leaf::Fall(2)) });
@@ -177,7 +200,7 @@ mod tests {
     fn the_root_lift_is_nothing() {
         assert_eq!(std::mem::size_of::<Root>(), 0);
         fn send_sync<T: Send + Sync + Clone>() {}
-        send_sync::<Static<Root, Leaf, Tree>>();
+        send_sync::<Static<Root, fn(Leaf) -> Tree>>();
         send_sync::<Named<Root, Leaf, Tree>>();
     }
 }

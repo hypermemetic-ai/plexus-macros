@@ -149,8 +149,11 @@ pub enum ClientError {
 }
 
 /// Why an instance name cannot reach its instance (RETURNS-46): the service
-/// routes `<parent>.<name>.<method>` by its first segment, a static child
-/// before the dynamic one and a method of the parent before either.
+/// routes `<parent>.<name>.<method>` by `name`'s segment — a static child
+/// before the dynamic one — and refuses a path whose segments are not
+/// `[a-z][a-z0-9_]*` (plexus-auth-core's `MethodPath`). A name that is a
+/// method of the parent is the instance: the service takes the first segment
+/// after the parent as a child, never as the parent's method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum NameRefusal {
@@ -158,10 +161,12 @@ pub enum NameRefusal {
     Empty,
     /// It holds a `.`: the service would read two segments.
     Dotted,
+    /// It is not a segment of the service's path grammar,
+    /// `[a-z][a-z0-9_]*`: the service refuses the call (`" "`, `"LEFT"`,
+    /// `"acme-co"`, `"ａcme"`).
+    NotASegment,
     /// It is a static sibling's segment: the service routes it there.
     StaticChild,
-    /// It is a method of the parent: the call would not reach a child.
-    Method,
 }
 
 impl fmt::Display for NameRefusal {
@@ -170,7 +175,7 @@ impl fmt::Display for NameRefusal {
             NameRefusal::Empty => "it is empty",
             NameRefusal::Dotted => "it contains '.', which the service reads as two segments",
             NameRefusal::StaticChild => "it is a static child's segment, which the service routes there",
-            NameRefusal::Method => "it is a method of the parent",
+            NameRefusal::NotASegment => "it is not a route segment ([a-z][a-z0-9_]*), which the service refuses",
         })
     }
 }

@@ -12,6 +12,7 @@ use aggregate_probe::*;
 
 struct Counting;
 static LIVE: AtomicIsize = AtomicIsize::new(0);
+/// Blocks held: allocations less deallocations.
 static ALLOCS: AtomicIsize = AtomicIsize::new(0);
 
 unsafe impl GlobalAlloc for Counting {
@@ -22,6 +23,7 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         LIVE.fetch_sub(l.size() as isize, Ordering::Relaxed);
+        ALLOCS.fetch_sub(1, Ordering::Relaxed);
         System.dealloc(p, l)
     }
 }
@@ -64,16 +66,22 @@ fn the_accessor_takes_no_lock() {
     let route = include_str!("../../../plexus-client/src/route.rs");
     let transport = include_str!("../../../plexus-client/src/transport.rs");
     let path_code = &transport[transport.find("pub struct RoutePath").unwrap()..transport.find("/// A fully qualified Plexus method").unwrap()];
-    for (file, code) in [("route.rs", route), ("transport.rs RoutePath", path_code)] {
-        for word in ["Mutex", "RwLock", "OnceLock", "LazyLock", "static ", "thread_local", "Atomic"] {
+    // the code, its comments aside
+    let code_of = |s: &str| s.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    let (route, path_code) = (code_of(route), code_of(path_code));
+    for (file, code) in [("route.rs", route.as_str()), ("transport.rs RoutePath", path_code.as_str())] {
+        for word in ["Mutex", "RwLock", "OnceLock", "LazyLock", "thread_local", "Atomic"] {
             assert!(!code.contains(word), "{file} holds `{word}`");
         }
+        // a `static` item — not a `'static` lifetime
+        let statics = code.match_indices("static ").filter(|(i, _)| *i == 0 || code.as_bytes()[i - 1] != b'\'').count();
+        assert_eq!(statics, 0, "{file} declares a `static`");
     }
     let f = Fast(0);
     let root = RootClient::new(&f);
     let before = ALLOCS.load(Ordering::Relaxed);
     let org = root.org("acme");
     let during = ALLOCS.load(Ordering::Relaxed);
-    assert_eq!(during - before, 2, "the instance's path and its name, nothing else");
+    assert_eq!(during - before, 2, "the instance's path and its name held, nothing else");
     drop(org);
 }

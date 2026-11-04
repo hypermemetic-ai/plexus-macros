@@ -57,9 +57,11 @@ impl Route {
     }
 
     /// The route of the dynamic instance `name`, refused when the service
-    /// would route `name` elsewhere: empty, dotted, one of the parent's
-    /// static children's `statics`, or one of its `methods`.
-    pub fn instance(&self, namespace: &str, name: &str, statics: &[&str], methods: &[&str]) -> Route {
+    /// would not reach the instance with it: empty, dotted, outside its path
+    /// grammar ([`is_route_segment`]), or one of the parent's static
+    /// children's `statics`. A name that is a method of the parent is fine:
+    /// the service takes it as the child.
+    pub fn instance(&self, namespace: &str, name: &str, statics: &[&str]) -> Route {
         let path = if self.path.is_empty() {
             RoutePath::from(format!("{namespace}.{name}"))
         } else {
@@ -69,10 +71,10 @@ impl Route {
             Some(NameRefusal::Empty)
         } else if name.contains('.') {
             Some(NameRefusal::Dotted)
+        } else if !is_route_segment(name) {
+            Some(NameRefusal::NotASegment)
         } else if statics.contains(&name) {
             Some(NameRefusal::StaticChild)
-        } else if methods.contains(&name) {
-            Some(NameRefusal::Method)
         } else {
             None
         };
@@ -93,6 +95,18 @@ impl Route {
     }
 }
 
+/// One segment of the service's path grammar, `[a-z][a-z0-9_]*` — the rule
+/// plexus-auth-core's `MethodPath` holds every routed path to (mirrored
+/// here: plexus-client builds for wasm32 and takes no plexus-auth-core; a
+/// fixture test holds the two to the same answers).
+pub fn is_route_segment(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,14 +117,16 @@ mod tests {
         assert_eq!(root.path("tree"), "tree");
         let branch = root.child("branch", "tree.branch");
         assert_eq!(branch.path("branch"), "tree.branch");
-        let a = root.instance("tree", "a", &["branch"], &["count"]);
+        let a = root.instance("tree", "a", &["branch"]);
         assert_eq!(a.path("item"), "tree.a");
         assert_eq!(a.method(MethodRef::new("item", "watch")).unwrap().qualified(), "tree.a.watch");
-        for (name, why) in [("", NameRefusal::Empty), ("a.b", NameRefusal::Dotted), ("branch", NameRefusal::StaticChild), ("count", NameRefusal::Method)] {
-            let r = root.instance("tree", name, &["branch"], &["count"]);
+        // a method of the parent is the instance
+        assert!(root.instance("tree", "count", &["branch"]).method(MethodRef::new("item", "watch")).is_ok());
+        for (name, why) in [("", NameRefusal::Empty), ("a.b", NameRefusal::Dotted), ("A", NameRefusal::NotASegment), ("branch", NameRefusal::StaticChild)] {
+            let r = root.instance("tree", name, &["branch"]);
             assert_eq!(r.method(MethodRef::new("item", "watch")), Err(ClientError::InvalidName { name: name.into(), reason: why }));
             // inherited below
-            let below = r.child("leaf", "item.leaf").instance("item", "ok", &[], &[]);
+            let below = r.child("leaf", "item.leaf").instance("item", "ok", &[]);
             assert!(below.method(MethodRef::new("x", "y")).is_err());
         }
     }

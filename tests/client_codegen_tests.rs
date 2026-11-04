@@ -216,9 +216,9 @@ fn every_call_is_typed_precisely(c: &TicketsClient<MemoryTransport>) {
     type One<'a, I> = Pin<Box<dyn Future<Output = Result<I, ClientError>> + Send + 'a>>;
     let _: One<'_, Health> = Box::pin(c.health());
     let _: One<'_, Result<Ticket, GetError>> = Box::pin(c.get("A-1".into()));
-    let _: MethodStream<'_, Ticket, NoProgress, TicketsEvent> = c.list(None, None);
-    let _: MethodStream<'_, Result<Change, WatchError>, NoProgress, TicketsEvent> = c.watch(None);
-    let _: MethodStream<'_, Result<Summary, ImportError>, Step, TicketsEvent> = c.import("x".into());
+    let _: MethodStream<'_, Ticket, NoProgress, TicketsEvent, _, _> = c.list(None, None);
+    let _: MethodStream<'_, Result<Change, WatchError>, NoProgress, TicketsEvent, _, _> = c.watch(None);
+    let _: MethodStream<'_, Result<Summary, ImportError>, Step, TicketsEvent, _, _> = c.import("x".into());
 }
 
 // ---------------------------------------------------------- one-item methods
