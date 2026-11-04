@@ -3,7 +3,15 @@
 All notable changes to plexus-macros and plexus-client are documented here.
 This file starts at 0.7.0; earlier changes are in the git history.
 
-## [Unreleased]
+## [0.8.0]
+
+plexus-macros 0.8.0 and plexus-client 0.8.0, released with plexus-core 0.8.0:
+the code these macros emit needs it.
+
+### Changed (PUBLISH-3)
+
+- The tests' `plexus-auth-core` dev-dependency asks for 0.3 (`CallCeiling`
+  gained `max_buffered`, BIDIR-6).
 
 BIDIR-6: `Input<T>`. BIDIR-17: `Input<Bytes>` as binary frames.
 
@@ -76,9 +84,7 @@ BIDIR-6: `Input<T>`. BIDIR-17: `Input<Bytes>` as binary frames.
   kept, while a call waits for its id, and handed over when the id arrives
   (spec/02 rule 4); it was dropped.
 
-## [0.8.0] — unreleased (RETURNS-36: precise returns over main)
-
-### Breaking
+### Breaking (RETURNS-36: precise returns over main)
 
 - A method's return type is its contract (RETURNS-8): `-> T`,
   `-> Result<T, E>`, `-> impl Stream<Item = T | Result<T, E> |
