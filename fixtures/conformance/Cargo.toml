@@ -29,3 +29,6 @@ uuid = { version = "1.0", features = ["v4", "v5"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
+# examples/service.rs (RETURNS-40): the fixture behind a service, on a WebSocket.
+plexus-transport = { path = "../../../plexus-transport", default-features = false }
+anyhow = "1"
