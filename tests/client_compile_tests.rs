@@ -32,4 +32,7 @@ fn client_compile_fail() {
     // RETURNS-46: methods and children share one route namespace and one
     // aggregate; a method renamed onto a child's segment is refused.
     t.compile_fail("tests/compile/returns46_method_and_child_share_a_name.rs");
+    // RETURNS-46 review: a dynamic child with no client says to add
+    // `#[child(opaque)]` (or give it one).
+    t.compile_fail("tests/compile/returns46_dynamic_child_without_client.rs");
 }

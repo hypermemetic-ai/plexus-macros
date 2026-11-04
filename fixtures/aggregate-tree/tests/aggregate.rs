@@ -2,7 +2,7 @@
 //! dynamic, and a child's call lifts into any ancestor's.
 //!
 //! The tree (`src/lib.rs`) is served by a `DynamicHub` and called through
-//! plexus-core's `HubTransport` — the hub's own routing, so a child's method
+//! plexus-core's `HubTransport` — the service's own routing, so a child's method
 //! goes to `tree.branch.grow`, a dynamic instance's to `tree.a.watch`, as
 //! over the wire. What the calls decode to is compared with `expected/`:
 //!
@@ -47,7 +47,7 @@ fn line<E: Serialize>(e: &E) -> String {
 
 // ------------------------------------------------------------------ the service
 
-/// The hub's transport, recording each call's path and params.
+/// The service's transport, recording each call's path and params.
 #[derive(Clone)]
 struct Recording {
     inner: HubTransport,
@@ -162,17 +162,25 @@ async fn select_all_over_three_levels_is_matched_with_no_wildcard() {
 
     let (mut ticks, mut buds, mut frosts, mut leaves, mut seen) = (0, 0, 0, 0, Vec::new());
     while let Some(ev) = all.next().await {
-        // Exhaustive: every variant of every level, and no `_`.
+        // Exhaustive: every variant of every level, and no `_`. A child's
+        // event is boxed (any two activations may be each other's children),
+        // so each level is a match of its own.
         match ev.expect("no call fails") {
             TreeEvent::Ping(Pong { .. }) => unreachable!("ping is a one-item method: no .events()"),
             TreeEvent::Count(Tick { n }) => ticks += n,
-            TreeEvent::Branch(BranchEvent::Grow(Ok(Bud { bud }))) => buds += bud,
-            TreeEvent::Branch(BranchEvent::Grow(Err(GrowError::Frost { at }))) => frosts += at,
-            TreeEvent::Branch(BranchEvent::Leaf(FoliageEvent::Fall(Fell { leaf }))) => leaves += leaf,
-            TreeEvent::Item { name, event: ItemEvent::Watch(Seen { seen: s, n }) } => {
-                assert_eq!(name, s, "the event names the instance it came from");
-                seen.push(format!("{name}{n}"));
-            }
+            TreeEvent::Branch(branch) => match *branch {
+                BranchEvent::Grow(Ok(Bud { bud })) => buds += bud,
+                BranchEvent::Grow(Err(GrowError::Frost { at })) => frosts += at,
+                BranchEvent::Leaf(leaf) => match *leaf {
+                    FoliageEvent::Fall(Fell { leaf }) => leaves += leaf,
+                },
+            },
+            TreeEvent::Item { name, event } => match *event {
+                ItemEvent::Watch(Seen { seen: s, n }) => {
+                    assert_eq!(*name, *s, "the event names the instance it came from");
+                    seen.push(format!("{name}{n}"));
+                }
+            },
         }
     }
     assert_eq!((ticks, buds, frosts, leaves), (1 + 2, 1 + 3, 2, 1 + 2));
@@ -191,10 +199,12 @@ async fn a_dynamic_childs_instances_arrive_with_their_names() {
     let mut names: Vec<(String, u32)> = merged
         .into_iter()
         .map(|ev| match ev {
-            TreeEvent::Item { name, event: ItemEvent::Watch(s) } => {
-                assert_eq!(name, s.seen);
-                (name, s.n)
-            }
+            TreeEvent::Item { name, event } => match *event {
+                ItemEvent::Watch(s) => {
+                    assert_eq!(*name, *s.seen);
+                    (name.to_string(), s.n)
+                }
+            },
             other => panic!("not an item's event: {other:?}"),
         })
         .collect();

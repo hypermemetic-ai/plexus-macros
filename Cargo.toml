@@ -26,6 +26,9 @@ members = [
     # RETURNS-46's: a tree of activations — a static child with a static
     # child of its own, and a dynamic child — and its nested aggregates.
     "fixtures/aggregate-tree",
+    # RETURNS-46's review probes: the shapes the tree must survive, names,
+    # memory and the per-event cost.
+    "fixtures/aggregate-probe",
 ]
 
 [package]
