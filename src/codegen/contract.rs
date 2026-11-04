@@ -349,8 +349,11 @@ pub(crate) fn self_callable(methods: &[MethodInfo]) -> bool {
     methods.iter().all(|m| injected(m).is_none())
 }
 
-fn sig_params(m: &MethodInfo) -> (Vec<TokenStream>, Vec<&syn::Ident>) {
-    let params = m
+/// A trait method's parameters and their names. BIDIR-6: an `Input<T>` is a
+/// boxed stream of `T` in the trait, which its implementors all take: the
+/// activation as its `Input`, the client as what it sends.
+fn sig_params<'a>(m: &'a MethodInfo, box_stream: &TokenStream) -> (Vec<TokenStream>, Vec<&'a syn::Ident>) {
+    let mut params: Vec<TokenStream> = m
         .params
         .iter()
         .map(|p| {
@@ -358,8 +361,23 @@ fn sig_params(m: &MethodInfo) -> (Vec<TokenStream>, Vec<&syn::Ident>) {
             quote! { #name: #ty }
         })
         .collect();
-    let names = m.params.iter().map(|p| &p.name).collect();
+    let mut names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
+    if let Some(i) = &m.input {
+        let (name, item) = (&i.name, &i.item);
+        params.insert(i.at, quote! { #name: #box_stream<'static, #item> });
+        names.insert(i.at, name);
+    }
     (params, names)
+}
+
+/// The names as the inherent method and the trait method pass them to one
+/// another: an `Input` through `convert`.
+fn passed<'a>(m: &'a MethodInfo, convert: impl Fn(&syn::Ident) -> TokenStream) -> Vec<TokenStream> {
+    let mut names: Vec<TokenStream> = m.params.iter().map(|p| { let n = &p.name; quote! { #n } }).collect();
+    if let Some(i) = &m.input {
+        names.insert(i.at, convert(&i.name));
+    }
+    names
 }
 
 /// `pub trait Foo: Send + Sync + 'static { fn m(&self, …) -> <m's own return
@@ -376,7 +394,7 @@ pub(crate) fn trait_def(
 ) -> TokenStream {
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
-        let (params, _) = sig_params(m);
+        let (params, _) = sig_params(m, &boxes.stream);
         let ret = ret_ty(m, boxes);
         let doc = &m.description;
         let doc = if doc.is_empty() { quote! {} } else { quote! { #[doc = #doc] } };
@@ -445,7 +463,8 @@ pub(crate) fn activation_trait_impl(
 ) -> TokenStream {
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
-        let (params, names) = sig_params(m);
+        let (params, _) = sig_params(m, &boxes.stream);
+        let names = passed(m, |n| quote! { ::core::convert::Into::into(#n) });
         let ret = ret_ty(m, boxes);
         let body = match m.cardinality {
             Cardinality::One => quote! {
@@ -526,7 +545,7 @@ pub(crate) fn rewrite_contract_impl(
         if let ImplItem::Fn(f) = item {
             if let Some(m) = methods.iter().find(|m| m.fn_name == f.sig.ident) {
                 let fn_ident = &m.fn_name;
-                let (_, names) = sig_params(m);
+                let names = passed(m, |n| quote! { #n.into_boxed() });
                 f.block = match m.cardinality {
                     // RETURNS-36: the trait's future, awaited in the
                     // inherent `async fn`.
@@ -560,7 +579,7 @@ pub(crate) fn contract_items(
     );
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
-        let (params, names) = sig_params(m);
+        let (params, names) = sig_params(m, &boxes.stream);
         let ret = ret_ty(m, boxes);
         quote! {
             #[allow(clippy::too_many_arguments)]
@@ -616,7 +635,7 @@ pub(crate) fn client_trait_impl(
 ) -> TokenStream {
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
-        let (params, _) = sig_params(m);
+        let (params, _) = sig_params(m, &boxes.stream);
         let ret = ret_ty(m, boxes);
         let const_ident = crate::codegen::client::method_const_ident(m);
         let links: Vec<TokenStream> = m.params.iter().map(crate::codegen::client::param_link).collect();
@@ -626,20 +645,46 @@ pub(crate) fn client_trait_impl(
             None => quote! { #client::Content::decode::<#ok> },
             Some(e) => quote! { #client::wire_result::from_content::<#ok, #e> },
         };
-        let items = quote! {
-            // PERF.115-36: the items with their content still the wire's
-            // text, decoded straight into the item.
-            #call_params.map(|__p| #client::owned_call_raw(
-                ::core::clone::Clone::clone(&self.transport),
-                Self::#const_ident.at(self.path),
-                __p,
-            ))
+        let items = match &m.input {
+            None => quote! {
+                // PERF.115-36: the items with their content still the wire's
+                // text, decoded straight into the item.
+                #call_params.map(|__p| #client::owned_call_raw(
+                    ::core::clone::Clone::clone(&self.transport),
+                    Self::#const_ident.at(self.path),
+                    __p,
+                ))
+            },
+            // BIDIR-6: the input half sent as the items are read.
+            Some(i) => {
+                let name = &i.name;
+                quote! {
+                    #call_params.map(|__p| #client::owned_call_raw_with_input(
+                        ::core::clone::Clone::clone(&self.transport),
+                        Self::#const_ident.at(self.path),
+                        __p,
+                        #client::encode_input(#name),
+                    ))
+                }
+            }
         };
         // The item named with the signature's own tokens, so a type that
         // does not implement `FromClientError` is pointed at where it is
         // written.
         let item = item_ty(m, client);
         let body = match (m.cardinality, &m.progress_ty, &m.err_ty) {
+            (Cardinality::One, _, _) if m.input.is_some() => {
+                let name = &m.input.as_ref().expect("guarded").name;
+                quote! {
+                    #client::trait_one_with_input::<_, #item>(
+                        ::core::clone::Clone::clone(&self.transport),
+                        Self::#const_ident.at(self.path),
+                        #call_params,
+                        #client::encode_input(#name),
+                        #decoder,
+                    )
+                }
+            }
             (Cardinality::One, _, _) => quote! {
                 #client::trait_one::<_, #item>(
                     ::core::clone::Clone::clone(&self.transport),

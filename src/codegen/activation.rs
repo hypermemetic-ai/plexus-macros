@@ -58,7 +58,7 @@ pub fn generate(
 
     let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type, deps, typed_params);
     let help_arms = generate_help_arms(methods);
-    let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty());
+    let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none());
     let rpc_trait_methods = generate_rpc_trait_methods(methods, deps);
     let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path, deps);
 
@@ -938,7 +938,7 @@ fn generate_rpc_trait_methods(methods: &[MethodInfo], deps: &syn::Ident) -> Vec<
         // Auth-requiring methods and methods with activation_params are dispatched through
         // Activation::call() which handles auth injection and request extraction.
         // The jsonrpsee RPC trait cannot carry auth context or raw_ctx.
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty())
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none())
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -976,7 +976,7 @@ fn generate_rpc_impl_methods(
     methods
         .iter()
         // Skip auth-requiring methods and activation_param methods — they route through Activation::call()
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty())
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none())
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -1093,7 +1093,21 @@ fn generate_dispatch_arms(
 
             // Generate param extraction code (MACRO-31: under `typed_params`,
             // preceded by the check for keys no parameter claims).
-            let (param_extraction, param_names) = generate_param_extraction(m, crate_path, deps);
+            let (param_extraction, mut param_names) = generate_param_extraction(m, crate_path, deps);
+            // BIDIR-6: the input half opens last, after the params and the
+            // gate, right before the method runs; it takes its place among
+            // the arguments as it does in the signature.
+            let input_open = match &m.input {
+                Some(i) => {
+                    param_names.insert(i.at, &i.name);
+                    let (name, item) = (&i.name, &i.item);
+                    let ceiling = input_ceiling(i, crate_path);
+                    quote! {
+                        let #name = #crate_path::plexus::input::open::<#item>(#content_type, #ceiling).await?;
+                    }
+                }
+                None => quote! {},
+            };
             let unknown_keys = if typed_params {
                 generate_unknown_key_check(m, &content_type, crate_path, deps)
             } else {
@@ -1275,6 +1289,7 @@ fn generate_dispatch_arms(
                             #(#resolver_bindings)*
                             #param_extraction
                             #reach_binding
+                            #input_open
                             let __ret = self.#fn_name(#method_params).await;
                             Ok(#wrapped)
                         }
@@ -1297,6 +1312,7 @@ fn generate_dispatch_arms(
                             #(#resolver_bindings)*
                             #param_extraction
                             #reach_binding
+                            #input_open
                             // Create bidir channel and wrap stream together
                             let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
                                 #crate_path::plexus::StandardRequest,
@@ -1331,6 +1347,7 @@ fn generate_dispatch_arms(
                             #(#resolver_bindings)*
                             #param_extraction
                             #reach_binding
+                            #input_open
                             // Create bidir channel and wrap stream together
                             let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
                                 #req_ty,
@@ -1349,6 +1366,26 @@ fn generate_dispatch_arms(
             }
         })
         .collect()
+}
+
+/// BIDIR-6: the `CallCeiling` a method's attributes say.
+fn input_ceiling(i: &crate::parse::InputInfo, crate_path: &syn::Path) -> TokenStream {
+    let set = |field: &str, v: &Option<syn::LitInt>| {
+        let field = quote::format_ident!("{}", field);
+        v.as_ref().map(|v| quote! { __c.#field = #v; })
+    };
+    let sets = [
+        set("credit", &i.ceiling.window),
+        set("max_items", &i.ceiling.max_items),
+        set("max_bytes", &i.ceiling.max_bytes),
+        set("max_buffered", &i.ceiling.max_buffered),
+    ];
+    quote! {{
+        #[allow(unused_mut)]
+        let mut __c = <#crate_path::plexus::duplex_gate::CallCeiling as ::core::default::Default>::default();
+        #(#sets)*
+        __c
+    }}
 }
 
 /// MACRO-31: under `typed_params`, a key of the params object that names no

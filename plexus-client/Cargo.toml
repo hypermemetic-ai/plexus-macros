@@ -27,6 +27,11 @@ futures-channel = { version = "0.3", default-features = false, features = [
     "std",
 ], optional = true }
 
+# BIDIR-17: `Input<Bytes>` sent as binary frames. Behind the WebSocket
+# backends, which carry them (tokio-tungstenite has it already); the default
+# core stays four dependencies.
+bytes = { version = "1", features = ["serde"], optional = true }
+
 # ws-native
 tokio = { version = "1.0", features = ["rt"], optional = true }
 tokio-tungstenite = { version = "0.30", optional = true }
@@ -52,13 +57,17 @@ default = []
 # RETURNS-4: `schemars::JsonSchema` impls for the wire vocabulary (`Note`,
 # `RemoteError`, `ParamProblem`, `DenyReason`).
 schema = ["dep:schemars"]
+# BIDIR-17: `InputItem::Binary`, which the WebSocket backends send as binary
+# frames.
+binary = ["dep:bytes"]
 ws-native = [
+    "binary",
     "dep:futures-channel",
     "dep:tokio",
     "dep:tokio-tungstenite",
     "futures-util/sink",
 ]
-ws-web = ["dep:futures-channel", "dep:wasm-bindgen", "dep:web-sys"]
+ws-web = ["binary", "dep:futures-channel", "dep:wasm-bindgen", "dep:web-sys"]
 
 [dev-dependencies]
 futures = "0.3"

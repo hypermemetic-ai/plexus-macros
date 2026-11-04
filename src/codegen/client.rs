@@ -73,6 +73,10 @@
 //! wasm32 one. `T: Transport` costs one type parameter and keeps the emitted
 //! code free of all of them.
 //!
+//! **`Input<T>` is a stream here.** `fn tokens(&self, run: RunId, tokens: impl
+//! Stream<Item = Token>)`: the params object is the other parameters, and the
+//! stream is drained under credit as the returned stream is read (BIDIR-6).
+//!
 //! **`Option` parameters are omitted, not nulled.** menger's `Ticket`
 //! serializes `severity`/`parent` with `skip_serializing_if`, and its REST
 //! tests assert absence rather than null. A client that sent `"parent":
@@ -305,7 +309,7 @@ pub(crate) fn generate(
         // `#[activation_param]`, `#[from_auth]` and `auth:`/`ctx:` are
         // already absent from `MethodInfo::params` by construction, which is
         // exactly the set a caller must not be asked for.
-        let sig_params: Vec<TokenStream> = m
+        let mut sig_params: Vec<TokenStream> = m
             .params
             .iter()
             .map(|p| {
@@ -314,6 +318,22 @@ pub(crate) fn generate(
                 quote! { #name: #ty }
             })
             .collect();
+        // BIDIR-6: the input half is a parameter of the client too, as any
+        // stream of the method's items; it is drained under credit as the
+        // returned stream (or the future) is read.
+        let lifetime = m.input.as_ref().map(|_| quote! { <'__plexus_a> });
+        let this = if m.input.is_some() { quote! { &'__plexus_a self } } else { quote! { &self } };
+        let items_life = if m.input.is_some() { quote! { '__plexus_a } } else { quote! { '_ } };
+        if let Some(i) = &m.input {
+            let (name, item) = (&i.name, &i.item);
+            sig_params.insert(i.at, quote! {
+                #name: impl #client_path::__rt::Stream<Item = #item> + #client_path::MaybeSend + '__plexus_a
+            });
+        }
+        let input_arg = m.input.as_ref().map(|i| {
+            let name = &i.name;
+            quote! { #client_path::encode_input(#name), }
+        });
         let links: Vec<TokenStream> = m.params.iter().map(param_link).collect();
         let params = quote! { #client_path::Params::new() #(#links)* .build() };
 
@@ -330,6 +350,13 @@ pub(crate) fn generate(
                 #client_path::MethodRef::new(#namespace, #wire_method);
         });
 
+        // BIDIR-6: a method with an input half calls through the input's
+        // twin of each.
+        let (call_one, call_many) = if m.input.is_some() {
+            (quote! { call_one_with_input }, quote! { call_with_input })
+        } else {
+            (quote! { call_one }, quote! { call })
+        };
         // The parameter list is the activation's, not ours: menger's
         // `create` takes seven. A lint the consumer cannot act on without
         // changing the *server* has no business firing in the crate that
@@ -344,13 +371,14 @@ pub(crate) fn generate(
                 quote! {
                     #[allow(clippy::too_many_arguments)]
                     #[doc = #doc]
-                    pub async fn #fn_ident(&self #(, #sig_params)*)
+                    pub async fn #fn_ident #lifetime (#this #(, #sig_params)*)
                         -> ::core::result::Result<#item_ty, #client_path::ClientError>
                     {
-                        #client_path::call_one(
+                        #client_path::#call_one(
                             &self.transport,
                             Self::#const_ident.at(self.path),
                             #params,
+                            #input_arg
                             #decoder,
                         )
                         .await
@@ -373,13 +401,14 @@ pub(crate) fn generate(
                 quote! {
                     #[allow(clippy::too_many_arguments)]
                     #[doc = #doc]
-                    pub fn #fn_ident(&self #(, #sig_params)*)
-                        -> #client_path::MethodStream<'_, #item_ty, #progress_ty, #event_ty>
+                    pub fn #fn_ident #lifetime (#this #(, #sig_params)*)
+                        -> #client_path::MethodStream<#items_life, #item_ty, #progress_ty, #event_ty>
                     {
-                        #client_path::MethodStream::call(
+                        #client_path::MethodStream::#call_many(
                             &self.transport,
                             Self::#const_ident.at(self.path),
                             #params,
+                            #input_arg
                             #decoder,
                             #event_ty::#variant,
                         )
