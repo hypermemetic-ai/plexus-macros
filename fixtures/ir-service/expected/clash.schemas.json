@@ -9,14 +9,14 @@
     ],
     "children_hash": "7fa9e90d0a6d91d4",
     "description": "Central routing and introspection",
-    "hash": "df727725835b6181",
+    "hash": "7072cd66eeccebf4",
     "methods": [
       {
         "bidirectional": false,
         "cardinality": "many",
         "description": "Route a call to a registered activation",
         "grant": "clashsvc.call",
-        "hash": "88df47aab046f715",
+        "hash": "2ea6cd03ff1041dd",
         "http_method": "POST",
         "name": "call",
         "params": {
@@ -45,30 +45,9 @@
         },
         "returns": {
           "$defs": {
-            "OtherError": {
-              "additionalProperties": {
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "description": "A kind this build does not know, with its other fields.",
-              "properties": {
-                "kind": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "kind"
-              ],
-              "type": "object"
-            },
-            "RemoteError": {
-              "anyOf": [
+            "KnownRemoteError": {
+              "description": "A call failure of a kind this vocabulary knows.",
+              "oneOf": [
                 {
                   "description": "The service has no activation by this name.",
                   "properties": {
@@ -147,6 +126,7 @@
                       "type": "string"
                     },
                     "param": {
+                      "default": null,
                       "description": "The parameter at fault, when the failure is about one.",
                       "type": [
                         "string",
@@ -307,6 +287,7 @@
                   "description": "spec/05, 09: the connection — or the child the call was routed to —\nholds its maximum of open calls; close one and call again.",
                   "properties": {
                     "child": {
+                      "default": null,
                       "description": "The child whose limit it is, when the limit is a child's.",
                       "type": [
                         "string",
@@ -373,13 +354,31 @@
                     "timeout_ms"
                   ],
                   "type": "object"
+                }
+              ]
+            },
+            "OtherError": {
+              "description": "A kind this build does not know: its `kind`, and any other fields beside it, kept as they came.",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            "RemoteError": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/KnownRemoteError"
                 },
                 {
-                  "$ref": "#/$defs/OtherError",
-                  "description": "A kind this build does not know, kept whole: its `kind` and every\nother field (RETURNS-36), written back as it came. Read only for a\nkind no known variant has (see the `Deserialize` impl)."
+                  "$ref": "#/$defs/OtherError"
                 }
               ],
-              "description": "Why a call failed — what an error frame carries, and the `data` of a\nJSON-RPC-level rejection."
+              "description": "Why a call failed — what an error frame carries, and the `data` of a JSON-RPC-level rejection: a kind this vocabulary knows, or another kept whole."
             },
             "StreamMetadata": {
               "description": "Metadata applied by the caller when wrapping activation responses\n\nThis metadata is added at each layer of the call stack, enabling\nprovenance tracking and cache invalidation.",
@@ -497,8 +496,7 @@
                   "description": "RETURNS-6: why the call failed, typed — what a typed client\ndecodes. Its `Display` is the human line."
                 },
                 "message": {
-                  "default": "",
-                  "description": "spec/05: the human line — never parsed for meaning. For a failed\ndispatch, the server's `PlexusError` as it reads; else the\n[`RemoteError`]'s `Display`. Always written; optional on reading\n(RETURNS-6's frame has none, as plexus-client reads it): a frame\nwithout one reads as an empty line.",
+                  "description": "spec/05: the human line — never parsed for meaning. For a failed\ndispatch, the server's `PlexusError` as it reads; else the\n[`RemoteError`]'s `Display`. Optional on reading (RETURNS-6's\nframe has none, as plexus-client reads it): a frame without one\nreads as empty, and is written back without one — a relay makes\nup no `\"\"` for a reader to show over the typed error (RETURNS-36,\nre-review #4). Every frame this crate builds has one.",
                   "type": "string"
                 },
                 "metadata": {
@@ -1783,7 +1781,7 @@
       }
     ],
     "namespace": "clashsvc",
-    "self_hash": "b8b128b6b72e3244",
+    "self_hash": "8be57f5d55edf465",
     "version": "1.0.0"
   },
   "clash": {
