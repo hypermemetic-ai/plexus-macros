@@ -14,7 +14,7 @@
     ],
     "children_hash": "bb38497bca8f7051",
     "description": "Central routing and introspection",
-    "hash": "a5851f74deb32cfa",
+    "hash": "399232510b0faadd",
     "methods": [
       {
         "bidirectional": false,
@@ -698,60 +698,9 @@
         "cardinality": "one",
         "description": "The service's IR (3.0): every type once, each method referring to them — of the namespaces asked, or the whole service",
         "error": {
-          "$defs": {
-            "IrTypeSource": {
-              "description": "Where a type was read: a method, and which of its schemas (`params`,\n`returns`, `error`, `progress` or `input`).",
-              "properties": {
-                "method": {
-                  "type": "string"
-                },
-                "schema": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "method",
-                "schema"
-              ],
-              "type": "object"
-            }
-          },
           "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "description": "Why a service writes no IR for what was asked.",
+          "description": "Why a service writes no IR for what was asked. (A title collision is no\nreason: the walk refuses that activation into the IR's `irRefusals`.)",
           "oneOf": [
-            {
-              "description": "Two different types are titled alike in one namespace: one title in\none namespace is one type, so its author renames one. `message` is\nsynapse's own words for it.",
-              "properties": {
-                "first": {
-                  "$ref": "#/$defs/IrTypeSource"
-                },
-                "message": {
-                  "type": "string"
-                },
-                "namespace": {
-                  "type": "string"
-                },
-                "second": {
-                  "$ref": "#/$defs/IrTypeSource"
-                },
-                "title": {
-                  "type": "string"
-                },
-                "type": {
-                  "const": "title_collision",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "type",
-                "namespace",
-                "title",
-                "first",
-                "second",
-                "message"
-              ],
-              "type": "object"
-            },
             {
               "description": "A namespace asked for is not one the caller's view of the service shows.",
               "properties": {
@@ -798,7 +747,7 @@
           "title": "IrError"
         },
         "grant": "irsvc.ir",
-        "hash": "f4c22d63076cf8bf",
+        "hash": "3b76885436ff0440",
         "http_method": "POST",
         "long_description": "RETURNS-40: the service's IR — IR 3.0, every type once and each\nmethod referring to them — of the namespaces asked (none: the whole\nservice), as the caller sees the service. The one way to ask for\nseveral schemas; `<ns>.schema` answers one. Equal to what synapse\nbuilds from the same raw schemas.",
         "name": "ir",
@@ -1839,7 +1788,7 @@
       }
     ],
     "namespace": "irsvc",
-    "self_hash": "f606f3f0112a10c0",
+    "self_hash": "b8b128b6b72e3244",
     "version": "1.0.0"
   },
   "alpha": {

@@ -1,6 +1,6 @@
 {
   "irBackend": "irsvc",
-  "irHash": "a5851f74deb32cfa",
+  "irHash": "399232510b0faadd",
   "irMetadata": null,
   "irMethods": {
     ".call": {
@@ -818,9 +818,9 @@
   },
   "irPluginHashes": {
     "": {
-      "phiChildrenHash": "a5851f74deb32cfa",
-      "phiHash": "a5851f74deb32cfa",
-      "phiSelfHash": "a5851f74deb32cfa"
+      "phiChildrenHash": "399232510b0faadd",
+      "phiHash": "399232510b0faadd",
+      "phiSelfHash": "399232510b0faadd"
     },
     "alpha": {
       "phiChildrenHash": "b71c44fef5ed8702",
@@ -980,81 +980,10 @@
       "tdNamespace": ""
     },
     ".IrError": {
-      "tdDescription": "Why a service writes no IR for what was asked.",
+      "tdDescription": "Why a service writes no IR for what was asked. (A title collision is no\nreason: the walk refuses that activation into the IR's `irRefusals`.)",
       "tdKind": {
         "keDiscriminator": "type",
         "keVariants": [
-          {
-            "vdDescription": "Two different types are titled alike in one namespace: one title in\none namespace is one type, so its author renames one. `message` is\nsynapse's own words for it.",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "first",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": {
-                    "qnLocalName": "IrTypeSource",
-                    "qnNamespace": ""
-                  },
-                  "tag": "RefNamed"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "message",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "namespace",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "second",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": {
-                    "qnLocalName": "IrTypeSource",
-                    "qnNamespace": ""
-                  },
-                  "tag": "RefNamed"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "title",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              }
-            ],
-            "vdName": "title_collision"
-          },
           {
             "vdDescription": "A namespace asked for is not one the caller's view of the service shows.",
             "vdFields": [
@@ -1123,42 +1052,6 @@
         "tag": "KindEnum"
       },
       "tdName": "IrError",
-      "tdNamespace": ""
-    },
-    ".IrTypeSource": {
-      "tdDescription": "Where a type was read: a method, and which of its schemas (`params`,\n`returns`, `error`, `progress` or `input`).",
-      "tdKind": {
-        "ksFields": [
-          {
-            "fdDefault": null,
-            "fdDescription": null,
-            "fdName": "method",
-            "fdRequired": true,
-            "fdType": {
-              "contents": [
-                "string",
-                null
-              ],
-              "tag": "RefPrimitive"
-            }
-          },
-          {
-            "fdDefault": null,
-            "fdDescription": null,
-            "fdName": "schema",
-            "fdRequired": true,
-            "fdType": {
-              "contents": [
-                "string",
-                null
-              ],
-              "tag": "RefPrimitive"
-            }
-          }
-        ],
-        "tag": "KindStruct"
-      },
-      "tdName": "IrTypeSource",
       "tdNamespace": ""
     },
     ".OtherError": {
