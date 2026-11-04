@@ -32,10 +32,10 @@ pub fn write(rel: &str, text: &str) {
 
 /// The items one call answers, as JSON — an error the route refuses with
 /// as the one error item a socket would be sent.
-pub async fn call(hub: &DynamicHub, method: &str, params: Value) -> Vec<Value> {
-    match hub.route(method, params, None).await {
+pub async fn call(service: &DynamicHub, method: &str, params: Value) -> Vec<Value> {
+    match service.route(method, params, None).await {
         Ok(stream) => stream.map(|item: PlexusStreamItem| serde_json::to_value(item).expect("an item serializes")).collect().await,
-        Err(e) => vec![plexus_core::plexus::error_item(hub.runtime_namespace(), &e)],
+        Err(e) => vec![plexus_core::plexus::error_item(service.runtime_namespace(), &e)],
     }
 }
 
@@ -48,12 +48,12 @@ pub fn content(items: &[Value]) -> Value {
 
 /// Every schema synapse's walk reads, by dotted path (`""`: the root):
 /// `<service>.schema`, then each child summary's `<path>.schema`.
-pub async fn walk(hub: &DynamicHub) -> BTreeMap<String, Value> {
+pub async fn walk(service: &DynamicHub) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
     let mut todo = vec![String::new()];
     while let Some(path) = todo.pop() {
-        let method = if path.is_empty() { format!("{}.schema", hub.runtime_namespace()) } else { format!("{path}.schema") };
-        let schema = content(&call(hub, &method, json!({})).await);
+        let method = if path.is_empty() { format!("{}.schema", service.runtime_namespace()) } else { format!("{path}.schema") };
+        let schema = content(&call(service, &method, json!({})).await);
         if let Some(kids) = schema.get("children").and_then(Value::as_array) {
             for k in kids {
                 let ns = k["namespace"].as_str().expect("a child names its namespace");

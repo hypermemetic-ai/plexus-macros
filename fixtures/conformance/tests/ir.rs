@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 
 #[tokio::test]
 async fn the_service_writes_the_fixtures_ir() {
-    let hub = DynamicHub::new("conformance_service").register(ConformanceActivation);
-    let items: Vec<Value> = hub
+    let service = DynamicHub::new("conformance_service").register(ConformanceActivation);
+    let items: Vec<Value> = service
         .route("conformance_service.ir", json!({"namespaces": ["conformance"]}), None)
         .await
         .expect("ir answers")

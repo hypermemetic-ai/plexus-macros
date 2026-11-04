@@ -10,9 +10,9 @@ use serde_json::{json, Value};
 use support::*;
 
 /// The IR an `ir` call answers, `irBackend` as synapse names the backend.
-async fn ir(hub: &plexus_core::plexus::DynamicHub, params: Value) -> Result<Value, Value> {
-    let method = format!("{}.ir", hub.runtime_namespace());
-    let answer = content(&call(hub, &method, params).await);
+async fn ir(service: &plexus_core::plexus::DynamicHub, params: Value) -> Result<Value, Value> {
+    let method = format!("{}.ir", service.runtime_namespace());
+    let answer = content(&call(service, &method, params).await);
     match (answer.get("ok"), answer.get("err")) {
         (Some(ok), None) => Ok(ok.clone()),
         (None, Some(err)) => Err(err.clone()),
@@ -29,22 +29,22 @@ fn same_as(file: &str, served: &Value) {
 
 #[tokio::test]
 async fn the_whole_service() {
-    let hub = ir_service::service();
-    let served = ir(&hub, json!({})).await.expect("the service's IR");
+    let service = ir_service::service();
+    let served = ir(&service, json!({})).await.expect("the service's IR");
     same_as("ir.json", &served);
     assert!(!served["irRefusals"].as_array().map(Vec::is_empty).unwrap_or(true), "the reader's refusals are carried");
 }
 
 #[tokio::test]
 async fn none_named_is_all() {
-    let hub = ir_service::service();
-    assert_eq!(ir(&hub, json!({"namespaces": []})).await, ir(&hub, json!({})).await);
+    let service = ir_service::service();
+    assert_eq!(ir(&service, json!({"namespaces": []})).await, ir(&service, json!({})).await);
 }
 
 #[tokio::test]
 async fn one_subtree() {
-    let hub = ir_service::service();
-    let served = ir(&hub, json!({"namespaces": ["alpha"]})).await.expect("alpha's IR");
+    let service = ir_service::service();
+    let served = ir(&service, json!({"namespaces": ["alpha"]})).await.expect("alpha's IR");
     same_as("ir.alpha.json", &served);
 }
 
@@ -53,8 +53,8 @@ async fn one_subtree() {
 /// out with a `title` refusal naming both sites.
 #[tokio::test]
 async fn a_title_collision_refuses_its_activation_as_synapse_does() {
-    let hub = ir_service::clash_service();
-    let served = ir(&hub, json!({})).await.expect("the walk goes on");
+    let service = ir_service::clash_service();
+    let served = ir(&service, json!({})).await.expect("the walk goes on");
     same_as("clash.ir.json", &served);
     let titles: Vec<&Value> = served["irRefusals"].as_array().unwrap().iter().filter(|r| r["rfKeyword"] == "title").collect();
     assert_eq!(titles.len(), 1, "{}", served["irRefusals"]);
@@ -63,16 +63,20 @@ async fn a_title_collision_refuses_its_activation_as_synapse_does() {
 
 #[tokio::test]
 async fn a_namespace_the_service_has_not_is_refused() {
-    let hub = ir_service::service();
-    let err = ir(&hub, json!({"namespaces": ["delta"]})).await.expect_err("no delta");
-    assert_eq!(err["type"], "not_found", "{err}");
+    // RETURNS-40 review #1: a call failure, invalid_params naming it, before any work
+    let service = ir_service::service();
+    let items = call(&service, "irsvc.ir", json!({"namespaces": ["delta"]})).await;
+    assert_eq!(items[0]["type"], "error", "{items:?}");
+    assert_eq!(items[0]["error"]["kind"], "invalid_params", "{items:?}");
+    assert!(items[0]["message"].as_str().unwrap().contains("delta"), "{items:?}");
+    assert_eq!(service.ir_builds(), 0);
 }
 
 /// Asked twice, answered the same — the second from what the service kept.
 #[tokio::test]
 async fn asked_again_the_same() {
-    let hub = ir_service::service();
-    let a = ir(&hub, json!({"namespaces": ["beta"]})).await;
-    let b = ir(&hub, json!({"namespaces": ["beta"]})).await;
+    let service = ir_service::service();
+    let a = ir(&service, json!({"namespaces": ["beta"]})).await;
+    let b = ir(&service, json!({"namespaces": ["beta"]})).await;
     assert_eq!(a, b);
 }

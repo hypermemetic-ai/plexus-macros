@@ -6,8 +6,8 @@ mod support;
 
 use support::*;
 
-async fn check(hub: plexus_core::plexus::DynamicHub, file: &str) {
-    let served = serde_json::to_value(walk(&hub).await).unwrap();
+async fn check(service: plexus_core::plexus::DynamicHub, file: &str) {
+    let served = serde_json::to_value(walk(&service).await).unwrap();
     if accept() {
         write(file, &pretty(&served));
         return;
