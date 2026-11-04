@@ -52,8 +52,12 @@ use serde::{Deserialize, Serialize};
 
 /// Why a call failed — what an error frame carries, and the `data` of a
 /// JSON-RPC-level rejection.
+///
+/// Its JSON Schema is written by hand (see the `JsonSchema` impl): the known
+/// kinds as one `kind`-tagged union, `KnownRemoteError`, and any other kind
+/// as [`OtherError`] — the two as an untagged union of references, a form
+/// synapse's IR reader takes (RETURNS-40), the wire unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemoteError {
     /// The service has no activation by this name.
@@ -159,30 +163,59 @@ impl<'de> Deserialize<'de> for OtherError {
 /// The known variants, as the wire reads them — the derive the public enum
 /// cannot have, since an unknown kind must read as [`RemoteError::Other`]
 /// while a known kind that does not fit stays a decode error naming why.
+///
+/// Its schema is [`RemoteError`]'s known half, `KnownRemoteError`: a
+/// `kind`-tagged union every member of which gives `kind` a const.
 #[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema",
+    schemars(rename = "KnownRemoteError", description = "A call failure of a kind this vocabulary knows.")
+)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Known {
+    /// The service has no activation by this name.
     ActivationNotFound { activation: String },
+    /// The activation exists but has no method by this name.
     MethodNotFound { activation: String, method: String },
+    /// The call's params did not fit the method.
     InvalidParams {
+        /// The parameter at fault, when the failure is about one.
         #[serde(default)]
         param: Option<String>,
+        /// What is wrong with it. Flattened: its `problem` tag sits beside
+        /// `param` on the wire.
         #[serde(flatten)]
         problem: ParamProblem,
     },
+    /// The method requires credentials and the call carried none that
+    /// verified.
     Unauthenticated,
+    /// The caller is authenticated but not allowed this call.
     Forbidden {
+        /// Which check the caller failed. Flattened: its `reason` tag sits
+        /// beside `kind` on the wire.
         #[serde(flatten)]
         reason: DenyReason,
     },
+    /// The activation does not resolve handles.
     HandleNotSupported { activation: String },
+    /// The method ran and failed for a reason that is not the activation
+    /// saying no (that is an `err` item): a panic, a lost dependency.
     Execution { message: String },
+    /// spec/05, 09: the connection — or the child the call was routed to —
+    /// holds its maximum of open calls; close one and call again.
     TooManyCalls {
+        /// The most calls it holds open at once.
         max: u64,
+        /// The child whose limit it is, when the limit is a child's.
         #[serde(default)]
         child: Option<String>,
     },
+    /// spec/12 rule 5: the child the call was routed to is not there.
     ChildUnavailable { child: String, reason: String },
+    /// The child the call was routed to did not open it in the service's
+    /// time.
     ChildTimeout { child: String, timeout_ms: u64 },
 }
 
@@ -233,12 +266,38 @@ impl schemars::JsonSchema for OtherError {
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // No `additionalProperties`: JSON Schema's default lets the other
+        // fields through, and synapse's IR reader has no form for a map
+        // beside properties (RETURNS-40) — so it reads as a struct of `kind`.
         schemars::json_schema!({
-            "description": "A kind this build does not know, with its other fields.",
+            "description": "A kind this build does not know: its `kind`, and any other fields beside it, kept as they came.",
             "type": "object",
             "properties": { "kind": { "type": "string" } },
-            "required": ["kind"],
-            "additionalProperties": true
+            "required": ["kind"]
+        })
+    }
+}
+
+/// The known kinds (`KnownRemoteError`) or any other ([`OtherError`]), as an
+/// untagged union of the two references — what synapse's IR reader takes
+/// for an open union (RETURNS-40); a tagged union cannot hold a member whose
+/// `kind` is no const. The wire is [`RemoteError`]'s serde, unchanged.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for RemoteError {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "RemoteError".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::RemoteError").into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let known = generator.subschema_for::<Known>();
+        let other = generator.subschema_for::<OtherError>();
+        schemars::json_schema!({
+            "description": "Why a call failed — what an error frame carries, and the `data` of a JSON-RPC-level rejection: a kind this vocabulary knows, or another kept whole.",
+            "anyOf": [known, other]
         })
     }
 }
