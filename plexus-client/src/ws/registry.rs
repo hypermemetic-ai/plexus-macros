@@ -7,17 +7,56 @@
 //! (`web_sys::WebSocket`) backends share one protocol implementation
 //! instead of two that drift.
 
-use crate::envelope::StreamItem;
+use crate::envelope::{Content, RawItem, StreamItem, StreamMetadata};
 use crate::error::TransportError;
 use futures_channel::{mpsc, oneshot};
+use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// An item as a call reads it: a [`StreamItem`] for `call`, a [`RawItem`]
+/// for `call_raw`, a typed client's (PERF.115-36). Which one is the call's
+/// own, fixed when it subscribes.
+#[derive(Debug)]
+pub(crate) enum Delivered {
+    Item(StreamItem),
+    Raw(RawItem),
+}
+
+impl Delivered {
+    pub(crate) fn is_terminal(&self) -> bool {
+        match self {
+            Delivered::Item(item) => item.is_terminal(),
+            Delivered::Raw(item) => item.is_terminal(),
+        }
+    }
+
+    /// The item a `call` reads. A call reads one kind only.
+    pub(crate) fn into_item(self) -> StreamItem {
+        match self {
+            Delivered::Item(item) => item,
+            Delivered::Raw(_) => unreachable!("a call is handed the items it asked for"),
+        }
+    }
+
+    /// The item a `call_raw` reads.
+    pub(crate) fn into_raw(self) -> RawItem {
+        match self {
+            Delivered::Raw(item) => item,
+            Delivered::Item(item) => RawItem::from(item),
+        }
+    }
+}
+
 /// The receiving half of one subscription's item channel.
-pub(crate) type Items = mpsc::UnboundedReceiver<Result<StreamItem, TransportError>>;
-type ItemsTx = mpsc::UnboundedSender<Result<StreamItem, TransportError>>;
+pub(crate) type Items = mpsc::UnboundedReceiver<Result<Delivered, TransportError>>;
+type ItemsTx = mpsc::UnboundedSender<Result<Delivered, TransportError>>;
 
 /// One call's cancellation state, shared between the caller's stream and the
 /// connection's reader.
@@ -92,6 +131,8 @@ impl SubSlot {
 struct Pending {
     slot: Arc<SubSlot>,
     waiter: oneshot::Sender<Result<Items, TransportError>>,
+    /// The call reads [`RawItem`]s (a typed client).
+    raw: bool,
 }
 
 /// A live subscription: where its items go, and its cancellation state.
@@ -105,6 +146,11 @@ struct Pending {
 struct Sub {
     sink: ItemsTx,
     slot: Arc<SubSlot>,
+    /// The call reads [`RawItem`]s (a typed client).
+    raw: bool,
+    /// The content type its last data item named, shared with the next that
+    /// names the same: every item of a call does.
+    content_type: Option<Arc<str>>,
 }
 
 #[derive(Debug, Default)]
@@ -115,6 +161,36 @@ struct State {
     subs: HashMap<String, Sub>,
     /// Set once, when the socket goes away.
     closed: Option<TransportError>,
+    /// Notifications for an id no subscription has yet, kept while a call
+    /// waits for its id (spec/02 rule 4), in the order they came.
+    early: Vec<(String, String)>,
+    /// Their bytes.
+    early_bytes: usize,
+}
+
+/// How much is kept for ids not yet answered: a server keeps rule 1 and sends
+/// none, so this only has to be enough for one that does not.
+const EARLY_FRAMES: usize = 1024;
+const EARLY_BYTES: usize = 4 << 20;
+
+/// A content type `named` by an item, shared with the call's `last` when it is
+/// the same: every item of a call names one.
+fn shared(last: &mut Option<Arc<str>>, named: Option<&str>) -> Option<Arc<str>> {
+    let named = named?;
+    if last.as_deref() != Some(named) {
+        *last = Some(Arc::from(named));
+    }
+    last.clone()
+}
+
+/// A notification for an id no subscription has: a call still waiting for its
+/// reply may be about to learn it (spec/02 rule 4), so it is kept while one
+/// waits, within bounds. With none waiting it is a call that is over.
+fn keep_early(state: &mut State, key: &str, text: &str) {
+    if !state.pending.is_empty() && state.early.len() < EARLY_FRAMES && state.early_bytes + text.len() <= EARLY_BYTES {
+        state.early_bytes += text.len();
+        state.early.push((key.to_owned(), text.to_owned()));
+    }
 }
 
 /// One connection's protocol state.
@@ -123,7 +199,14 @@ pub(crate) struct Registry {
     hub_namespace: Arc<str>,
     next_id: AtomicU64,
     state: Mutex<State>,
+    /// A typed call has been made on this connection: a large frame's head is
+    /// worth reading. A connection whose calls all read `StreamItem`s never
+    /// reads one.
+    typed: AtomicBool,
 }
+
+/// The item `type`s this client reads (spec/03); any other is skipped.
+const KINDS: [&str; 5] = ["data", "progress", "error", "request", "done"];
 
 /// The routing key for a subscription id.
 ///
@@ -133,6 +216,337 @@ fn key_of(id: &Value) -> String {
     id.to_string()
 }
 
+/// [`key_of`] for an id still as its text: the text itself where it is what
+/// `key_of` writes (an integer of at most 19 digits, a string with nothing
+/// escaped), so the two readings route alike; anything else through a `Value`.
+fn key_of_text(id: &RawValue) -> Cow<'_, str> {
+    let text = id.get();
+    let bytes = text.as_bytes();
+    let integer = !bytes.is_empty() && bytes.len() <= 19 && bytes.iter().all(u8::is_ascii_digit) && (bytes.len() == 1 || bytes[0] != b'0');
+    let string = bytes.len() >= 2
+        && bytes[0] == b'"'
+        && bytes[bytes.len() - 1] == b'"'
+        && !bytes[1..bytes.len() - 1].iter().any(|&b| b == b'\\' || b == b'"' || b < 0x20);
+    if integer || string {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(key_of(&value_of(id)))
+    }
+}
+
+/// A piece of a frame, as a `Value`.
+fn value_of(text: &RawValue) -> Value {
+    serde_json::from_str(text.get()).unwrap_or(Value::Null)
+}
+
+/// A frame as the reader reads it (PERF.115-36): nothing built of it. A
+/// reply's `id`, `result` and `error` stay their JSON text, and a
+/// notification's subscription and item are read in place. A frame that does
+/// not read this way is read as a `Value`, as before ([`Registry::on_value`]).
+#[derive(Deserialize)]
+struct Frame<'a> {
+    #[serde(default, borrow)]
+    id: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    result: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    error: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    params: Option<Note<'a>>,
+}
+
+/// A notification's `params`, an object: whose item it is, and the item.
+struct Note<'a> {
+    subscription: &'a RawValue,
+    item: Fields<'a>,
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for Note<'a> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Read<'a>(std::marker::PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> Visitor<'de> for Read<'a> {
+            type Value = Note<'a>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a notification's params")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Note<'a>, A::Error> {
+                let (mut subscription, mut item) = (None, None);
+                while let Some(key) = map.next_key::<NoteKey>()? {
+                    match key {
+                        NoteKey::Subscription => subscription = Some(map.next_value()?),
+                        NoteKey::Result => item = Some(map.next_value()?),
+                        NoteKey::Other => drop(map.next_value::<IgnoredAny>()?),
+                    }
+                }
+                Ok(Note {
+                    subscription: subscription.ok_or_else(|| A::Error::missing_field("subscription"))?,
+                    item: item.ok_or_else(|| A::Error::missing_field("result"))?,
+                })
+            }
+        }
+        d.deserialize_map(Read(std::marker::PhantomData))
+    }
+}
+
+/// A key of a notification's `params`, read without making a string of it.
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum NoteKey {
+    Subscription,
+    Result,
+    #[serde(other)]
+    Other,
+}
+
+/// A key of a frame, as the head's reading reads it.
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum FrameKey {
+    Id,
+    Result,
+    Error,
+    Params,
+    #[serde(other)]
+    Other,
+}
+
+/// A key of an item, as the head's reading reads it.
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum ItemKey {
+    Type,
+    ContentType,
+    Content,
+    #[serde(other)]
+    Other,
+}
+
+/// A data notification exactly as plexus-core writes one, read by its bytes
+/// (PERF.115-36): `{"jsonrpc":"2.0","method":M,"params":{"subscription":S,
+/// "result":{"type":"data","metadata":D,"content_type":T,"content":C}}}`, the
+/// metadata optional. Its subscription id, its content type, and the span
+/// from `C` to the frame's last three bytes, which are its content when the
+/// frame is that and nothing more: the content is not read here at all, and
+/// a decode that finds the span is not one value reads the frame whole.
+/// `None` for any other frame.
+fn plexus_core_data(text: &str) -> Option<(&RawValue, &str, std::ops::Range<usize>)> {
+    let rest = text.strip_prefix(r#"{"jsonrpc":"2.0","method":"#)?;
+    let (_, rest) = value_at(rest)?;
+    let rest = rest.strip_prefix(r#","params":{"subscription":"#)?;
+    let (subscription, rest) = value_at(rest)?;
+    let mut rest = rest.strip_prefix(r#","result":{"type":"data","#)?;
+    if let Some(metadata) = rest.strip_prefix(r#""metadata":"#) {
+        rest = value_at(metadata)?.1.strip_prefix(',')?;
+    }
+    let (content_type, rest) = value_at(rest.strip_prefix(r#""content_type":"#)?)?;
+    let content_type = content_type.get().strip_prefix('"')?.strip_suffix('"')?;
+    let rest = rest.strip_prefix(r#","content":"#)?;
+    let (start, end) = (text.len() - rest.len(), text.len().checked_sub(3)?);
+    (!content_type.contains('\\') && text.ends_with("}}}") && start < end).then_some((subscription, content_type, start..end))
+}
+
+/// The JSON value `text` begins with, as its text, and what follows it.
+fn value_at(text: &str) -> Option<(&RawValue, &str)> {
+    let mut values = serde_json::Deserializer::from_str(text).into_iter::<&RawValue>();
+    let value = values.next()?.ok()?;
+    Some((value, &text[values.byte_offset()..]))
+}
+
+/// The frame length from which a typed call's data item is read on its head.
+/// The head's own reading costs about what a frame of 2 KB of content costs
+/// to scan once more (counted, PERF.115-36): below this a frame is read whole,
+/// its content found and then decoded, which scans it twice but reads its
+/// head once; above, the content is scanned once.
+const HEAD_FRAMES_FROM: usize = 4096;
+
+/// What the reader needs of a notification before its item's content, read
+/// in place and no further (PERF.115-36): whose item it is, its type and its
+/// content type. A typed call reads the content itself, once, straight into
+/// its event; read here too, a body's text would be scanned twice.
+#[derive(Default)]
+struct Head<'a> {
+    subscription: Option<&'a RawValue>,
+    kind: Option<Kind>,
+    content_type: Option<&'a str>,
+    /// The reading stopped where the item's content begins.
+    at_content: bool,
+}
+
+impl<'a> Head<'a> {
+    /// The head of a notification that reached its item's content having
+    /// read whose item it is and its content type, as plexus-core writes
+    /// them; `None` for anything else (a reply, an item with no content, keys
+    /// in another order), which the full reading takes.
+    fn read(text: &'a str) -> Option<Self> {
+        let mut head = Head::default();
+        let read = HeadSeed(&mut head, Level::Frame).deserialize(&mut serde_json::Deserializer::from_str(text));
+        (read.is_err() && head.at_content && head.subscription.is_some() && head.content_type.is_some()).then_some(head)
+    }
+}
+
+/// Where in a notification the head's reading is.
+#[derive(Clone, Copy)]
+enum Level {
+    Frame,
+    Params,
+    Item,
+}
+
+/// The head's reading: a frame's keys until `params`, its keys until
+/// `subscription` and `result`, the item's until `content`, where it stops.
+struct HeadSeed<'h, 'a>(&'h mut Head<'a>, Level);
+
+impl<'de: 'a, 'a> DeserializeSeed<'de> for HeadSeed<'_, 'a> {
+    type Value = ();
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl<'de: 'a, 'a> Visitor<'de> for HeadSeed<'_, 'a> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a notification")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let HeadSeed(head, level) = self;
+        match level {
+            Level::Frame => {
+                while let Some(key) = map.next_key::<FrameKey>()? {
+                    match key {
+                        FrameKey::Params => return map.next_value_seed(HeadSeed(head, Level::Params)),
+                        FrameKey::Id | FrameKey::Result | FrameKey::Error => return Err(A::Error::custom("a reply")),
+                        FrameKey::Other => drop(map.next_value::<IgnoredAny>()?),
+                    }
+                }
+            }
+            Level::Params => {
+                while let Some(key) = map.next_key::<NoteKey>()? {
+                    match key {
+                        NoteKey::Subscription => head.subscription = Some(map.next_value()?),
+                        NoteKey::Result => map.next_value_seed(HeadSeed(&mut *head, Level::Item))?,
+                        NoteKey::Other => drop(map.next_value::<IgnoredAny>()?),
+                    }
+                }
+            }
+            Level::Item => {
+                while let Some(key) = map.next_key::<ItemKey>()? {
+                    match key {
+                        ItemKey::Type => head.kind = Some(map.next_value()?),
+                        ItemKey::ContentType => head.content_type = map.next_value()?,
+                        ItemKey::Content => {
+                            head.at_content = true;
+                            return Err(A::Error::custom("the content"));
+                        }
+                        ItemKey::Other => drop(map.next_value::<IgnoredAny>()?),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An item's fields, read in place: its content, metadata and request data
+/// left as their text, what a typed decode never reads never built.
+#[derive(Deserialize)]
+struct Fields<'a> {
+    #[serde(rename = "type")]
+    kind: Option<Kind>,
+    #[serde(default, borrow)]
+    metadata: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    content_type: Option<Cow<'a, str>>,
+    #[serde(default, borrow, deserialize_with = "present")]
+    content: Option<&'a RawValue>,
+    #[serde(default, borrow)]
+    message: Option<Cow<'a, str>>,
+    #[serde(default)]
+    percentage: Option<f32>,
+    #[serde(default, borrow)]
+    code: Option<Cow<'a, str>>,
+    #[serde(default)]
+    recoverable: Option<bool>,
+    #[serde(default, borrow, rename = "requestId")]
+    request_id: Option<Cow<'a, str>>,
+    #[serde(default, borrow, rename = "requestData", deserialize_with = "present")]
+    request_data: Option<&'a RawValue>,
+    #[serde(default, rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+/// A field that is there, as its text, `null` included: a `Value` field reads
+/// `null` as itself, where an `Option` would read it as absent.
+fn present<'de: 'a, 'a, D: Deserializer<'de>>(d: D) -> Result<Option<&'a RawValue>, D::Error> {
+    <&'a RawValue>::deserialize(d).map(Some)
+}
+
+/// An item's `type`: the five this client reads, or one it skips (spec/03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Kind {
+    Data,
+    Progress,
+    Error,
+    Request,
+    Done,
+    #[serde(other)]
+    Other,
+}
+
+impl Fields<'_> {
+    /// The [`StreamItem`] serde makes of the item, made from its fields; `None`
+    /// where they make none, for the `Value` reading to say why.
+    fn stream_item(&self, kind: Kind) -> Option<StreamItem> {
+        let metadata = match self.metadata {
+            Some(m) if m.get() != "null" => Some(serde_json::from_str::<StreamMetadata>(m.get()).ok()?),
+            _ => None,
+        };
+        Some(match kind {
+            Kind::Data => StreamItem::Data {
+                metadata,
+                content_type: self.content_type.as_deref().map(str::to_owned),
+                content: serde_json::from_str(self.content?.get()).ok()?,
+            },
+            Kind::Progress => StreamItem::Progress {
+                metadata,
+                message: self.message.as_deref()?.to_owned(),
+                percentage: self.percentage,
+            },
+            Kind::Error => StreamItem::Error {
+                metadata,
+                message: self.message.as_deref()?.to_owned(),
+                code: self.code.as_deref().map(str::to_owned),
+                recoverable: self.recoverable.unwrap_or(false),
+            },
+            Kind::Request => StreamItem::Request {
+                request_id: self.request_id.as_deref()?.to_owned(),
+                request_data: serde_json::from_str(self.request_data?.get()).ok()?,
+                timeout_ms: self.timeout_ms.unwrap_or(0),
+            },
+            Kind::Done => StreamItem::Done { metadata },
+            Kind::Other => return None,
+        })
+    }
+
+    /// The [`RawItem`] a typed call reads: its content the item's own text,
+    /// its content type `content_type`.
+    fn raw_item(&self, kind: Kind, content_type: Option<Arc<str>>) -> Option<RawItem> {
+        Some(match kind {
+            Kind::Data => RawItem::Data { content_type, content: Content::from(self.content?.to_owned()) },
+            Kind::Progress => RawItem::Progress { message: self.message.as_deref()?.to_owned(), percentage: self.percentage },
+            Kind::Error => RawItem::Error {
+                message: self.message.as_deref()?.to_owned(),
+                code: self.code.as_deref().map(str::to_owned),
+                recoverable: self.recoverable.unwrap_or(false),
+            },
+            Kind::Request => RawItem::Request,
+            Kind::Done => RawItem::Done,
+            Kind::Other => return None,
+        })
+    }
+}
+
 impl Registry {
     pub(crate) fn new(hub_namespace: Arc<str>) -> Self {
         Self {
@@ -140,6 +554,7 @@ impl Registry {
             // JSON-RPC ids start at 1; 0 reads like "unset" in a trace.
             next_id: AtomicU64::new(1),
             state: Mutex::new(State::default()),
+            typed: AtomicBool::new(false),
         }
     }
 
@@ -160,13 +575,17 @@ impl Registry {
         &self,
         request_id: u64,
         slot: Arc<SubSlot>,
+        raw: bool,
     ) -> Result<oneshot::Receiver<Result<Items, TransportError>>, TransportError> {
         let mut state = self.lock();
         if let Some(err) = &state.closed {
             return Err(err.clone());
         }
         let (waiter, reply) = oneshot::channel();
-        state.pending.insert(request_id, Pending { slot, waiter });
+        state.pending.insert(request_id, Pending { slot, waiter, raw });
+        if raw {
+            self.typed.store(true, Ordering::Relaxed);
+        }
         Ok(reply)
     }
 
@@ -178,7 +597,11 @@ impl Registry {
     /// Drop a subscription's routing entry (the stream was dropped, or the
     /// server sent its terminal item).
     pub(crate) fn forget_sub(&self, subscription: &Value) {
-        self.lock().subs.remove(&key_of(subscription));
+        self.forget_key(&key_of(subscription));
+    }
+
+    fn forget_key(&self, key: &str) {
+        self.lock().subs.remove(key);
     }
 
     /// Route one inbound text frame, returning a frame the connection should
@@ -201,29 +624,74 @@ impl Registry {
     /// accepts both. Keying on `params.subscription` makes the method name
     /// irrelevant, so neither spelling can break routing.
     #[must_use = "the returned frame cancels a subscription nobody is reading"]
+    ///
+    /// The frame is read in place ([`Frame`], PERF.115-36): its item's
+    /// content stays text until the call reads it, a typed call's straight
+    /// into its event. What does not read so is read as a `Value`, as before.
     pub(crate) fn on_text(&self, text: &str) -> Option<String> {
+        // A typed call's data item: routed on its head, its content left for
+        // the call to read, once. A notification as plexus-core writes it is
+        // read by its bytes; a large one in another hand, on its head.
+        if self.typed.load(Ordering::Relaxed) {
+            if let Some((subscription, content_type, span)) = plexus_core_data(text) {
+                if self.on_data(subscription, Some(content_type), text, Some(span)) {
+                    return None;
+                }
+            } else if text.len() > HEAD_FRAMES_FROM {
+                if let Some(Head { subscription: Some(subscription), kind: Some(Kind::Data), content_type, .. }) = Head::read(text) {
+                    if self.on_data(subscription, content_type, text, None) {
+                        return None;
+                    }
+                }
+            }
+        }
+        let Ok(frame) = serde_json::from_str::<Frame<'_>>(text) else {
+            return self.on_value(text);
+        };
+
+        // A subscribe reply.
+        if let Some(request_id) = frame.id.and_then(|id| id.get().parse::<u64>().ok()) {
+            if frame.result.is_some() || frame.error.is_some() {
+                return self.on_response(request_id, frame.result.map(value_of), frame.error.map(value_of));
+            }
+        }
+
+        // A stream item.
+        if let Some(note) = frame.params {
+            self.on_note(note, text);
+        }
+        None
+    }
+
+    /// [`on_text`](Self::on_text) through a `Value`: for a frame the reading
+    /// in place does not take, which this reads as it always has.
+    fn on_value(&self, text: &str) -> Option<String> {
         let frame = serde_json::from_str::<Value>(text).ok()?;
 
         // A subscribe reply.
         if let Some(request_id) = frame.get("id").and_then(Value::as_u64) {
             if frame.get("result").is_some() || frame.get("error").is_some() {
-                return self.on_response(request_id, &frame);
+                return self.on_response(request_id, frame.get("result").cloned(), frame.get("error").cloned());
             }
         }
 
         // A stream item.
         if let Some(subscription) = frame.pointer("/params/subscription") {
-            self.on_notification(&subscription.clone(), &frame);
+            self.on_notification(&subscription.clone(), &frame, text);
         }
         None
     }
 
-    fn on_response(&self, request_id: u64, frame: &Value) -> Option<String> {
+    fn on_response(&self, request_id: u64, result: Option<Value>, error: Option<Value>) -> Option<String> {
         let mut state = self.lock();
         // Not ours: the reply to an unsubscribe, or a duplicate.
         let pending = state.pending.remove(&request_id)?;
 
-        if let Some(error) = frame.get("error") {
+        if let Some(error) = error {
+            if state.pending.is_empty() {
+                state.early.clear();
+                state.early_bytes = 0;
+            }
             drop(state);
             let _ = pending.waiter.send(Err(TransportError::protocol(format!(
                 "subscribe rejected: {error}"
@@ -231,13 +699,14 @@ impl Registry {
             return None;
         }
 
-        let subscription = frame.get("result").cloned().unwrap_or(Value::Null);
+        let subscription = result.unwrap_or(Value::Null);
 
         // The caller dropped its stream before the acknowledgement arrived,
         // so it never learned this id and could not cancel it. Cancel it
         // here instead of registering a channel nobody will read.
         if pending.slot.acknowledged(&subscription) {
             drop(state);
+            drop(self.take_early(&key_of(&subscription)));
             return Some(self.unsubscribe(&subscription));
         }
 
@@ -248,6 +717,8 @@ impl Registry {
             Sub {
                 sink,
                 slot: pending.slot.clone(),
+                raw: pending.raw,
+                content_type: None,
             },
         );
         drop(state);
@@ -258,25 +729,112 @@ impl Registry {
             // routing to a receiver that is gone.
             self.lock().subs.remove(&key);
         }
+        // What came for this id before its reply goes first, in order: the
+        // reader is the only caller of `on_text`, so nothing overtakes it.
+        for frame in self.take_early(&key) {
+            let _ = self.on_text(&frame);
+        }
         None
     }
 
-    fn on_notification(&self, subscription: &Value, frame: &Value) {
+    /// The notifications kept for `key`; and, once no call waits for an id,
+    /// everything kept, which belongs to calls that are over.
+    fn take_early(&self, key: &str) -> Vec<String> {
+        let mut state = self.lock();
+        if state.early.is_empty() {
+            return Vec::new();
+        }
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.early).into_iter().partition(|(k, _)| k == key);
+        if !state.pending.is_empty() {
+            state.early = rest;
+        }
+        state.early_bytes = state.early.iter().map(|(_, f)| f.len()).sum();
+        mine.into_iter().map(|(_, f)| f).collect()
+    }
+
+    /// A data item for a typed call, handed over with its frame unread past
+    /// its head (its content at `span`, where that is known): the call
+    /// decodes the content from it. `false` where it is not a typed call's,
+    /// for the full reading.
+    fn on_data(&self, subscription: &RawValue, content_type: Option<&str>, text: &str, span: Option<std::ops::Range<usize>>) -> bool {
+        let key = key_of_text(subscription);
+        let mut state = self.lock();
+        let Some(sub) = state.subs.get_mut(key.as_ref()) else {
+            keep_early(&mut state, &key, text);
+            return true;
+        };
+        if !sub.raw {
+            return false;
+        }
+        let content_type = shared(&mut sub.content_type, content_type);
+        let sink = sub.sink.clone();
+        drop(state);
+        let _ = sink.unbounded_send(Ok(Delivered::Raw(RawItem::Data { content_type, content: Content::frame(text, span) })));
+        true
+    }
+
+    /// A stream item read in place: the call's kind of item made of its
+    /// fields, or, where they make none, the frame read as a `Value`, which
+    /// says why as it always has.
+    fn on_note(&self, note: Note<'_>, text: &str) {
+        let Some(kind) = note.item.kind else {
+            return drop(self.on_value(text));
+        };
+        // spec/03: an item of a `type` this client does not know is skipped.
+        if kind == Kind::Other {
+            return;
+        }
+        let key = key_of_text(note.subscription);
+        let mut state = self.lock();
+        let Some(sub) = state.subs.get_mut(key.as_ref()) else {
+            keep_early(&mut state, &key, text);
+            return;
+        };
+        let (sink, slot) = (sub.sink.clone(), sub.slot.clone());
+        let item = if sub.raw {
+            let content_type = shared(&mut sub.content_type, note.item.content_type.as_deref());
+            drop(state);
+            note.item.raw_item(kind, content_type).map(Delivered::Raw)
+        } else {
+            drop(state);
+            note.item.stream_item(kind).map(Delivered::Item)
+        };
+        let Some(item) = item else {
+            return drop(self.on_value(text));
+        };
+        let terminal = item.is_terminal();
+        let _ = sink.unbounded_send(Ok(item));
+        if terminal {
+            // The server ended it; there is nothing left to cancel,
+            // whether or not the caller ever reads this item.
+            slot.mark_finished();
+            self.forget_key(&key);
+        }
+    }
+
+    fn on_notification(&self, subscription: &Value, frame: &Value, text: &str) {
         let key = key_of(subscription);
-        let state = self.lock();
-        let Some((sink, slot)) = state
+        let mut state = self.lock();
+        let Some((sink, slot, raw)) = state
             .subs
             .get(&key)
-            .map(|sub| (sub.sink.clone(), sub.slot.clone()))
+            .map(|sub| (sub.sink.clone(), sub.slot.clone(), sub.raw))
         else {
+            keep_early(&mut state, &key, text);
             return;
         };
         drop(state);
 
         let payload = frame.pointer("/params/result").cloned().unwrap_or(Value::Null);
+        // spec/03: an item of a `type` this client does not know is not
+        // terminal; it is skipped, and the stream goes on.
+        if payload.get("type").and_then(Value::as_str).is_some_and(|kind| !KINDS.contains(&kind)) {
+            return;
+        }
         match serde_json::from_value::<StreamItem>(payload) {
             Ok(item) => {
                 let terminal = item.is_terminal();
+                let item = if raw { Delivered::Raw(RawItem::from(item)) } else { Delivered::Item(item) };
                 let _ = sink.unbounded_send(Ok(item));
                 if terminal {
                     // The server ended it; there is nothing left to cancel,
@@ -308,6 +866,8 @@ impl Registry {
                 return;
             }
             state.closed = Some(error.clone());
+            state.early = Vec::new();
+            state.early_bytes = 0;
             (
                 std::mem::take(&mut state.pending),
                 std::mem::take(&mut state.subs),
@@ -385,6 +945,305 @@ fn unsubscribe_frame(request_id: u64, hub_namespace: &str, subscription: &Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{FutureExt, StreamExt};
+
+    /// A subscribe written as request `id` and answered with `subscription`:
+    /// the channel its items arrive on.
+    fn subscribed(registry: &Registry, id: u64, subscription: &str) -> Items {
+        subscribed_as(registry, id, subscription, false)
+    }
+
+    /// The same, for a call that reads [`RawItem`]s (`raw`) or [`StreamItem`]s.
+    fn subscribed_as(registry: &Registry, id: u64, subscription: &str, raw: bool) -> Items {
+        let reply = registry.register_pending(id, SubSlot::new(), raw).unwrap();
+        let answer = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{subscription}}}"#);
+        assert!(registry.on_text(&answer).is_none());
+        reply.now_or_never().expect("answered").expect("not dropped").expect("subscribed")
+    }
+
+    /// A notification for `subscription` carrying `item`.
+    fn note(subscription: &str, item: &str) -> String {
+        format!(r#"{{"jsonrpc":"2.0","method":"kit.call","params":{{"subscription":{subscription},"result":{item}}}}}"#)
+    }
+
+    const DATA: &str = r#"{"type":"data","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"content_type":"kit.say","content":{"type":"said","text":"hi"}}"#;
+    const DONE: &str = r#"{"type":"done","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1}}"#;
+
+    /// Everything the channel holds now.
+    fn drain(items: &mut Items) -> Vec<Result<StreamItem, TransportError>> {
+        std::iter::from_fn(|| items.next().now_or_never().flatten()).map(|item| item.map(Delivered::into_item)).collect()
+    }
+
+    /// Everything a typed call's channel holds now.
+    fn drain_raw(items: &mut Items) -> Vec<Result<RawItem, TransportError>> {
+        std::iter::from_fn(|| items.next().now_or_never().flatten()).map(|item| item.map(Delivered::into_raw)).collect()
+    }
+
+    /// spec/03: a client SHOULD treat an item `type` it does not know as
+    /// non-terminal and skip it. PERF.115-41 found one ended the stream, so a
+    /// new kind of item (a stream's header, say) would end every call that
+    /// met it, and menger's `watch` would reconnect.
+    #[test]
+    fn an_item_of_a_type_it_does_not_know_is_skipped_and_the_stream_goes_on() {
+        let registry = Registry::new(Arc::from("kit"));
+        let mut items = subscribed(&registry, 1, "7");
+        for item in [
+            r#"{"type":"header","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"columns":["a"]}"#,
+            r#"{"type":"guidance","error_type":"retired","suggestion":"none"}"#,
+            DATA,
+            DONE,
+        ] {
+            assert!(registry.on_text(&note("7", item)).is_none());
+        }
+        let got = drain(&mut items);
+        assert!(matches!(got[..], [Ok(StreamItem::Data { .. }), Ok(StreamItem::Done { .. })]), "{got:?}");
+    }
+
+    /// spec/02 rule 4: a client SHOULD keep a notification for an id it has
+    /// not yet seen the response for. The spec says plexus-client does;
+    /// PERF.115-41 found it dropped it.
+    #[test]
+    fn an_item_before_its_subscription_id_is_kept_until_the_id_arrives() {
+        let registry = Registry::new(Arc::from("kit"));
+        let reply = registry.register_pending(1, SubSlot::new(), false).unwrap();
+        assert!(registry.on_text(&note("7", DATA)).is_none());
+        assert!(registry.on_text(r#"{"jsonrpc":"2.0","id":1,"result":7}"#).is_none());
+        assert!(registry.on_text(&note("7", DONE)).is_none());
+        let mut items = reply.now_or_never().unwrap().unwrap().unwrap();
+        let got = drain(&mut items);
+        assert!(matches!(got[..], [Ok(StreamItem::Data { .. }), Ok(StreamItem::Done { .. })]), "{got:?}");
+    }
+
+    /// Kept only while a call waits for its id: an item for an id no call is
+    /// waiting on belongs to a call that is over, and a later call answered
+    /// with that id does not get it.
+    #[test]
+    fn an_item_for_an_id_no_call_waits_on_is_dropped() {
+        let registry = Registry::new(Arc::from("kit"));
+        let _first = subscribed(&registry, 1, "7");
+        assert!(registry.on_text(&note("8", DATA)).is_none());
+        let mut items = subscribed(&registry, 2, "8");
+        assert!(registry.on_text(&note("8", DONE)).is_none());
+        let got = drain(&mut items);
+        assert!(matches!(got[..], [Ok(StreamItem::Done { .. })]), "{got:?}");
+    }
+
+    /// PERF.115-36: a typed call is handed its data item's content as the
+    /// wire's text, to decode straight into its event, and its content type.
+    #[test]
+    fn a_typed_call_is_handed_the_content_as_the_wires_text() {
+        let registry = Registry::new(Arc::from("kit"));
+        let mut items = subscribed_as(&registry, 1, "7", true);
+        for item in [DATA, DONE] {
+            assert!(registry.on_text(&note("7", item)).is_none());
+        }
+        match &drain_raw(&mut items)[..] {
+            [Ok(RawItem::Data { content, content_type }), Ok(RawItem::Done)] => {
+                assert_eq!(content.as_text(), Some(r#"{"type":"said","text":"hi"}"#));
+                assert_eq!(content_type.as_deref(), Some("kit.say"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A typed call and a call that reads `StreamItem`s read the same items
+    /// from the same frames.
+    #[test]
+    fn a_typed_call_and_a_value_call_read_the_same_items() {
+        let registry = Registry::new(Arc::from("kit"));
+        let mut values = subscribed_as(&registry, 1, "7", false);
+        let mut raws = subscribed_as(&registry, 2, "\"s-8\"", true);
+        let items = [
+            DATA,
+            r#"{"type":"data","content":{"n":[1,2.5,"x\"y"]},"content_type":"kit.n"}"#,
+            r#"{"type":"progress","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"half","percentage":50.0}"#,
+            r#"{"type":"progress","message":"none yet"}"#,
+            r#"{"type":"request","requestId":"r-1","requestData":{"type":"confirm"},"timeoutMs":30000}"#,
+            r#"{"type":"error","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"no","code":"forbidden","recoverable":true}"#,
+        ];
+        for item in items {
+            assert!(registry.on_text(&note("7", item)).is_none());
+            assert!(registry.on_text(&note("\"s-8\"", item)).is_none());
+        }
+        let (values, raws) = (drain(&mut values), drain_raw(&mut raws));
+        assert_eq!(values.len(), items.len(), "{values:?}");
+        assert_eq!(raws.len(), items.len(), "{raws:?}");
+        for (value, raw) in values.into_iter().zip(raws) {
+            match (value.unwrap(), raw.unwrap()) {
+                (StreamItem::Data { content: v, content_type: a, .. }, RawItem::Data { content: r, content_type: b }) => {
+                    assert_eq!(r.into_value().unwrap(), v);
+                    assert_eq!(a.as_deref(), b.as_deref());
+                }
+                (StreamItem::Progress { message: m, percentage: p, .. }, RawItem::Progress { message, percentage }) => {
+                    assert_eq!((m, p), (message, percentage));
+                }
+                (StreamItem::Request { .. }, RawItem::Request) => {}
+                (StreamItem::Error { message: m, code: c, recoverable: r, .. }, RawItem::Error { message, code, recoverable }) => {
+                    assert_eq!((m, c, r), (message, code, recoverable));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// The in-place reading makes of each well-formed item the `StreamItem`
+    /// serde makes of it (PERF.115-36).
+    #[test]
+    fn the_in_place_reading_makes_the_stream_item_serde_makes() {
+        for item in [
+            DATA,
+            DONE,
+            r#"{"type":"done"}"#,
+            r#"{"type":"data","content":{"n":[1,2.5,"x\"y"]},"content_type":"kit.n"}"#,
+            r#"{"type":"data","metadata":null,"content_type":null,"content":null}"#,
+            r#"{"content":{"a":1},"extra":{"ignored":[true]},"type":"data"}"#,
+            r#"{"type":"data","metadata":{"provenance":["a","b"],"plexus_hash":"x","timestamp":-1,"more":1},"content":"s"}"#,
+            r#"{"type":"data","metadata":{},"content":{}}"#,
+            r#"{"type":"progress","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"half","percentage":50.0}"#,
+            r#"{"type":"progress","message":"none yet","percentage":null}"#,
+            r#"{"type":"request","requestId":"r-1","requestData":{"type":"confirm"},"timeoutMs":30000}"#,
+            r#"{"type":"request","requestId":"r-2","requestData":null}"#,
+            r#"{"type":"error","message":"no","code":"forbidden","recoverable":true,"metadata":{"provenance":[],"plexus_hash":"","timestamp":0}}"#,
+            r#"{"type":"error","message":"no","code":null}"#,
+        ] {
+            let fields: Fields<'_> = serde_json::from_str(item).unwrap();
+            let built = fields.stream_item(fields.kind.unwrap());
+            assert_eq!(built, Some(serde_json::from_str::<StreamItem>(item).unwrap()), "{item}");
+        }
+    }
+
+    /// A subscription id is routed alike however its text is written: as the
+    /// reply wrote it, through a `Value`, or as the notification writes it.
+    #[test]
+    fn every_subscription_id_routes_alike_read_in_place_or_as_a_value() {
+        for id in ["7", r#""s-8""#, r#""a\"b""#, r#""é""#, "12345678901234567890", "0", r#""""#] {
+            let registry = Registry::new(Arc::from("kit"));
+            let mut items = subscribed_as(&registry, 1, id, true);
+            assert!(registry.on_text(&note(id, DONE)).is_none());
+            assert!(matches!(drain_raw(&mut items)[..], [Ok(RawItem::Done)]), "{id}");
+        }
+    }
+
+    /// A typed call decodes from its frames what a call that reads `Value`s
+    /// decodes, and is refused in the same words, whether its data items are
+    /// read on their head (plexus-core's order) or whole (any other).
+    #[test]
+    fn a_typed_call_decodes_from_its_frames_what_a_value_call_decodes() {
+        use crate::{decode, decode_raw, ItemStream, RawItemStream};
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Ev {
+            Said { text: String },
+            Row { id: String, labels: Vec<String>, parent: Option<String> },
+            Ready,
+        }
+        let long = "a \\\"long\\\" body, é and \\n ".repeat(200);
+        let big = [
+            format!(r#"{{"type":"said","text":"{long}"}}"#),
+            format!(r#"{{"type":"said","text":7,"pad":"{long}"}}"#),
+            format!(r#"{{"type":"row","id":"{long}","labels":[]}}"#),
+        ];
+        let contents = [
+            r#"{"type":"said","text":"hi \"there\"\n\u00e9"}"#,
+            r#"{"type":"row","id":"MQ-1","labels":["perf"],"parent":null}"#,
+            r#"{"type":"ready"}"#,
+            r#"{"type":"said"}"#,
+            r#"{"type":"said","text":7}"#,
+            r#"{"type":"gone"}"#,
+            "null",
+            &big[0],
+            &big[1],
+            &big[2],
+        ];
+        let head = |c: &str| format!(r#"{{"type":"data","metadata":{{"provenance":["kit"],"plexus_hash":"h","timestamp":1}},"content_type":"kit.say","content":{c}}}"#);
+        let whole = |c: &str| format!(r#"{{"content":{c},"type":"data","content_type":"kit.say"}}"#);
+        let after = |c: &str| format!(r#"{{"type":"data","content_type":"kit.say","content":{c},"later":{{"x":[1,"}}}}}}"]}}}}"#);
+        let forms = [&head as &dyn Fn(&str) -> String, &whole, &after];
+        for item in forms.iter().flat_map(|form| contents.iter().map(move |c| form(c))) {
+            let registry = Registry::new(Arc::from("kit"));
+            let values = subscribed_as(&registry, 1, "7", false);
+            let raws = subscribed_as(&registry, 2, "8", true);
+            for sub in ["7", "8"] {
+                assert!(registry.on_text(&note(sub, &item)).is_none());
+                assert!(registry.on_text(&note(sub, DONE)).is_none());
+            }
+            let values: ItemStream<'static> = Box::pin(values.map(|i| i.map(Delivered::into_item)));
+            let raws: RawItemStream<'static> = Box::pin(raws.map(|i| i.map(Delivered::into_raw)));
+            let a: Vec<_> = futures_util::stream::StreamExt::collect::<Vec<_>>(decode::<Ev>(values)).now_or_never().unwrap();
+            let b: Vec<_> = futures_util::stream::StreamExt::collect::<Vec<_>>(decode_raw::<Ev>(raws)).now_or_never().unwrap();
+            assert_eq!(a, b, "{item}");
+        }
+    }
+
+    /// A typed call's large data item is handed over inside its frame, its
+    /// content read once, when it is decoded; a small one as its text.
+    #[test]
+    fn a_large_item_reaches_a_typed_call_in_its_frame() {
+        let registry = Registry::new(Arc::from("kit"));
+        let mut items = subscribed_as(&registry, 1, "7", true);
+        let body = format!(r#"{{"type":"said","text":"{}"}}"#, "x".repeat(HEAD_FRAMES_FROM));
+        let large = format!(r#"{{"type":"data","metadata":{{"provenance":["kit"],"plexus_hash":"h","timestamp":1}},"content_type":"kit.say","content":{body}}}"#);
+        for item in [DATA, large.as_str()] {
+            assert!(registry.on_text(&note("7", item)).is_none());
+        }
+        match &drain_raw(&mut items)[..] {
+            [Ok(RawItem::Data { content: small, .. }), Ok(RawItem::Data { content: large, content_type })] => {
+                assert_eq!((small.in_frame(), large.in_frame()), (Some(true), Some(true)));
+                assert_eq!(large.as_text(), Some(body.as_str()));
+                assert_eq!(content_type.as_deref(), Some("kit.say"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// plexus-core's data notification is read by its bytes: its id, its
+    /// content type and its content's span; any other frame is not.
+    #[test]
+    fn plexus_cores_data_notification_is_read_by_its_bytes() {
+        let read = |item: &str| {
+            let text = note("296970649928868", item);
+            plexus_core_data(&text).map(|(id, ct, span)| (id.get().to_owned(), ct.to_owned(), text[span].to_owned()))
+        };
+        let said = r#"{"type":"said","text":"}}}"}"#;
+        let with = |rest: &str| format!(r#"{{"type":"data",{rest}"content":{said}}}"#);
+        let want = Some(("296970649928868".to_owned(), "kit.say".to_owned(), said.to_owned()));
+        assert_eq!(read(&with(r#""metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"content_type":"kit.say","#)), want);
+        assert_eq!(read(&with(r#""content_type":"kit.say","#)), want);
+        assert_eq!(read(&with(r#""content_type":"kit\u002esay","#)), None);
+        assert_eq!(read(&with(r#""metadata":null,"content_type":"kit.say","#)), want);
+        assert_eq!(read(r#"{"type":"done"}"#), None);
+        assert_eq!(read(r#"{"content_type":"kit.say","type":"data","content":1}"#), None);
+        assert_eq!(read(&with(r#""metadata" : {},"content_type":"kit.say","#)), None);
+        assert!(plexus_core_data(r#"{"jsonrpc":"2.0","id":1,"result":7}"#).is_none());
+        assert!(plexus_core_data(r#"{"method":"kit.call","jsonrpc":"2.0","params":{"subscription":7,"result":{"type":"data","content_type":"x","content":1}}}"#).is_none());
+        assert!(plexus_core_data(r#"{"jsonrpc":"2.0","method":"kit.call","params":{"subscription":7,"result":{"type":"data","content_type":"x","content":1}}} "#).is_none());
+    }
+
+    /// The head's reading takes a data item for a typed call only where it
+    /// has read whose it is and its content type before the content.
+    #[test]
+    fn the_head_is_read_only_in_plexus_cores_order() {
+        let at = |item: &str| Head::read(&note("7", item)).map(|h| (h.kind, h.content_type.map(str::to_owned)));
+        assert_eq!(at(DATA), Some((Some(Kind::Data), Some("kit.say".into()))));
+        assert_eq!(at(r#"{"content":1,"type":"data","content_type":"kit.say"}"#), None);
+        assert_eq!(at(r#"{"type":"data","content":1}"#), None);
+        assert_eq!(at(DONE), None);
+        assert!(Head::read(r#"{"jsonrpc":"2.0","id":1,"result":7}"#).is_none());
+        assert!(Head::read(r#"{"jsonrpc":"2.0","method":"kit.call","params":{"result":{"type":"data","content_type":"x","content":1},"subscription":7}}"#).is_none());
+    }
+
+    /// What the spec does not excuse stays an error: an item with no `type`,
+    /// or a known one missing what it must carry.
+    #[test]
+    fn an_item_that_is_not_one_is_still_an_error() {
+        for item in [r#"{"content":{"a":1}}"#, r#"{"type":"data","metadata":{"provenance":[],"plexus_hash":"h","timestamp":1}}"#, "42"] {
+            let registry = Registry::new(Arc::from("kit"));
+            let mut items = subscribed(&registry, 1, "7");
+            assert!(registry.on_text(&note("7", item)).is_none());
+            let got = drain(&mut items);
+            assert!(matches!(got[..], [Err(_)]), "{item}: {got:?}");
+        }
+    }
 
     #[test]
     fn the_subscribe_frame_is_the_one_menger_speaks() {
