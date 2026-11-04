@@ -62,6 +62,9 @@ ws-web = ["dep:futures-channel", "dep:wasm-bindgen", "dep:web-sys"]
 
 [dev-dependencies]
 futures = "0.3"
+# PERF.115-43: tests/typed_decode_tests.rs reads every event shape both ways,
+# serde's derive and `plexus_macros::Deserialize`, from one declaration.
+plexus-macros = { path = ".." }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1.0", features = ["macros", "rt", "time", "signal"] }
