@@ -1,6 +1,6 @@
 {
   "irBackend": "irsvc",
-  "irHash": "eb9f91bd1193e0ca",
+  "irHash": "b20bb95055893298",
   "irMetadata": null,
   "irMethods": {
     ".call": {
@@ -99,6 +99,55 @@
           "qnNamespace": ""
         },
         "tag": "RefNamed"
+      },
+      "mdRole": {
+        "kind": "rpc"
+      }
+    },
+    ".ir": {
+      "mdBidirResponseSchema": null,
+      "mdBidirResponseType": null,
+      "mdBidirType": null,
+      "mdCardinality": "one",
+      "mdDescription": "The service's IR (3.0): every type once, each method referring to them — of the namespaces asked, or the whole service",
+      "mdError": {
+        "contents": {
+          "qnLocalName": "IrError",
+          "qnNamespace": ""
+        },
+        "tag": "RefNamed"
+      },
+      "mdFullPath": ".ir",
+      "mdGrant": "irsvc.ir",
+      "mdLongDescription": "RETURNS-40: the service's IR — IR 3.0, every type once and each\nmethod referring to them — of the namespaces asked (none: the whole\nservice), as the caller sees the service. The one way to ask for\nseveral schemas; `<ns>.schema` answers one. Equal to what synapse\nbuilds from the same raw schemas.",
+      "mdName": "ir",
+      "mdNamespace": "",
+      "mdParams": [
+        {
+          "pdDefault": null,
+          "pdDeprecation": null,
+          "pdDescription": "The namespaces (dotted paths) to describe; none: the whole service",
+          "pdName": "namespaces",
+          "pdRequired": false,
+          "pdSource": null,
+          "pdType": {
+            "contents": {
+              "contents": {
+                "contents": [
+                  "string",
+                  null
+                ],
+                "tag": "RefPrimitive"
+              },
+              "tag": "RefArray"
+            },
+            "tag": "RefOptional"
+          }
+        }
+      ],
+      "mdProgress": null,
+      "mdReturns": {
+        "tag": "RefJson"
       },
       "mdRole": {
         "kind": "rpc"
@@ -763,9 +812,9 @@
   },
   "irPluginHashes": {
     "": {
-      "phiChildrenHash": "eb9f91bd1193e0ca",
-      "phiHash": "eb9f91bd1193e0ca",
-      "phiSelfHash": "eb9f91bd1193e0ca"
+      "phiChildrenHash": "b20bb95055893298",
+      "phiHash": "b20bb95055893298",
+      "phiSelfHash": "b20bb95055893298"
     },
     "alpha": {
       "phiChildrenHash": "b71c44fef5ed8702",
@@ -805,6 +854,7 @@
       "call",
       "hash",
       "hashes",
+      "ir",
       "schema"
     ],
     "alpha": [
@@ -909,6 +959,188 @@
         "tag": "KindEnum"
       },
       "tdName": "HashEvent",
+      "tdNamespace": ""
+    },
+    ".IrError": {
+      "tdDescription": "Why a service writes no IR for what was asked.",
+      "tdKind": {
+        "keDiscriminator": "type",
+        "keVariants": [
+          {
+            "vdDescription": "Two different types are titled alike in one namespace: one title in\none namespace is one type, so its author renames one. `message` is\nsynapse's own words for it.",
+            "vdFields": [
+              {
+                "fdDefault": null,
+                "fdDescription": null,
+                "fdName": "first",
+                "fdRequired": true,
+                "fdType": {
+                  "contents": {
+                    "qnLocalName": "IrTypeSource",
+                    "qnNamespace": ""
+                  },
+                  "tag": "RefNamed"
+                }
+              },
+              {
+                "fdDefault": null,
+                "fdDescription": null,
+                "fdName": "message",
+                "fdRequired": true,
+                "fdType": {
+                  "contents": [
+                    "string",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                }
+              },
+              {
+                "fdDefault": null,
+                "fdDescription": null,
+                "fdName": "namespace",
+                "fdRequired": true,
+                "fdType": {
+                  "contents": [
+                    "string",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                }
+              },
+              {
+                "fdDefault": null,
+                "fdDescription": null,
+                "fdName": "second",
+                "fdRequired": true,
+                "fdType": {
+                  "contents": {
+                    "qnLocalName": "IrTypeSource",
+                    "qnNamespace": ""
+                  },
+                  "tag": "RefNamed"
+                }
+              },
+              {
+                "fdDefault": null,
+                "fdDescription": null,
+                "fdName": "title",
+                "fdRequired": true,
+                "fdType": {
+                  "contents": [
+                    "string",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                }
+              }
+            ],
+            "vdName": "title_collision"
+          },
+          {
+            "vdDescription": "A namespace asked for is not one the caller's view of the service shows.",
+            "vdFields": [
+              {
+                "fdDefault": null,
+                "fdDescription": null,
+                "fdName": "message",
+                "fdRequired": true,
+                "fdType": {
+                  "contents": [
+                    "string",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                }
+              },
+              {
+                "fdDefault": null,
+                "fdDescription": null,
+                "fdName": "namespace",
+                "fdRequired": true,
+                "fdType": {
+                  "contents": [
+                    "string",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                }
+              }
+            ],
+            "vdName": "not_found"
+          },
+          {
+            "vdDescription": "A schema the service answered is one synapse could not read.",
+            "vdFields": [
+              {
+                "fdDefault": null,
+                "fdDescription": null,
+                "fdName": "message",
+                "fdRequired": true,
+                "fdType": {
+                  "contents": [
+                    "string",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                }
+              },
+              {
+                "fdDefault": null,
+                "fdDescription": null,
+                "fdName": "namespace",
+                "fdRequired": true,
+                "fdType": {
+                  "contents": [
+                    "string",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                }
+              }
+            ],
+            "vdName": "unreadable"
+          }
+        ],
+        "tag": "KindEnum"
+      },
+      "tdName": "IrError",
+      "tdNamespace": ""
+    },
+    ".IrTypeSource": {
+      "tdDescription": "Where a type was read: a method, and which of its schemas (`params`,\n`returns`, `error`, `progress` or `input`).",
+      "tdKind": {
+        "ksFields": [
+          {
+            "fdDefault": null,
+            "fdDescription": null,
+            "fdName": "method",
+            "fdRequired": true,
+            "fdType": {
+              "contents": [
+                "string",
+                null
+              ],
+              "tag": "RefPrimitive"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": null,
+            "fdName": "schema",
+            "fdRequired": true,
+            "fdType": {
+              "contents": [
+                "string",
+                null
+              ],
+              "tag": "RefPrimitive"
+            }
+          }
+        ],
+        "tag": "KindStruct"
+      },
+      "tdName": "IrTypeSource",
       "tdNamespace": ""
     },
     ".PlexusStreamItem": {
