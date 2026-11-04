@@ -465,13 +465,13 @@ impl<'de, E: de::Error> Deserializer<'de> for ScalarRef<'_, 'de, E> {
     }
 
     fn deserialize_identifier<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, E> {
-        match self.0 {
-            Scalar::Str(v) => visitor.visit_borrowed_str(*v),
-            Scalar::String(v) => visitor.visit_str(v),
-            Scalar::Bytes(v) => visitor.visit_borrowed_bytes(*v),
-            Scalar::ByteBuf(v) => visitor.visit_bytes(v),
-            Scalar::U64(v) => visitor.visit_u64(*v),
-            other => Err(de::Error::invalid_type(other.unexpected(), &visitor)),
+        match *self.0 {
+            Scalar::Str(v) => visitor.visit_borrowed_str(v),
+            Scalar::String(ref v) => visitor.visit_str(v),
+            Scalar::Bytes(v) => visitor.visit_borrowed_bytes(v),
+            Scalar::ByteBuf(ref v) => visitor.visit_bytes(v),
+            Scalar::U64(v) => visitor.visit_u64(v),
+            ref other => Err(de::Error::invalid_type(other.unexpected(), &visitor)),
         }
     }
 

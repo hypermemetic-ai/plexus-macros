@@ -1,0 +1,35 @@
+error: `plexus_macros::Deserialize` reads an internally tagged enum (`#[serde(tag = "...")]`) with its tag first; this is not an enum: derive serde's `Deserialize` for this type
+ --> tests/compile/type_first_refused.rs:4:12
+  |
+4 | pub struct Said {
+  |            ^^^^
+
+error: `plexus_macros::Deserialize` reads an internally tagged enum (`#[serde(tag = "...")]`) with its tag first; this enum has no `tag`: derive serde's `Deserialize` for this type
+ --> tests/compile/type_first_refused.rs:9:10
+  |
+9 | pub enum Untagged {
+  |          ^^^^^^^^
+
+error: `plexus_macros::Deserialize` reads an internally tagged enum (`#[serde(tag = "...")]`) with its tag first; an adjacently tagged enum is read by serde: derive serde's `Deserialize` for this type
+  --> tests/compile/type_first_refused.rs:15:10
+   |
+15 | pub enum Adjacent {
+   |          ^^^^^^^^
+
+error: `plexus_macros::Deserialize` reads an internally tagged enum (`#[serde(tag = "...")]`) with its tag first; an untagged enum has no tag to read first: derive serde's `Deserialize` for this type
+  --> tests/compile/type_first_refused.rs:21:10
+   |
+21 | pub enum Bare {
+   |          ^^^^
+
+error: `plexus_macros::Deserialize` reads an internally tagged enum (`#[serde(tag = "...")]`) with its tag first; a generic enum is not read by it: derive serde's `Deserialize` for this type
+  --> tests/compile/type_first_refused.rs:27:10
+   |
+27 | pub enum Generic<T> {
+   |          ^^^^^^^
+
+error: `plexus_macros::Deserialize` reads an internally tagged enum (`#[serde(tag = "...")]`) with its tag first; an untagged variant is tried on the whole object once the tagged ones fail, which needs serde's buffer: derive serde's `Deserialize` for this type
+  --> tests/compile/type_first_refused.rs:36:5
+   |
+36 |     Anything(String),
+   |     ^^^^^^^^
