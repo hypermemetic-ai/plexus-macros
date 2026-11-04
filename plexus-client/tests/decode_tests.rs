@@ -313,7 +313,8 @@ async fn an_error_frame_is_a_typed_remote_error_and_ends_the_stream() {
     );
     assert!(err.is_remote() && !err.is_transport());
     assert_eq!(err.remote().map(RemoteError::kind), Some("execution"));
-    assert_eq!(err.to_string(), "remote error: execution failed: boom");
+    // RETURNS-36 (review): main's line for the method's own failure.
+    assert_eq!(err.to_string(), "remote error: boom");
     assert_eq!(s.next().await, None);
     assert!(s.is_terminated());
 }

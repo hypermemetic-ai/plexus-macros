@@ -173,6 +173,9 @@ impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ClientError::Transport(e) => write!(f, "{e}"),
+            // Main's line: the method's own failure reads as the message it
+            // carries ("remote error: no"); any other kind as its line.
+            ClientError::Remote(crate::RemoteError::Execution { message }) => write!(f, "remote error: {message}"),
             ClientError::Remote(e) => write!(f, "remote error: {e}"),
             ClientError::Decode {
                 content_type: Some(ct),

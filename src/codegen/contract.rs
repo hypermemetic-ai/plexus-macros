@@ -190,9 +190,10 @@ pub(crate) fn take_bodiless(input_impl: &mut syn::ItemImpl) -> Vec<syn::Ident> {
 }
 
 /// Under the name rule (and not `methods = marked`): is this unmarked method
-/// on the wire? `pub async fn` on `&self` returning one of the six signature
-/// forms (RETURNS-8) is; one returning anything else is refused; any other
-/// shape is a plain method.
+/// on the wire? `pub async fn` on `&self` returning `impl Stream<Item = E>`
+/// is; one returning anything else is refused (MACRO-13's guard — a
+/// one-item method, `-> T`, says so with `#[method]`); any other shape is a
+/// plain method.
 pub(crate) fn is_wire_shape(method: &ImplItemFn) -> syn::Result<bool> {
     let public = matches!(method.vis, Visibility::Public(_));
     let on_ref_self = matches!(
@@ -202,27 +203,25 @@ pub(crate) fn is_wire_shape(method: &ImplItemFn) -> syn::Result<bool> {
     if !(public && method.sig.asyncness.is_some() && on_ref_self) {
         return Ok(false);
     }
-    match classify_return(&method.sig) {
-        Ok(_) => Ok(true),
-        Err(form) => {
-            let name = &method.sig.ident;
-            let returns = match &method.sig.output {
-                syn::ReturnType::Type(_, ty) => quote!(#ty).to_string(),
-                syn::ReturnType::Default => "()".to_string(),
-            };
-            let mut e = syn::Error::new(
-                name.span(),
-                format!(
-                    "`pub async fn {name}(&self, …)` returns `{returns}`, which is not a signature \
-                     form, so it cannot go on the wire — and every `pub async fn` on `&self` of an \
-                     activation is a wire method. Make `{name}` non-`pub`, or write `methods = \
-                     marked` on the activation (then only #[plexus_macros::method]s are on the wire)."
-                ),
-            );
-            e.combine(form);
-            Err(e)
+    if let Ok(shape) = classify_return(&method.sig) {
+        if shape.cardinality == Cardinality::Many {
+            return Ok(true);
         }
     }
+    let name = &method.sig.ident;
+    let returns = match &method.sig.output {
+        syn::ReturnType::Type(_, ty) => quote!(#ty).to_string(),
+        syn::ReturnType::Default => "()".to_string(),
+    };
+    Err(syn::Error::new(
+        name.span(),
+        format!(
+            "`pub async fn {name}(&self, …)` returns `{returns}`, not `impl Stream<Item = E>`, so \
+             it cannot go on the wire — and every `pub async fn` on `&self` of an activation is a \
+             wire method. Make `{name}` non-`pub`, or write `methods = marked` on the activation \
+             (then only #[plexus_macros::method]s are on the wire)."
+        ),
+    ))
 }
 
 /// Does the consuming crate's manifest declare a `server` feature?
