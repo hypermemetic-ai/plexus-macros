@@ -112,6 +112,9 @@ pub mod remote_error;
 /// RETURNS-36: a peer on plexus-wire's spec as main wrote it, read as 0.8.
 pub mod spec05;
 pub mod transport;
+/// PERF.115-43: `#[derive(plexus_macros::Deserialize)]`'s runtime, reached
+/// through `__rt::type_first`.
+mod type_first;
 pub mod watch;
 pub mod wire_result;
 
@@ -150,4 +153,11 @@ pub mod __rt {
     pub use serde_json;
     pub use crate::transport::join_path;
     pub use futures_core::Stream;
+
+    /// PERF.115-43: what `#[derive(plexus_macros::Deserialize)]` emits calls:
+    /// an internally tagged enum read with its tag first, serde's buffered
+    /// read where it is not (see the module's source, `type_first.rs`).
+    pub mod type_first {
+        pub use crate::type_first::{deserialize, TypeFirst};
+    }
 }

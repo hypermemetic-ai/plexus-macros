@@ -54,6 +54,7 @@
 //! | `#[plexus_macros::removed_in]` | Companion to `#[deprecated]` carrying the removal version. |
 //! | `#[derive(PlexusRequest)]` | Typed extraction from `RawRequestContext`. |
 //! | `#[derive(HandleEnum)]` | Type-safe handle enums for an activation. |
+//! | `#[derive(plexus_macros::Deserialize)]` | An internally tagged event's `Deserialize`, its `type` read first (serde's `Deserialize` otherwise). |
 //!
 //! # A method's return type is its contract (0.7)
 //!
@@ -90,6 +91,7 @@ mod credential;
 mod handle_enum;
 mod parse;
 mod request;
+mod type_first;
 
 
 use codegen::generate_all;
@@ -764,6 +766,51 @@ pub fn credentials_derive(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(HandleEnum, attributes(handle))]
 pub fn handle_enum_derive(input: TokenStream) -> TokenStream {
     handle_enum::derive(input)
+}
+
+/// PERF.115-43 · an internally tagged enum's `Deserialize`, its tag read
+/// first: in place of serde's, on a house event.
+///
+/// serde reads an internally tagged enum (`#[serde(tag = "type")]`, every
+/// event the house writes) whole into a private buffer before it reads the
+/// tag, then reads the variant out of the buffer. Written in serde's place,
+/// this derive reads the first key: when it is the tag, the variant is chosen
+/// by the tag's value and its fields are read straight from the rest of the
+/// object; when it is not, serde reads the object, buffer and all, as it
+/// always has. plexus-core writes `type` first, so a client, a hop or a
+/// service reading another's events reads them without the buffer.
+///
+/// ```ignore
+/// #[derive(Debug, Clone, serde::Serialize, plexus_macros::Deserialize, schemars::JsonSchema)]
+/// #[serde(tag = "type", rename_all = "snake_case")]
+/// pub enum TicketsEvent {
+///     Health { version: String, count: u64 },
+///     Ready,
+///     Error { message: String },
+/// }
+/// ```
+///
+/// Everything else about the enum is serde's: the derive has serde derive
+/// it twice more beside it (`#[serde(remote = …)]`), once as written and
+/// once without its tag, so every `#[serde]` attribute (`rename_all`,
+/// `rename`, `alias`, `other`, `default`, `skip`, `with`, `flatten`,
+/// `deny_unknown_fields`, `expecting`) is read by serde's own code. A struct
+/// variant and a unit variant are read straight; a newtype variant, a struct
+/// variant with a flattened field and a variant read `with` a function are
+/// read by serde's buffered read. What serde refuses is refused in serde's
+/// words. A value inside a variant is read by the deserializer itself, so a
+/// value only the input can carry (a `RawValue`, a map keyed by numbers)
+/// reaches a variant whose tag comes first.
+///
+/// It is for an internally tagged enum that is not generic, with no
+/// untagged variant (one is tried on the whole object once the tagged ones
+/// fail, which needs the buffer); anything else is a compile error that says
+/// to derive serde's `Deserialize`. The runtime is plexus-client's
+/// (`plexus_client::__rt::type_first`), so the deriving crate depends on
+/// plexus-client, as every crate with a generated client does.
+#[proc_macro_derive(Deserialize, attributes(serde))]
+pub fn deserialize_derive(input: TokenStream) -> TokenStream {
+    type_first::derive(input)
 }
 
 /// Derive macro for typed HTTP/WebSocket request extraction.

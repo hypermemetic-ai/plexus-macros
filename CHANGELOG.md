@@ -36,6 +36,18 @@ BIDIR-6: `Input<T>`. BIDIR-17: `Input<Bytes>` as binary frames.
   subscription id.
 ### Added
 
+- PERF.115-43: `#[derive(plexus_macros::Deserialize)]`, an internally tagged
+  enum's `Deserialize` that reads its tag first. Written where serde's
+  `Deserialize` goes on a house event (`#[serde(tag = "type")]`), it reads the
+  first key and, when it is the tag, reads the variant straight from the rest
+  of the object, without serde's buffer; anywhere else, serde reads the object
+  as before. Every `#[serde]` attribute is serde's own: the derive has serde
+  derive the enum twice more (`remote`), as written and without its tag.
+  Refused, by name: anything but an internally tagged enum, a generic one, one
+  with an untagged variant. In a generated client a 64 B item falls from 6,558
+  instructions to 6,081, a ticket row from 16,312 to 12,011; the event alone,
+  as any Rust reader reads it, from 2,312 to 1,831 and 12,043 to 7,740.
+  `plexus_client::__rt::type_first` is its runtime.
 - PERF.115-36: a typed client decodes an item's content straight from the
   wire's text into the method's event, never through a `Value`.
   `Transport::call_raw` yields the call's items as a typed client reads them
