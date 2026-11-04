@@ -87,9 +87,19 @@ impl LooseActivation {
     }
 }
 
+/// The refusal, whole (RETURNS-6: structured).
+async fn refused_error<A: Activation>(a: &A, method: &str, params: serde_json::Value) -> PlexusError {
+    match a.call(method, params.clone(), None, None).await {
+        Err(e @ PlexusError::InvalidParams { .. }) => e,
+        Err(other) => panic!("{method} {params}: expected InvalidParams, got {other:?}"),
+        Ok(_) => panic!("{method} {params}: expected InvalidParams, the method ran"),
+    }
+}
+
+/// Its line past `Invalid params: `.
 async fn refused<A: Activation>(a: &A, method: &str, params: serde_json::Value) -> String {
     match a.call(method, params.clone(), None, None).await {
-        Err(PlexusError::InvalidParams(m)) => m,
+        Err(e @ PlexusError::InvalidParams { .. }) => e.to_string().trim_start_matches("Invalid params: ").to_string(),
         Err(other) => panic!("{method} {params}: expected InvalidParams, got {other:?}"),
         Ok(_) => panic!("{method} {params}: expected InvalidParams, the method ran"),
     }
@@ -172,7 +182,7 @@ async fn without_typed_params_nothing_changes() {
 
 #[tokio::test]
 async fn the_message_carries_unknown_field() {
-    let e = PlexusError::InvalidParams(refused(&TicketsActivation, "list", serde_json::json!({ "sumary": true })).await);
+    let e = refused_error(&TicketsActivation, "list", serde_json::json!({ "sumary": true })).await;
     let item = plexus_core::plexus::error_item("tickets", &e);
     assert_eq!(item["code"], "-32602");
     assert_eq!(item["error_kind"], "invalid_params");

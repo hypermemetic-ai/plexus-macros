@@ -1,0 +1,12 @@
+[
+  {"method":"ping","params":{},"frames":"wire/ping.jsonl"},
+  {"method":"lookup","params":{"id":"a1"},"frames":"wire/lookup.ok.jsonl"},
+  {"method":"lookup","params":{"id":"missing"},"frames":"wire/lookup.err.jsonl"},
+  {"method":"count","params":{"to":3},"frames":"wire/count.jsonl"},
+  {"method":"scan","params":{"prefix":"a"},"frames":"wire/scan.jsonl"},
+  {"method":"load","params":{"n":2},"frames":"wire/load.jsonl"},
+  {"method":"warm","params":{},"frames":"wire/warm.jsonl"},
+  {"method":"frob","params":{},"frames":"errors.jsonl","line":1},
+  {"method":"lookup","params":{},"frames":"errors.jsonl","line":2},
+  {"method":"count","params":{"to":"three"},"frames":"errors.jsonl","line":3}
+]

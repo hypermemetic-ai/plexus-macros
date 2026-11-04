@@ -12,7 +12,8 @@
 //! went on the wire.
 
 use futures::StreamExt;
-use plexus_client::{collect_data, decode, watch, ClientEvent, MethodRef, Transport, Watched3, WsTransport};
+use futures::TryStreamExt;
+use plexus_client::{decode, watch, MethodRef, Transport, Watched3, WsTransport};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -31,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::args().nth(1).unwrap_or_else(|| "ws://127.0.0.1:4486".into());
     let t = WsTransport::connect(&url, "menger").await?;
     let create = |title: &str| {
-        collect_data(decode::<Value>(t.call(CREATE, json!({"epic": "LIVE", "parent": "LIVE-1", "title": title}))))
+        decode::<Value>(t.call(CREATE, json!({"epic": "LIVE", "parent": "LIVE-1", "title": title}))).try_collect::<Vec<_>>()
     };
 
     // 1. order, end, error: an open watch, a finite list, a get that fails.
@@ -44,12 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut created = false;
     while let Some(it) = s.next().await {
         let line = match &it {
-            Watched3::A(Ok(ClientEvent::Data(ev))) => format!("tickets.watch: {}", kind(ev)),
-            Watched3::B(Ok(ClientEvent::Data(ev))) => format!("tickets.list: {}", kind(ev)),
-            Watched3::C(Ok(ClientEvent::Data(ev))) => format!("tickets.get: {}", kind(ev)),
-            Watched3::A(Ok(ClientEvent::Progress { .. }))
-            | Watched3::B(Ok(ClientEvent::Progress { .. }))
-            | Watched3::C(Ok(ClientEvent::Progress { .. })) => continue,
+            Watched3::A(Ok(ev)) => format!("tickets.watch: {}", kind(ev)),
+            Watched3::B(Ok(ev)) => format!("tickets.list: {}", kind(ev)),
+            Watched3::C(Ok(ev)) => format!("tickets.get: {}", kind(ev)),
             Watched3::A(Err(e)) => format!("tickets.watch: failed ({e})"),
             Watched3::B(Err(e)) => format!("tickets.list: failed ({e})"),
             Watched3::C(Err(e)) => format!("tickets.get: failed ({})", e.to_string().chars().take(50).collect::<String>()),

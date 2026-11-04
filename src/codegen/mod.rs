@@ -201,7 +201,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let bodiless = contract::take_bodiless(&mut input_impl);
 
     // MACRO-13: under the name rule every `pub async fn` on `&self`
-    // returning `impl Stream<Item = E>` is a wire method, unless the
+    // returning a signature form (RETURNS-8) is a wire method, unless the
     // activation says `methods = marked`.
     let all_public_methods = names.new_form && !args.methods_marked;
 
@@ -339,11 +339,11 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             ),
         ));
     }
+    // MACRO-13 (`always`, the owner, 2026-10-16): every activation the name
+    // rule names has its trait — RETURNS-36: each method in it under its own
+    // return type, so every signature form is in it.
     let trait_ident: Option<syn::Ident> = names.trait_ident.clone();
-    let self_callable = match &trait_ident {
-        Some(t) => contract::check_trait_methods(&methods, t)?,
-        None => true,
-    };
+    let self_callable = contract::self_callable(&methods);
     if contract_mode && !self_callable {
         let m = methods.iter().find(|m| contract::injected(m).is_some()).unwrap();
         return Err(syn::Error::new(
@@ -809,7 +809,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         TokenStream::new()
     };
     let client_impl = match &client_path {
-        Some(path) => client::generate(&names.client_ident, &namespace, &methods, &child_methods, path, names.new_form)?,
+        Some(path) => client::generate(&names.client_ident, &namespace, &methods, &child_methods, path)?,
         None => TokenStream::new(),
     };
 
@@ -841,8 +841,9 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     let mut trait_server_items = TokenStream::new();
     let mut trait_items = TokenStream::new();
     if let Some(trait_ident) = &trait_ident {
-        let box_stream = contract::box_stream_path(
+        let boxes = contract::boxes(
             client_path.as_ref(),
+            &crate_path,
             args.trait_span.unwrap_or_else(Span::call_site),
         )?;
         trait_items.extend(contract::trait_def(
@@ -850,7 +851,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             &struct_name,
             &resolved_description,
             &methods,
-            &box_stream,
+            &boxes,
             contract_mode,
             server_gate.as_ref(),
         ));
@@ -859,7 +860,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 trait_ident,
                 &struct_name,
                 &methods,
-                &box_stream,
+                &boxes,
             ));
         } else if self_callable {
             trait_server_items.extend(contract::activation_trait_impl(
@@ -869,7 +870,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 &impl_generics,
                 where_clause,
                 &methods,
-                &box_stream,
+                &boxes,
                 &deps,
             ));
         }
@@ -879,6 +880,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 &names.client_ident,
                 &methods,
                 path,
+                &boxes,
             ));
         }
     }
@@ -904,11 +906,14 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         Some(meta) => cfg_gate(server_half, meta, Span::call_site())?,
     };
 
+    let streaming_warnings = contract::streaming_warnings(&methods, &struct_name);
+
     Ok(quote! {
         #server_half
         #trait_items
         #client_impl
         #client_flag_warning
+        #streaming_warnings
     })
 }
 

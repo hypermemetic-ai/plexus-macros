@@ -459,14 +459,6 @@ struct Fields<'a> {
     content_type: Option<Cow<'a, str>>,
     #[serde(default, borrow, deserialize_with = "present")]
     content: Option<&'a RawValue>,
-    #[serde(default, borrow)]
-    message: Option<Cow<'a, str>>,
-    #[serde(default)]
-    percentage: Option<f32>,
-    #[serde(default, borrow)]
-    code: Option<Cow<'a, str>>,
-    #[serde(default)]
-    recoverable: Option<bool>,
     #[serde(default, borrow, rename = "requestId")]
     request_id: Option<Cow<'a, str>>,
     #[serde(default, borrow, rename = "requestData", deserialize_with = "present")]
@@ -508,17 +500,17 @@ impl Fields<'_> {
                 content_type: self.content_type.as_deref().map(str::to_owned),
                 content: serde_json::from_str(self.content?.get()).ok()?,
             },
+            // RETURNS-36: the method's progress value, read like a data
+            // item's content.
             Kind::Progress => StreamItem::Progress {
                 metadata,
-                message: self.message.as_deref()?.to_owned(),
-                percentage: self.percentage,
+                content_type: self.content_type.as_deref().map(str::to_owned),
+                content: serde_json::from_str(self.content?.get()).ok()?,
             },
-            Kind::Error => StreamItem::Error {
-                metadata,
-                message: self.message.as_deref()?.to_owned(),
-                code: self.code.as_deref().map(str::to_owned),
-                recoverable: self.recoverable.unwrap_or(false),
-            },
+            // RETURNS-36: an error item — its typed `error` beside spec/05's
+            // flattened fields — is the call's end and rare: the `Value`
+            // reading makes it whole.
+            Kind::Error => return None,
             Kind::Request => StreamItem::Request {
                 request_id: self.request_id.as_deref()?.to_owned(),
                 request_data: serde_json::from_str(self.request_data?.get()).ok()?,
@@ -534,12 +526,8 @@ impl Fields<'_> {
     fn raw_item(&self, kind: Kind, content_type: Option<Arc<str>>) -> Option<RawItem> {
         Some(match kind {
             Kind::Data => RawItem::Data { content_type, content: Content::from(self.content?.to_owned()) },
-            Kind::Progress => RawItem::Progress { message: self.message.as_deref()?.to_owned(), percentage: self.percentage },
-            Kind::Error => RawItem::Error {
-                message: self.message.as_deref()?.to_owned(),
-                code: self.code.as_deref().map(str::to_owned),
-                recoverable: self.recoverable.unwrap_or(false),
-            },
+            Kind::Progress => RawItem::Progress { content_type, content: Content::from(self.content?.to_owned()) },
+            Kind::Error => return None,
             Kind::Request => RawItem::Request,
             Kind::Done => RawItem::Done,
             Kind::Other => return None,
@@ -831,7 +819,14 @@ impl Registry {
         if payload.get("type").and_then(Value::as_str).is_some_and(|kind| !KINDS.contains(&kind)) {
             return;
         }
-        match serde_json::from_value::<StreamItem>(payload) {
+        // RETURNS-36: a server on plexus-wire's spec as main wrote it
+        // (progress without `content`, an error without `error`) is read in
+        // 0.8's shape (`spec05::item`) when — only when — the item does not
+        // read as 0.8.
+        let parsed = StreamItem::deserialize(&payload).or_else(|e| {
+            crate::spec05::item(&payload).and_then(|v| serde_json::from_value::<StreamItem>(v).ok()).ok_or(e)
+        });
+        match parsed {
             Ok(item) => {
                 let terminal = item.is_terminal();
                 let item = if raw { Delivered::Raw(RawItem::from(item)) } else { Delivered::Item(item) };
@@ -1056,10 +1051,12 @@ mod tests {
         let items = [
             DATA,
             r#"{"type":"data","content":{"n":[1,2.5,"x\"y"]},"content_type":"kit.n"}"#,
-            r#"{"type":"progress","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"half","percentage":50.0}"#,
-            r#"{"type":"progress","message":"none yet"}"#,
+            // RETURNS-36: 0.8's progress frame (the method's `P` as
+            // `content`) and error frame (a typed `error` beside spec/05's).
+            r#"{"type":"progress","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"content_type":"kit.n","content":{"message":"half","percentage":50.0}}"#,
+            r#"{"type":"progress","content":{"message":"none yet"}}"#,
             r#"{"type":"request","requestId":"r-1","requestData":{"type":"confirm"},"timeoutMs":30000}"#,
-            r#"{"type":"error","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"no","code":"forbidden","recoverable":true}"#,
+            r#"{"type":"error","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"no","code":"too_many_calls","recoverable":true,"error":{"kind":"too_many_calls","max":8},"error_kind":"too_many_calls","max":8}"#,
         ];
         for item in items {
             assert!(registry.on_text(&note("7", item)).is_none());
@@ -1074,12 +1071,16 @@ mod tests {
                     assert_eq!(r.into_value().unwrap(), v);
                     assert_eq!(a.as_deref(), b.as_deref());
                 }
-                (StreamItem::Progress { message: m, percentage: p, .. }, RawItem::Progress { message, percentage }) => {
-                    assert_eq!((m, p), (message, percentage));
+                (StreamItem::Progress { content: v, content_type: a, .. }, RawItem::Progress { content: r, content_type: b }) => {
+                    assert_eq!(r.into_value().unwrap(), v);
+                    assert_eq!(a.as_deref(), b.as_deref());
                 }
                 (StreamItem::Request { .. }, RawItem::Request) => {}
-                (StreamItem::Error { message: m, code: c, recoverable: r, .. }, RawItem::Error { message, code, recoverable }) => {
-                    assert_eq!((m, c, r), (message, code, recoverable));
+                (
+                    StreamItem::Error { message: m, code: c, recoverable: r, error: e, .. },
+                    RawItem::Error { message, code, recoverable, error },
+                ) => {
+                    assert_eq!((m, c, r, e), (message, code, recoverable, *error));
                 }
                 other => panic!("{other:?}"),
             }
@@ -1099,16 +1100,25 @@ mod tests {
             r#"{"content":{"a":1},"extra":{"ignored":[true]},"type":"data"}"#,
             r#"{"type":"data","metadata":{"provenance":["a","b"],"plexus_hash":"x","timestamp":-1,"more":1},"content":"s"}"#,
             r#"{"type":"data","metadata":{},"content":{}}"#,
-            r#"{"type":"progress","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"message":"half","percentage":50.0}"#,
-            r#"{"type":"progress","message":"none yet","percentage":null}"#,
+            r#"{"type":"progress","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"content_type":"kit.n","content":{"message":"half","percentage":50.0}}"#,
+            r#"{"type":"progress","content":{"message":"none yet"}}"#,
             r#"{"type":"request","requestId":"r-1","requestData":{"type":"confirm"},"timeoutMs":30000}"#,
             r#"{"type":"request","requestId":"r-2","requestData":null}"#,
-            r#"{"type":"error","message":"no","code":"forbidden","recoverable":true,"metadata":{"provenance":[],"plexus_hash":"","timestamp":0}}"#,
-            r#"{"type":"error","message":"no","code":null}"#,
         ] {
             let fields: Fields<'_> = serde_json::from_str(item).unwrap();
             let built = fields.stream_item(fields.kind.unwrap());
             assert_eq!(built, Some(serde_json::from_str::<StreamItem>(item).unwrap()), "{item}");
+        }
+        // RETURNS-36: an error item (its typed `error` beside spec/05's
+        // flattened fields) is not built in place: it is the call's end, and
+        // the `Value` reading makes it whole.
+        for item in [
+            r#"{"type":"error","message":"no","code":"-32000","recoverable":true,"metadata":{"provenance":[],"plexus_hash":"","timestamp":0},"error":{"kind":"execution","message":"no"}}"#,
+            r#"{"type":"error","recoverable":false,"error":{"kind":"unauthenticated"}}"#,
+        ] {
+            let fields: Fields<'_> = serde_json::from_str(item).unwrap();
+            assert_eq!(fields.stream_item(fields.kind.unwrap()), None, "{item}");
+            assert!(serde_json::from_str::<StreamItem>(item).is_ok(), "{item}");
         }
     }
 

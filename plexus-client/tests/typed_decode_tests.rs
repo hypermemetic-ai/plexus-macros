@@ -5,7 +5,7 @@
 
 use futures::StreamExt;
 use plexus_client::{
-    decode, decode_raw, ClientError, ClientEvent, Content, ItemStream, MemoryTransport, MethodRef, RawItem,
+    decode, decode_raw, ClientError, Content, ItemStream, MemoryTransport, MethodRef, RawItem,
     RawItemStream, StreamItem, Transport,
 };
 use serde::de::DeserializeOwned;
@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::sync::Arc;
 
-type Events<E> = Vec<Result<ClientEvent<E>, ClientError>>;
+type Events<E> = Vec<Result<E, ClientError>>;
 
 /// What `decode` makes of one data item whose content is `json`, through a
 /// `Value`, and what `decode_raw` makes of it from the text.
@@ -46,7 +46,7 @@ fn same<E: DeserializeOwned + Debug + PartialEq + 'static>(json: &str) -> Events
 /// The two agree, and it decoded.
 fn decodes<E: DeserializeOwned + Debug + PartialEq + 'static>(json: &str) {
     let got = same::<E>(json);
-    assert!(matches!(got[..], [Ok(ClientEvent::Data(_))]), "{json}: {got:?}");
+    assert!(matches!(got[..], [Ok(_)]), "{json}: {got:?}");
 }
 
 /// The two agree, and it did not.
@@ -221,16 +221,25 @@ async fn a_transport_with_no_text_is_read_as_before() {
         HEALTH,
         vec![
             StreamItem::data(json!({"type": "health", "version": "0.7.0", "count": 1})),
-            StreamItem::Progress { metadata: None, message: "half".into(), percentage: Some(50.0) },
+            StreamItem::Progress { metadata: None, content_type: None, content: json!({"message": "half", "percentage": 50.0}) },
             StreamItem::Request { request_id: "r".into(), request_data: json!({}), timeout_ms: 0 },
             StreamItem::data(json!({"type": "ready"})),
-            StreamItem::Error { metadata: None, message: "no".into(), code: Some("forbidden".into()), recoverable: false },
+            StreamItem::Error {
+                metadata: None,
+                recoverable: false,
+                message: Some("no".into()),
+                code: Some("-32003".into()),
+                error: plexus_client::RemoteError::Forbidden { reason: plexus_client::DenyReason::NotAccepted },
+                fields: Default::default(),
+            },
         ],
     );
     let through_value: Events<House> = decode::<House>(t.call(HEALTH, json!({}))).collect().await;
     let raw: Events<House> = decode_raw::<House>(t.call_raw(HEALTH, json!({}))).collect().await;
     assert_eq!(through_value, raw);
-    assert_eq!(raw.len(), 4, "{raw:?}");
+    // RETURNS-36: two items and the error; progress dropped unopted, as a
+    // MethodStream drops it.
+    assert_eq!(raw.len(), 3, "{raw:?}");
 }
 
 /// A transport that has the text says so, through every handle a client
@@ -255,7 +264,7 @@ fn read<T: Transport>(t: &T) -> Events<House> {
 
 #[test]
 fn call_raw_reaches_the_transport_through_every_handle() {
-    let want: Events<House> = vec![Ok(ClientEvent::Data(House::Ready))];
+    let want: Events<House> = vec![Ok(House::Ready)];
     assert_eq!(read(&&Texts), want);
     assert_eq!(read(&Box::new(Texts)), want);
     assert_eq!(read(&std::rc::Rc::new(Texts)), want);

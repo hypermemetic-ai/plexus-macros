@@ -6,6 +6,7 @@
 //! accessors and a three-segment path. A child client built alone keeps
 //! today's behaviour (`inputs.<method>`).
 
+use futures::TryStreamExt;
 use plexus_client::{MemoryTransport, MethodRef};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -84,7 +85,7 @@ fn names(t: &MemoryTransport) -> Vec<String> {
 async fn the_child_accessor_sends_the_routed_path() {
     let t = MemoryTransport::new();
     let client = TicketsClient::new(&t);
-    let _ = client.inputs().answer_all("ACCESS-6".into(), "In Review".into()).await;
+    let _ = client.inputs().answer("ACCESS-6".into(), "In Review".into()).try_collect::<Vec<_>>().await;
     let calls = t.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "tickets.inputs.answer");
@@ -96,7 +97,7 @@ async fn the_child_accessor_sends_the_routed_path() {
 async fn a_grandchild_sends_three_segments() {
     let t = MemoryTransport::new();
     let client = TicketsClient::new(&t);
-    let _ = client.inputs().history().tail_all(Some(3)).await;
+    let _ = client.inputs().history().tail(Some(3)).try_collect::<Vec<_>>().await;
     assert_eq!(names(&t), vec!["tickets.inputs.history.tail"]);
     assert_eq!(client.inputs().history().path(), "tickets.inputs.history");
 }
@@ -104,8 +105,8 @@ async fn a_grandchild_sends_three_segments() {
 #[tokio::test]
 async fn the_parent_and_a_child_alone_are_unchanged() {
     let t = MemoryTransport::new();
-    let _ = TicketsClient::new(&t).get_all("MNG-1".into()).await;
-    let _ = InputsClient::new(&t).answer_all("MNG-1".into(), "x".into()).await;
+    let _ = TicketsClient::new(&t).get("MNG-1".into()).try_collect::<Vec<_>>().await;
+    let _ = InputsClient::new(&t).answer("MNG-1".into(), "x".into()).try_collect::<Vec<_>>().await;
     assert_eq!(names(&t), vec!["tickets.get", "inputs.answer"]);
     assert_eq!(TicketsClient::new(&t).path(), "tickets");
 }
@@ -113,8 +114,8 @@ async fn the_parent_and_a_child_alone_are_unchanged() {
 #[tokio::test]
 async fn a_client_built_at_a_path_sends_beneath_it() {
     let t = MemoryTransport::new();
-    let _ = InputsClient::at(&t, "tickets.inputs").answer_all("A-1".into(), "v".into()).await;
-    let _ = InputsClient::at(&t, "inputs").answer_all("A-1".into(), "v".into()).await;
+    let _ = InputsClient::at(&t, "tickets.inputs").answer("A-1".into(), "v".into()).try_collect::<Vec<_>>().await;
+    let _ = InputsClient::at(&t, "inputs").answer("A-1".into(), "v".into()).try_collect::<Vec<_>>().await;
     assert_eq!(names(&t), vec!["tickets.inputs.answer", "inputs.answer"]);
 }
 

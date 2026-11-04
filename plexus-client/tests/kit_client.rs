@@ -14,7 +14,7 @@
 //! go (unsubscribing it) and exits 130.
 
 use futures::StreamExt;
-use plexus_client::{decode_raw, ClientError, ClientEvent, MethodRef, Transport, WsTransport};
+use plexus_client::{ClientError, Content, Frame, MethodRef, MethodStream, Transport, WsTransport};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
 
@@ -80,15 +80,20 @@ async fn client() {
             std::process::exit(1)
         }
     };
-    let mut events = decode_raw::<Value>(transport.call_raw(method, Value::Object(params)));
+    // RETURNS-36: a generated client's MethodStream (call_raw, each content
+    // decoded from the wire's text), opted in to progress.
+    let mut events = MethodStream::<Value, Value, Value>::new(
+        transport.call_raw(method, Value::Object(params)),
+        Content::decode::<Value>,
+        |v| v,
+    )
+    .with_progress();
     loop {
         tokio::select! {
             event = events.next() => match event {
                 None => break,
-                Some(Ok(ClientEvent::Data(data))) => println!("{data}"),
-                Some(Ok(ClientEvent::Progress { message, percentage })) => {
-                    println!("{}", json!({"progress": {"message": message, "percentage": percentage}}))
-                }
+                Some(Ok(Frame::Item(data))) => println!("{data}"),
+                Some(Ok(Frame::Progress(progress))) => println!("{}", json!({"progress": progress})),
                 Some(Err(e)) => {
                     println!("{}", json!({"error": described(&e)}));
                     std::process::exit(1)
@@ -107,9 +112,7 @@ async fn client() {
 /// An error, with what the kit looks for in it: its kind and its code.
 fn described(e: &ClientError) -> Value {
     match e {
-        ClientError::Remote { message, code, recoverable } => {
-            json!({"remote": message, "code": code, "recoverable": recoverable})
-        }
+        ClientError::Remote(error) => json!({"remote": error.to_string(), "kind": error.kind(), "error": error}),
         other => json!({"client": other.to_string(), "debug": format!("{other:?}")}),
     }
 }

@@ -10,13 +10,13 @@
 #![allow(dead_code)]
 
 use futures::StreamExt;
-use plexus_client::{watch, ClientEvent, Watched3, WsTransport};
+use plexus_client::{watch, Watched3, WsTransport};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tickets_api::{TicketsClient, TicketsEvent};
+use tickets_api::{TicketEvent, TicketsClient};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -197,7 +197,7 @@ async fn watch_frames_equal_three_hand_made() {
         let mut b = client.watch(Some("B".into()));
         let mut c = client.watch(Some("C".into()));
         for s in [&mut a, &mut b, &mut c] {
-            assert!(matches!(s.next().await, Some(Ok(ClientEvent::Data(TicketsEvent::NotFound { .. })))));
+            assert!(matches!(s.next().await, Some(Ok(TicketEvent::NotFound { .. }))));
         }
     }
     let hand_frames = by_hand.wait_for_frames(6).await;
@@ -211,9 +211,9 @@ async fn watch_frames_equal_three_hand_made() {
         let mut seen = Vec::new();
         while seen.len() < 3 {
             match s.next().await.expect("open") {
-                Watched3::A(Ok(ClientEvent::Data(TicketsEvent::NotFound { id }))) => seen.push(("A", id)),
-                Watched3::B(Ok(ClientEvent::Data(TicketsEvent::NotFound { id }))) => seen.push(("B", id)),
-                Watched3::C(Ok(ClientEvent::Data(TicketsEvent::NotFound { id }))) => seen.push(("C", id)),
+                Watched3::A(Ok(TicketEvent::NotFound { id })) => seen.push(("A", id)),
+                Watched3::B(Ok(TicketEvent::NotFound { id })) => seen.push(("B", id)),
+                Watched3::C(Ok(TicketEvent::NotFound { id })) => seen.push(("C", id)),
                 other => panic!("{other:?}"),
             }
         }

@@ -27,18 +27,28 @@
 //!
 //! ```text
 //!   generated client method
-//!         │  builds the by-name params object from typed arguments
+//!         │  builds the by-name params object from typed arguments (Params)
 //!         ▼
-//!   Transport::call(MethodRef, Value) ──► ItemStream    (wire items)
+//!   Transport::call(MethodRef, Value) ──► ItemStream          (wire items)
 //!         │
-//!         ▼
-//!   decode::<E>(..)                   ──► EventStream<E> (typed events)
+//!         ├─ one-item method  ── call_one ──► Result<I, ClientError>
+//!         └─ many-item method ──────────────► MethodStream<'_, I, P, {Ns}Event>
+//!                                               ├─ Stream<Item = Result<I, ClientError>>   (progress dropped)
+//!                                               ├─ .with_progress() → Result<Frame<I, P>, ClientError>
+//!                                               └─ .events()        → Result<{Ns}Event, ClientError>
 //! ```
 //!
-//! Two failure layers stay apart the whole way down: a
-//! [`TransportError`] is the connection failing, a
-//! [`ClientError::Remote`] is the server answering with an in-band `error`
-//! item. See [`error`].
+//! `I` is the method's item — a plain `T`, or `Result<T, E>` decoded from its
+//! `{"ok"}` / `{"err"}` wire form — `P` its progress type ([`NoProgress`] when
+//! it declares none) and `{Ns}Event` the activation's aggregate, which the
+//! macro derives beside the client.
+//!
+//! Two layers stay apart the whole way down (RETURNS-1 decision 8): a
+//! [`ClientError`] is the call failing — the connection
+//! ([`ClientError::Transport`]) or the server's typed error frame
+//! ([`ClientError::Remote`]`(`[`RemoteError`]`)`) — and an `err` item is the
+//! activation saying no, which arrives as a value. `?` is the call failing;
+//! a match on the item is the activation's answer. See [`error`].
 //!
 //! ## Transports
 //!
@@ -67,6 +77,24 @@
 //! Both features expose the same `WsTransport` type and the same
 //! `WsTransport::connect(url, hub_namespace)`, so a consumer picks the
 //! backend in `Cargo.toml` and changes no code. See [`ws`].
+//!
+//! ## The 0.7 vocabulary
+//!
+//! The types every party to a precise-returns call names — the server
+//! author, the macro, the generated client, the generators' mirrors — live
+//! here once, because this is the one crate all of them link:
+//!
+//! | Type | What it is | On the wire |
+//! |---|---|---|
+//! | [`Progress<T, P = Note>`](Progress) | a method's item when it reports progress: `Update(P)` \| `Item(T)` | never as a whole: `Update` → progress frame, `Item` → data frame |
+//! | [`Note`] | the default progress type | `{"message": …, "percentage": …}` |
+//! | [`Frame<I, P>`](Frame) | what an opted-in client stream yields: `Item(I)` \| `Progress(P)` | client-side only |
+//! | [`RemoteError`] (+ [`ParamProblem`], [`DenyReason`]) | why a call failed — typed, exhaustive | `kind`-tagged object |
+//! | [`wire_result`] | serde `with` module for a Result item | `{"ok": t}` \| `{"err": e}` |
+//!
+//! `Note` and `RemoteError` implement `schemars::JsonSchema` under the
+//! `schema` feature (off by default: a wasm32 consumer that only decodes
+//! needs none of it).
 
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
@@ -75,20 +103,34 @@ pub mod contract;
 pub mod decode;
 pub mod envelope;
 pub mod error;
-pub mod event;
+pub mod frame;
 pub mod memory;
+pub mod method_stream;
+pub mod params;
+pub mod progress;
+pub mod remote_error;
+/// RETURNS-36: a peer on plexus-wire's spec as main wrote it, read as 0.8.
+pub mod spec05;
 pub mod transport;
 pub mod watch;
+pub mod wire_result;
 
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub mod ws;
 
-pub use contract::{error_events, into_events, owned_call, owned_call_raw, BoxStream, FromClientError};
-pub use decode::{collect_data, decode, decode_raw, error_stream, EventStream};
+pub use contract::{
+    error_events, into_events, owned_call, owned_call_raw, trait_many, trait_one, trait_progress, trait_result_progress,
+    BoxFuture, BoxStream, FromClientError, MaybeSend,
+};
+pub use decode::{decode, decode_raw, decode_result, decode_with_progress};
 pub use envelope::{Content, RawItem, StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};
-pub use event::ClientEvent;
+pub use frame::Frame;
 pub use memory::MemoryTransport;
+pub use method_stream::{call_one, Decoder, Events, MethodStream, NoProgress, WithProgress};
+pub use params::Params;
+pub use progress::{Note, Progress};
+pub use remote_error::{DenyReason, OtherError, ParamProblem, RemoteError};
 pub use transport::{ItemStream, MethodRef, RawItemStream, Transport};
 pub use watch::{
     watch, watch_with, Errors, Fallible, StopOnError, Watch, Watched10, Watched11, Watched12, Watched2, Watched3,
@@ -99,10 +141,12 @@ pub use watch::{
 #[cfg(any(feature = "ws-native", feature = "ws-web"))]
 pub use ws::WsTransport;
 
-/// Re-exported so generated client code never needs `serde_json` in the
-/// consuming crate's own `Cargo.toml`.
+/// Re-exported so generated client code never needs `serde` or `serde_json`
+/// in the consuming crate's own `Cargo.toml`: the `{Ns}Event` aggregate
+/// derives through `__rt::serde` (`#[serde(crate = "…")]`).
 #[doc(hidden)]
 pub mod __rt {
+    pub use serde;
     pub use serde_json;
     pub use crate::transport::join_path;
 }

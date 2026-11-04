@@ -12,7 +12,7 @@ use futures::executor::block_on;
 use futures::stream::{self, Stream, StreamExt};
 use futures::FutureExt;
 use plexus_client::{
-    decode, watch, watch_with, ClientError, ClientEvent, Errors, MemoryTransport, MethodRef, StreamItem,
+    decode, watch, watch_with, ClientError, Errors, MemoryTransport, MethodRef, StreamItem,
     Transport, Watched12, Watched2, Watched3,
 };
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ const TICKETS_WATCH: MethodRef = MethodRef::new("tickets", "watch");
 const CHATS_WATCH: MethodRef = MethodRef::new("chats", "watch");
 const DEPLOYMENTS_WATCH: MethodRef = MethodRef::new("deployments", "watch");
 
-type Item<E> = Result<ClientEvent<E>, ClientError>;
+type Item<E> = Result<E, ClientError>;
 
 #[test]
 fn exact_union_match_without_wildcard() {
@@ -64,22 +64,19 @@ fn exact_union_match_without_wildcard() {
         // No `_` arm: a fourth source, or a new ChatEv variant, fails this
         // compile rather than falling through.
         match it {
-            Watched3::A(Ok(ClientEvent::Data(TicketEv { id }))) => {
+            Watched3::A(Ok(TicketEv { id })) => {
                 assert_eq!(id, "MNG-1");
                 tickets += 1
             }
-            Watched3::B(Ok(ClientEvent::Data(ChatEv::Posted { message }))) => {
+            Watched3::B(Ok(ChatEv::Posted { message })) => {
                 assert_eq!(message, 7);
                 posted += 1
             }
-            Watched3::B(Ok(ClientEvent::Data(ChatEv::Read { .. }))) => read += 1,
-            Watched3::C(Ok(ClientEvent::Data(DeployEv(r)))) => {
+            Watched3::B(Ok(ChatEv::Read { .. })) => read += 1,
+            Watched3::C(Ok(DeployEv(r))) => {
                 assert_eq!(r, "R1");
                 deploys += 1
             }
-            Watched3::A(Ok(ClientEvent::Progress { .. }))
-            | Watched3::B(Ok(ClientEvent::Progress { .. }))
-            | Watched3::C(Ok(ClientEvent::Progress { .. })) => panic!("no progress was scripted"),
             Watched3::A(Err(e)) | Watched3::B(Err(e)) | Watched3::C(Err(e)) => panic!("{e}"),
         }
     }
@@ -170,9 +167,13 @@ fn error_item_others_go_on() {
             TICKETS_WATCH,
             vec![StreamItem::Error {
                 metadata: None,
-                message: "forbidden".into(),
-                code: Some("-32003".into()),
                 recoverable: false,
+                message: Some("forbidden".into()),
+                code: Some("-32003".into()),
+                error: plexus_client::RemoteError::Forbidden {
+                    reason: plexus_client::DenyReason::NotAccepted,
+                },
+                fields: Default::default(),
             }],
         )
         .script_events(CHATS_WATCH, &[ChatEv::Posted { message: 1 }, ChatEv::Posted { message: 2 }]);
@@ -193,7 +194,7 @@ fn error_item_others_go_on() {
     assert!(errors[0].is_remote(), "the error names its source by its variant: {:?}", errors[0]);
     let posted = items
         .iter()
-        .filter(|w| matches!(w, Watched2::B(Ok(ClientEvent::Data(ChatEv::Posted { .. })))))
+        .filter(|w| matches!(w, Watched2::B(Ok(ChatEv::Posted { .. }))))
         .count();
     assert_eq!(posted, 2);
 }
@@ -317,9 +318,9 @@ fn perf_per_item_overhead() {
     println!("perf rust: bare={b:.2} ns/item merged={m:.2} ns/item overhead={:.2} ns/item", m - b);
     println!(
         "memory rust: merge of 3 boxed streams = {} bytes inline ({} per held subscription beyond the stream itself)",
-        std::mem::size_of::<plexus_client::Watching3<plexus_client::EventStream<'static, u8>, plexus_client::EventStream<'static, u8>, plexus_client::EventStream<'static, u8>>>(),
-        (std::mem::size_of::<plexus_client::Watching3<plexus_client::EventStream<'static, u8>, plexus_client::EventStream<'static, u8>, plexus_client::EventStream<'static, u8>>>()
-            - 3 * std::mem::size_of::<plexus_client::EventStream<'static, u8>>())
+        std::mem::size_of::<plexus_client::Watching3<plexus_client::MethodStream<'static, u8>, plexus_client::MethodStream<'static, u8>, plexus_client::MethodStream<'static, u8>>>(),
+        (std::mem::size_of::<plexus_client::Watching3<plexus_client::MethodStream<'static, u8>, plexus_client::MethodStream<'static, u8>, plexus_client::MethodStream<'static, u8>>>()
+            - 3 * std::mem::size_of::<plexus_client::MethodStream<'static, u8>>())
             / 3
     );
     assert!(m - b < 1000.0, "≤ 1 µs per item: {:.2} ns", m - b);

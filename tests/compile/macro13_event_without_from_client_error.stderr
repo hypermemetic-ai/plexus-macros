@@ -10,16 +10,17 @@ help: the trait `FromClientError` is not implemented for `EchoEvent`
  8 | pub enum EchoEvent {
    | ^^^^^^^^^^^^^^^^^^
    = note: the client's implementation of the trait yields a client failure as `EchoEvent::from_client_error(err)`; implement `plexus_client::FromClientError` for `EchoEvent` (usually its in-band `Error { message }` variant)
-help: the trait `FromClientError` is implemented for `std::string::String`
+   = help: the following other types implement trait `FromClientError`:
+             AuthEvent
+             Result<T, E>
+             plexus_client::Progress<T, P>
+             plexus_core::activations::echo::EchoEvent
+             std::string::String
+note: required by a bound in `trait_many`
   --> plexus-client/src/contract.rs
    |
-   | impl FromClientError for String {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `error_events`
-  --> plexus-client/src/contract.rs
-   |
-   | pub fn error_events<'a, E>(error: ClientError) -> BoxStream<'a, E>
-   |        ------------ required by a bound in this function
-   | where
-   |     E: FromClientError + 'a,
-   |        ^^^^^^^^^^^^^^^ required by this bound in `error_events`
+   | pub fn trait_many<I>(
+   |        ---------- required by a bound in this function
+...
+   |     I: FromClientError + MaybeSend + 'static,
+   |        ^^^^^^^^^^^^^^^ required by this bound in `trait_many`
