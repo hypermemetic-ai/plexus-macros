@@ -23,3 +23,9 @@ async-trait = "0.1"
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }
 tokio = { version = "1.0", features = ["full"] }
 uuid = { version = "1.0", features = ["v4", "v5"] }
+
+[dev-dependencies]
+# examples/serve.rs: the service on a WebSocket, for synapse to ask.
+plexus-transport = { path = "../../../plexus-transport", default-features = false }
+anyhow = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
