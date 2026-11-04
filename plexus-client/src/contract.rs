@@ -411,6 +411,6 @@ mod tests {
         );
         let s = into_events::<Ev, _>(decode::<Ev>(owned_call(Arc::new(t), COUNT, serde_json::json!({}))));
         let got: Vec<Ev> = futures::executor::block_on(s.collect());
-        assert_eq!(got, vec![Ev::N(1), Ev::N(2), Ev::Error("remote error: execution failed: no".into())]);
+        assert_eq!(got, vec![Ev::N(1), Ev::N(2), Ev::Error("remote error: no".into())]);
     }
 }

@@ -234,7 +234,7 @@ async fn a_client_failure_is_the_event_types_own_error_and_ends_the_stream() {
     );
     let client: Box<dyn Echo> = Box::new(EchoClient::new(Arc::new(t)));
     let got: Vec<EchoEvent> = client.say("hi".into()).collect().await;
-    assert_eq!(got, vec![EchoEvent::Error { message: "remote error: execution failed: no".into() }]);
+    assert_eq!(got, vec![EchoEvent::Error { message: "remote error: no".into() }]);
 }
 
 /// `namespace = "other"` overrides the stem; `methods = marked` publishes

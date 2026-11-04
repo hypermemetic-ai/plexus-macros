@@ -1,26 +1,13 @@
-error: `pub async fn total(&self, …)` returns `futures :: stream :: BoxStream < 'static, u32 >`, which is not a signature form, so it cannot go on the wire — and every `pub async fn` on `&self` of an activation is a wire method. Make `total` non-`pub`, or write `methods = marked` on the activation (then only #[plexus_macros::method]s are on the wire).
-  --> tests/compile/macro13_pub_async_non_stream.rs:16:18
+error: `pub async fn total(&self, …)` returns `u32`, not `impl Stream<Item = E>`, so it cannot go on the wire — and every `pub async fn` on `&self` of an activation is a wire method. Make `total` non-`pub`, or write `methods = marked` on the activation (then only #[plexus_macros::method]s are on the wire).
+  --> tests/compile/macro13_pub_async_non_stream.rs:15:18
    |
-16 |     pub async fn total(&self) -> futures::stream::BoxStream<'static, u32> {
+15 |     pub async fn total(&self) -> u32 {
    |                  ^^^^^
 
-error: #[plexus_macros::method] `total`: the return type is not one of the six signature forms:
-           -> T
-           -> Result<T, E>
-           -> impl Stream<Item = T>
-           -> impl Stream<Item = Result<T, E>>
-           -> impl Stream<Item = Progress<T, P>>
-           -> impl Stream<Item = Result<Progress<T, P>, E>>
-       A boxed or named stream (`BoxStream`, `Pin<Box<dyn Stream>>`, `PlexusStream`) is not recognised — return `impl Stream<Item = ...> + Send + 'static` instead. `Result` (two type arguments) and `Progress` (one or two) are recognised by name; an alias of either is a plain `T`.
-  --> tests/compile/macro13_pub_async_non_stream.rs:16:34
-   |
-16 |     pub async fn total(&self) -> futures::stream::BoxStream<'static, u32> {
-   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
 warning: unused import: `futures::Stream`
- --> tests/compile/macro13_pub_async_non_stream.rs:5:5
+ --> tests/compile/macro13_pub_async_non_stream.rs:4:5
   |
-5 | use futures::Stream;
+4 | use futures::Stream;
   |     ^^^^^^^^^^^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
