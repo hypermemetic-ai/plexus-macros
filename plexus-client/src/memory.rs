@@ -95,8 +95,8 @@ impl MemoryTransport {
 
     /// The params of the single call to `method`, or `None` if it was not
     /// called exactly once.
-    pub fn params_of(&self, method: MethodRef) -> Option<Value> {
-        let q = method.qualified();
+    pub fn params_of(&self, method: impl std::borrow::Borrow<MethodRef>) -> Option<Value> {
+        let q = method.borrow().qualified();
         let calls = self.calls.lock().expect("calls lock");
         let mut hits = calls.iter().filter(|(m, _)| *m == q);
         let first = hits.next()?;

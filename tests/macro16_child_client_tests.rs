@@ -124,21 +124,25 @@ fn method_ref_at_a_path() {
     let m = MethodRef::new("inputs", "answer");
     assert_eq!(m.qualified(), "inputs.answer");
     assert_eq!(m.path(), "inputs");
-    let at = m.at("tickets.inputs");
+    let at = m.clone().at("tickets.inputs");
     assert_eq!(at.qualified(), "tickets.inputs.answer");
     assert_eq!(at.to_string(), "tickets.inputs.answer");
     assert_eq!(at.namespace(), "inputs");
     assert_eq!(at.method(), "answer");
     // a path equal to the namespace, or empty, is the reference itself
-    assert_eq!(m.at("inputs"), m);
-    assert_eq!(m.at(""), m);
+    assert_eq!(m.clone().at("inputs"), m);
+    assert_eq!(m.clone().at(""), m);
 }
 
+/// RETURNS-46: a joined path is the client's own (no process-wide set):
+/// equal by its text, whatever holds it.
 #[test]
-fn joined_paths_are_interned() {
-    let a = plexus_client::__rt::join_path("tickets", "inputs");
-    let b = plexus_client::__rt::join_path("tickets", "inputs");
-    assert_eq!(a, "tickets.inputs");
-    assert!(std::ptr::eq(a, b), "one allocation per distinct pair");
-    assert_eq!(plexus_client::__rt::join_path("", "tickets"), "tickets");
+fn joined_paths_are_the_clients_own() {
+    use plexus_client::RoutePath;
+    let a = RoutePath::from_static("tickets").join("inputs");
+    let b = RoutePath::from_static("tickets").join("inputs");
+    assert_eq!(a, b);
+    assert_eq!(a.as_str(), "tickets.inputs");
+    assert!(!std::ptr::eq(a.as_str(), b.as_str()), "each its own");
+    assert_eq!(RoutePath::EMPTY.join("tickets").as_str(), "tickets");
 }

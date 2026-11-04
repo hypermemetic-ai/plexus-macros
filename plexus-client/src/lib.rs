@@ -110,6 +110,7 @@ pub mod method_stream;
 pub mod params;
 pub mod progress;
 pub mod remote_error;
+pub mod route;
 /// RETURNS-36: a peer on plexus-wire's spec as main wrote it, read as 0.8.
 pub mod spec05;
 pub mod transport;
@@ -125,15 +126,16 @@ pub use contract::{
 };
 pub use decode::{decode, decode_raw, decode_result, decode_with_progress};
 pub use envelope::{Content, RawItem, StreamItem, StreamMetadata};
-pub use error::{ClientError, TransportError, TransportErrorKind};
+pub use error::{ClientError, NameRefusal, TransportError, TransportErrorKind};
 pub use frame::Frame;
-pub use lift::{Aggregated, Lift};
+pub use lift::{Aggregated, HasClient, Lift, Named, Root, Static};
+pub use route::Route;
 pub use memory::MemoryTransport;
 pub use method_stream::{call_one, Decoder, Events, MethodStream, NoProgress, WithProgress};
 pub use params::Params;
 pub use progress::{Note, Progress};
 pub use remote_error::{DenyReason, OtherError, ParamProblem, RemoteError};
-pub use transport::{ItemStream, MethodRef, RawItemStream, Transport};
+pub use transport::{ItemStream, MethodRef, RawItemStream, RoutePath, Transport};
 pub use watch::{
     watch, watch_with, Errors, Fallible, StopOnError, Watch, Watched10, Watched11, Watched12, Watched2, Watched3,
     Watched4, Watched5, Watched6, Watched7, Watched8, Watched9, Watching10, Watching11, Watching12, Watching2,
@@ -150,5 +152,4 @@ pub use ws::WsTransport;
 pub mod __rt {
     pub use serde;
     pub use serde_json;
-    pub use crate::transport::{join_dynamic, join_path};
 }

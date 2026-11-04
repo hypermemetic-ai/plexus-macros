@@ -26,43 +26,43 @@
 //!     #[serde(rename = "import")] Import(#[serde(with = "plexus_client::wire_result")] Result<ImportSummary, ImportError>),
 //!     // RETURNS-46: one variant per #[child], carrying the child's aggregate
 //!     #[serde(rename = "inputs")] Inputs(<InputsClient<()> as plexus_client::Aggregated>::Event),
-//!     #[serde(rename = "item")]   Item { name: String, event: <ItemClient<()> as plexus_client::Aggregated>::Event },
+//!     #[serde(rename = "item")]   Item { name: Arc<str>, event: Box<<ItemClient<()> as plexus_client::Aggregated>::Event> },
 //! }
 //! impl From<InputsEvent> for TicketsEvent { .. }                 // one per static child
 //!
-//! pub struct TicketsClient<T, A = TicketsEvent> { transport: T, path: &'static str, lift: Lift<TicketsEvent, A> }
+//! pub struct TicketsClient<T, L = Root> { transport: T, route: Route, lift: L }
 //!
 //! impl<T> TicketsClient<T> {
 //!     pub const NAMESPACE: &'static str = "tickets";
 //!     pub fn new(transport: T) -> Self;
-//!     pub fn at(transport: T, path: &'static str) -> Self;   // MACRO-16
+//!     pub fn at(transport: T, path: impl Into<RoutePath>) -> Self;   // MACRO-16
 //!     pub const METHOD_GET: plexus_client::MethodRef = ..;   // one per method (T: Transport)
 //! }
 //!
-//! impl<T, A> TicketsClient<T, A> {
-//!     pub fn lifted(transport: T, path: &'static str, lift: Lift<TicketsEvent, A>) -> Self;  // RETURNS-46
-//!     pub fn path(&self) -> &'static str;
+//! impl<T, L> TicketsClient<T, L> {
+//!     pub fn lifted(transport: T, route: Route, lift: L) -> Self;  // RETURNS-46
+//!     pub fn path(&self) -> &str;
 //!     pub fn transport(&self) -> &T;
 //!     pub fn into_transport(self) -> T;
 //! }
 //!
-//! impl<T: plexus_client::Transport, A: 'static> TicketsClient<T, A> {
+//! impl<T: plexus_client::Transport, L: Lift<TicketsEvent>> TicketsClient<T, L> {
 //!     pub async fn health(&self) -> Result<Health, ClientError>;     // one
 //!     pub async fn get(&self, id: String)
 //!         -> Result<Result<Ticket, GetError>, ClientError>;          // one, fallible
 //!     pub fn list(&self, epic: Option<String>)                       // many
-//!         -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, A>;
+//!         -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent, L>;
 //!     pub fn import(&self, source: String)                           // many, with progress
-//!         -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, A>;
-//!     pub fn inputs(&self) -> InputsClient<&T, A>;                  // a static #[child], MACRO-16
-//!     pub fn item(&self, name: &str) -> ItemClient<&T, A>;         // a dynamic #[child], RETURNS-46
+//!         -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent, L>;
+//!     pub fn inputs(&self) -> InputsClient<&T, Static<L, InputsEvent, TicketsEvent>>;   // a static #[child]
+//!     pub fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>;  // a dynamic #[child]
 //! }
 //! ```
 //!
 //! | method form (server) | client method | yields |
 //! |---|---|---|
 //! | one: `-> T` / `-> Result<T, E>` | `async fn m(&self, ..) -> Result<I, ClientError>` | `I` = `T` / `Result<T, E>` |
-//! | many: `-> impl Stream<Item = …>` | `fn m(&self, ..) -> MethodStream<'_, I, P, A>` (`A` = `{Ns}Event` unless reached through a parent) | `Result<I, ClientError>`; `.with_progress()`, `.events()` |
+//! | many: `-> impl Stream<Item = …>` | `fn m(&self, ..) -> MethodStream<'_, I, P, {Ns}Event, L>` (`.events()` yields `L::Out`: `{Ns}Event` unless reached through a parent) | `Result<I, ClientError>`; `.with_progress()`, `.events()` |
 //!
 //! `P` is the declared progress type (`Note` for `Progress<T>`), or
 //! `plexus_client::NoProgress` when the item is not a `Progress`. A one-item
@@ -93,13 +93,17 @@
 //! client's name is the one thing the parent knows (the stem of the
 //! accessor's return type); the aggregate is named by the child's
 //! namespace, which may differ. A dynamic child's variant also carries the
-//! instance's name. Lifting is the client's, not the stream's: every client
-//! carries a `Lift` from its aggregate into `A`, and an accessor composes
-//! its variant onto it, so a call anywhere below a client yields that
-//! client's aggregate — the only form that reaches a grandchild in one step
-//! and puts a dynamic instance's name in its events without the caller
-//! repeating it. `From` per static child is the one-level form for a
-//! child's own client. A child that is the activation itself is boxed.
+//! instance's name (`Arc<str>`) and boxes its event: every servable cycle
+//! passes through a dynamic child, so that breaks them all while a static
+//! level allocates nothing. `-> Self` is the recursive case, boxed.
+//! Lifting is the client's, and a type: `XClient<T, L = Root>`, `L` one of
+//! `Root`, `Static`, `Named`; an accessor wraps its variant onto its own
+//! lift, so a call anywhere below a client yields that client's aggregate —
+//! the only form that reaches a grandchild in one step and puts a dynamic
+//! instance's name in its events without the caller repeating it. `From`
+//! per static child is the one-level form for a child's own client. A
+//! `#[child(opaque)]` is left out, and a child without a client is held to
+//! `HasClient` in the server half, whose message says to add `opaque`.
 //!
 //! **The aggregate derives through `plexus_client::__rt::serde`**
 //! (`#[serde(crate = "…")]`), so the emitted code needs nothing in the
@@ -255,18 +259,45 @@ pub(crate) fn generate(
     methods: &[MethodInfo],
     children: &[ChildMethodInfo],
     client_path: &syn::Path,
-) -> syn::Result<TokenStream> {
+) -> syn::Result<(TokenStream, TokenStream)> {
     let event_ty = derived_ident(
         &aggregate_name_for(namespace, methods),
         &format!("the namespace `{namespace}`"),
         Span::call_site(),
     )?;
+    // RETURNS-46: a `#[child(opaque)]` has no client — no variant, no
+    // accessor. Every child is a segment an instance name must not be.
     let tree = children
         .iter()
+        .filter(|c| !c.opaque)
         .map(|c| ChildNode::of(c, client_ty, &event_ty, client_path))
         .collect::<syn::Result<Vec<ChildNode>>>()?;
+    let reserved = Reserved {
+        statics: children
+            .iter()
+            .filter(|c| matches!(c.kind, ChildMethodKind::Static))
+            .map(|c| c.fn_name.to_string())
+            .collect(),
+        methods: methods.iter().map(|m| m.method_name.clone()).chain(["schema".to_string()]).collect(),
+    };
     let child_accessors: Vec<TokenStream> =
-        tree.iter().map(|n| child_accessor(n, namespace, &event_ty, client_path)).collect();
+        tree.iter().map(|n| child_accessor(n, namespace, &event_ty, client_path, &reserved)).collect();
+    // RETURNS-46: in the server half, where the child's type exists, each
+    // child is held to having a client — so a child without one is told to
+    // be `#[child(opaque)]`, not only that `XClient` is not found.
+    let server_checks: Vec<TokenStream> = tree
+        .iter()
+        .filter(|n| !n.recursive)
+        .map(|n| {
+            let ty = &n.child_ty;
+            quote! {
+                const _: fn() = || {
+                    fn __plexus_child_needs_a_client<C: #client_path::HasClient>() {}
+                    __plexus_child_needs_a_client::<#ty>();
+                };
+            }
+        })
+        .collect();
     let wire_result_path = path_string(quote! { #client_path::wire_result });
     let serde_path = path_string(quote! { #client_path::__rt::serde });
 
@@ -377,13 +408,11 @@ pub(crate) fn generate(
                     pub async fn #fn_ident(&self #(, #sig_params)*)
                         -> ::core::result::Result<#item_ty, #client_path::ClientError>
                     {
-                        #client_path::call_one(
-                            &self.transport,
-                            #client_ty::<T>::#const_ident.at(self.path),
-                            #params,
-                            #decoder,
-                        )
-                        .await
+                        let (__method, __params) = match self.route.method(#client_ty::<T>::#const_ident) {
+                            ::core::result::Result::Ok(m) => (m, #params),
+                            ::core::result::Result::Err(e) => (#client_ty::<T>::#const_ident, ::core::result::Result::Err(e)),
+                        };
+                        #client_path::call_one(&self.transport, __method, __params, #decoder).await
                     }
                 }
             }
@@ -398,23 +427,21 @@ pub(crate) fn generate(
                 let doc = format!(
                     "{doc}\n\nMany items, as a stream of `Result<item, ClientError>`; \
                      progress is dropped unless opted in with `.with_progress()`, and \
-                     `.events()` yields `{event_ty}::{variant}` — lifted into the \
-                     aggregate `A` of the client this one was reached from (RETURNS-46)."
+                     `.events()` yields `{event_ty}::{variant}` — lifted by `L` into the \
+                     aggregate of the client this one was reached from (RETURNS-46)."
                 );
                 quote! {
                     #[allow(clippy::too_many_arguments)]
                     #[doc = #doc]
                     pub fn #fn_ident(&self #(, #sig_params)*)
-                        -> #client_path::MethodStream<'_, #item_ty, #progress_ty, A>
+                        -> #client_path::MethodStream<'_, #item_ty, #progress_ty, #event_ty, L>
                     {
-                        #client_path::MethodStream::call(
-                            &self.transport,
-                            #client_ty::<T>::#const_ident.at(self.path),
-                            #params,
-                            #decoder,
-                            #event_ty::#variant,
-                        )
-                        .lift(::core::clone::Clone::clone(&self.lift))
+                        let (__method, __params) = match self.route.method(#client_ty::<T>::#const_ident) {
+                            ::core::result::Result::Ok(m) => (m, #params),
+                            ::core::result::Result::Err(e) => (#client_ty::<T>::#const_ident, ::core::result::Result::Err(e)),
+                        };
+                        #client_path::MethodStream::call(&self.transport, __method, __params, #decoder, #event_ty::#variant)
+                            .lifted(::core::clone::Clone::clone(&self.lift))
                     }
                 }
             }
@@ -441,8 +468,9 @@ pub(crate) fn generate(
                 #[doc = #doc]
                 #[serde(rename = #segment)]
                 #variant {
-                    /// The instance's name: its route segment.
-                    name: ::std::string::String,
+                    /// The instance's name: its route segment, shared by
+                    /// every event of the instance.
+                    name: ::std::sync::Arc<str>,
                     /// The instance's event, in its own aggregate.
                     event: #payload,
                 },
@@ -460,12 +488,13 @@ pub(crate) fn generate(
             let shared = tree.iter().filter(|o| !o.dynamic && o.child_client_key == n.child_client_key).count() > 1;
             if !shared && !n.recursive {
                 let child_event = &n.child_event;
+                let wrapped = if n.boxed { quote! { ::std::boxed::Box::new(event) } } else { quote! { event } };
                 let doc = format!("`{event_ty}::{variant}`: the child `{segment}`'s event, lifted (RETURNS-46).");
                 froms.push(quote! {
                     #[doc = #doc]
                     impl ::core::convert::From<#child_event> for #event_ty {
                         fn from(event: #child_event) -> Self {
-                            #event_ty::#variant(event)
+                            #event_ty::#variant(#wrapped)
                         }
                     }
                 });
@@ -503,7 +532,7 @@ pub(crate) fn generate(
          either is a compile error here, not a runtime surprise."
     );
 
-    Ok(quote! {
+    Ok((quote! {
         #[doc = #event_doc]
         #[derive(
             ::core::fmt::Debug,
@@ -521,34 +550,35 @@ pub(crate) fn generate(
         #(#froms)*
 
         #[doc = #struct_doc]
-        pub struct #client_ty<T, A = #event_ty> {
+        pub struct #client_ty<T, L = #client_path::Root> {
             transport: T,
-            /// MACRO-16: the dotted path this activation is reached at;
-            /// `""` for a service's top-level activation (its namespace).
-            path: &'static str,
-            /// RETURNS-46: this activation's aggregate into `A`, the
-            /// aggregate of the client this one was reached from.
-            lift: #client_path::Lift<#event_ty, A>,
+            /// MACRO-16, RETURNS-46: the dotted path this activation is
+            /// reached at (empty: its namespace), and a refusal when an
+            /// instance name on the way cannot be routed.
+            route: #client_path::Route,
+            /// RETURNS-46: this activation's aggregate into the aggregate
+            /// of the client this one was reached from (`Root`: its own).
+            lift: L,
         }
 
-        impl<T, A> #client_path::Aggregated for #client_ty<T, A> {
+        impl<T, L> #client_path::Aggregated for #client_ty<T, L> {
             type Event = #event_ty;
         }
 
-        impl<T: ::core::fmt::Debug, A> ::core::fmt::Debug for #client_ty<T, A> {
+        impl<T: ::core::fmt::Debug, L> ::core::fmt::Debug for #client_ty<T, L> {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 f.debug_struct(#client_name)
                     .field("transport", &self.transport)
-                    .field("path", &self.path)
+                    .field("path", &self.path())
                     .finish()
             }
         }
 
-        impl<T: ::core::clone::Clone, A> ::core::clone::Clone for #client_ty<T, A> {
+        impl<T: ::core::clone::Clone, L: ::core::clone::Clone> ::core::clone::Clone for #client_ty<T, L> {
             fn clone(&self) -> Self {
                 Self {
                     transport: ::core::clone::Clone::clone(&self.transport),
-                    path: self.path,
+                    route: ::core::clone::Clone::clone(&self.route),
                     lift: ::core::clone::Clone::clone(&self.lift),
                 }
             }
@@ -566,7 +596,7 @@ pub(crate) fn generate(
 
             /// Wrap a transport.
             pub fn new(transport: T) -> Self {
-                Self::lifted(transport, "", #client_path::Lift::identity())
+                Self { transport, route: #client_path::Route::ROOT, lift: #client_path::Root }
             }
 
             /// Wrap a transport, for this activation mounted at `path` —
@@ -574,24 +604,23 @@ pub(crate) fn generate(
             /// for a `#[child]`. `new` is `at(transport, NAMESPACE)`. Its
             /// events are this activation's own aggregate; a parent's child
             /// accessor builds one whose events are the parent's.
-            pub fn at(transport: T, path: &'static str) -> Self {
-                Self::lifted(transport, path, #client_path::Lift::identity())
+            pub fn at(transport: T, path: impl ::core::convert::Into<#client_path::RoutePath>) -> Self {
+                Self { transport, route: #client_path::Route::at(path, #namespace), lift: #client_path::Root }
             }
         }
 
-        impl<T, A> #client_ty<T, A> {
-            /// RETURNS-46: a client at `path` whose calls' `.events()` are
-            /// lifted by `lift` into the aggregate `A` — what a parent's
-            /// child accessor builds (`TreeClient::branch()` is a
-            /// `BranchClient<&T, TreeEvent>`).
-            pub fn lifted(transport: T, path: &'static str, lift: #client_path::Lift<#event_ty, A>) -> Self {
-                Self { transport, path: if path == #namespace { "" } else { path }, lift }
+        impl<T, L> #client_ty<T, L> {
+            /// RETURNS-46: a client on `route` whose calls' `.events()` are
+            /// lifted by `lift` — what a parent's child accessor builds
+            /// (`TreeClient::branch()` lifts into `TreeEvent`).
+            pub fn lifted(transport: T, route: #client_path::Route, lift: L) -> Self {
+                Self { transport, route, lift }
             }
 
             /// The dotted path this client's calls go to: the namespace,
             /// or the child path it was built at.
-            pub fn path(&self) -> &'static str {
-                if self.path.is_empty() { #namespace } else { self.path }
+            pub fn path(&self) -> &str {
+                self.route.path(#namespace)
             }
 
             /// Borrow the underlying transport — for reading a
@@ -611,11 +640,18 @@ pub(crate) fn generate(
             #(#consts)*
         }
 
-        impl<T: #client_path::Transport, A: 'static> #client_ty<T, A> {
+        impl<T: #client_path::Transport, L: #client_path::Lift<#event_ty>> #client_ty<T, L> {
             #(#method_items)*
             #(#child_accessors)*
         }
-    })
+    }, quote! { #(#server_checks)* }))
+}
+
+/// RETURNS-46: what an instance name may not be — a static child's segment
+/// or a method of the parent (the service routes those first).
+struct Reserved {
+    statics: Vec<String>,
+    methods: Vec<String>,
 }
 
 
@@ -627,19 +663,24 @@ struct ChildNode {
     /// The route segment of a static child; a dynamic child's variant tag.
     segment: String,
     dynamic: bool,
+    /// The child's activation type as written (`Inputs`; `Self` when
+    /// recursive) — what the server half holds to having a client.
+    child_ty: Type,
     /// The child's client, `InputsClient` (keeping any module path).
-    child_client: syn::Path,
+    child_client: TokenStream,
     /// `child_client`'s tokens, to tell two children of one type apart.
     child_client_key: String,
-    /// The child is this activation itself (a directory of directories):
-    /// its variant boxes the event, and it gets no `From`.
+    /// The child is this activation itself (`-> Self`, or its own name).
     recursive: bool,
     /// The child's aggregate: `<InputsClient<()> as Aggregated>::Event` — named
     /// through its client, by the rule the client is named by, never guessed
     /// from the type (a child's aggregate is named by its namespace).
     child_event: TokenStream,
-    /// What the parent's variant carries: `child_event`, boxed if recursive.
+    /// What the parent's variant carries: the child's event, boxed. Always
+    /// boxed — two activations may be each other's children (ping has the
+    /// static pong, pong the dynamic ping), a cycle no one expansion sees.
     payload: TokenStream,
+    boxed: bool,
     variant: syn::Ident,
 }
 
@@ -654,7 +695,8 @@ impl ChildNode {
                 &c.return_ty,
                 format!(
                     "#[plexus_macros::activation(client)]: {what} its activation type by name \
-                     (`-> Inputs`) so the client can reach it through `InputsClient`"
+                     (`-> Inputs`) so the client can reach it through `InputsClient`, or be \
+                     marked `#[child(opaque)]`"
                 ),
             ));
         };
@@ -664,45 +706,50 @@ impl ChildNode {
                 "#[plexus_macros::activation(client)]: a #[child]'s return type must be a plain path",
             ));
         }
-        let mut child_client = tp.path.clone();
-        let Some(last) = child_client.segments.last_mut() else {
-            return Err(syn::Error::new_spanned(&c.return_ty, "#[child]: empty return type path"));
+        let segment = c.fn_name.to_string();
+        let variant = derived_ident(&pascal(&segment), &format!("the child `{segment}`"), c.fn_name.span())?;
+        // `-> Self` is this activation, as its own name is.
+        let is_self = tp.path.is_ident("Self");
+        let mut path = tp.path.clone();
+        let (child_client, recursive) = if is_self {
+            (quote! { #client_ty }, true)
+        } else {
+            let single = path.segments.len() == 1;
+            let Some(last) = path.segments.last_mut() else {
+                return Err(syn::Error::new_spanned(&c.return_ty, "#[child]: empty return type path"));
+            };
+            // MACRO-13: a child named `…Activation` has its client named from
+            // the stem (`InputsActivation` → `InputsClient`), as its own
+            // expansion names it.
+            let child_name = last.ident.to_string();
+            let stem = crate::codegen::contract::stem_of(&child_name).unwrap_or(&child_name);
+            last.ident = format_ident!("{}Client", stem, span = last.ident.span());
+            last.arguments = syn::PathArguments::None;
+            let recursive = single && last.ident == *client_ty;
+            (quote! { #path }, recursive)
         };
-        // MACRO-13: a child named `…Activation` has its client named from the
-        // stem (`InputsActivation` → `InputsClient`), as its own expansion names it.
-        let child_name = last.ident.to_string();
-        let stem = crate::codegen::contract::stem_of(&child_name).unwrap_or(&child_name);
-        last.ident = format_ident!("{}Client", stem, span = last.ident.span());
-        last.arguments = syn::PathArguments::None;
-        let recursive = child_client.segments.len() == 1 && last_ident(&child_client) == *client_ty
-            || (child_client.segments.len() == 2
-                && child_client.segments[0].ident == "Self"
-                && last_ident(&child_client) == *client_ty);
         let child_event = if recursive {
             quote! { #event_ty }
         } else {
             quote! { <#child_client<()> as #client::Aggregated>::Event }
         };
-        let payload = if recursive { quote! { ::std::boxed::Box<#child_event> } } else { child_event.clone() };
-        let segment = c.fn_name.to_string();
-        let variant = derived_ident(&pascal(&segment), &format!("the child `{segment}`"), c.fn_name.span())?;
+        let boxed = dynamic || recursive;
+        let payload = if boxed { quote! { ::std::boxed::Box<#child_event> } } else { child_event.clone() };
         Ok(Self {
             fn_name: c.fn_name.clone(),
             description: c.description.clone(),
-            child_client_key: quote! { #child_client }.to_string(),
+            child_client_key: child_client.to_string(),
+            child_ty: child_ty.clone(),
             segment,
             dynamic,
             child_client,
             recursive,
             child_event,
             payload,
+            boxed,
             variant,
         })
     }
-}
-
-fn last_ident(p: &syn::Path) -> syn::Ident {
-    p.segments.last().map(|s| s.ident.clone()).expect("a non-empty path")
 }
 
 /// `T` of `Option<T>`, written any way `is_option_type` accepts.
@@ -720,54 +767,70 @@ fn option_inner(ty: &Type) -> Option<&Type> {
 
 /// The accessor a parent's client gets for one `#[child]`.
 ///
-/// A static child (MACRO-16) — `fn inputs(&self) -> InputsClient<&T, A>`,
+/// A static child (MACRO-16) — `fn inputs(&self) -> InputsClient<&T, Static<L, InputsEvent, TicketsEvent>>`,
 /// whose calls go to `<this client's path>.inputs.<method>`, as the service
 /// routes them. A dynamic child (RETURNS-46) — `fn item(&self, name: &str)
-/// -> ItemClient<&T, A>`, whose calls go to `<this client's path>.<name>.<method>`:
-/// the service routes a name no static child has to the dynamic child, so
-/// the name is the segment and the accessor's own name is not on the wire.
+/// -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`, whose calls go to
+/// `<this client's path>.<name>.<method>`: the service routes a name no
+/// static child has to the dynamic child, so the name is the segment and the
+/// accessor's own name is not on the wire. A name the service would route
+/// elsewhere — empty, dotted, a static child's segment, a method of this
+/// activation — makes a client every call of which fails at once
+/// (`ClientError::InvalidName`); the accessor itself never fails.
 ///
 /// Either way the child's client lifts its events into this client's
-/// aggregate `A` — wrapped in this level's variant (with the name, for a
-/// dynamic child), then lifted as this client's are — so a call anywhere
-/// below a client yields that client's aggregate.
+/// aggregate — wrapped in this level's variant (with the name, for a dynamic
+/// child), then lifted as this client's are — so a call anywhere below a
+/// client yields that client's aggregate.
 ///
 /// The child's client is named from the accessor's return type: its last
 /// path segment's stem with `Client` appended (`Inputs` → `InputsClient`,
 /// keeping any module path), never from the child struct itself — a struct
 /// that is server-only (`server_cfg`) does not exist in the client half. So
-/// the child must have a client too; if it does not, the name does not
-/// resolve and rustc points at the accessor's return type.
-fn child_accessor(n: &ChildNode, namespace: &str, event_ty: &syn::Ident, client: &syn::Path) -> TokenStream {
+/// the child must have a client too, or be `#[child(opaque)]`.
+fn child_accessor(
+    n: &ChildNode,
+    namespace: &str,
+    event_ty: &syn::Ident,
+    client: &syn::Path,
+    reserved: &Reserved,
+) -> TokenStream {
     let fn_name = &n.fn_name;
     let segment = &n.segment;
     let child_client = &n.child_client;
+    let child_event = &n.child_event;
     let variant = &n.variant;
-    let wrap = |event: TokenStream| if n.recursive { quote! { ::std::boxed::Box::new(#event) } } else { event };
     if n.dynamic {
-        let event = wrap(quote! { event });
+        let statics = &reserved.statics;
+        let methods = &reserved.methods;
         let routes = format!(
             "The instance `name` of the dynamic child `{segment}` — its methods go to \
              `{namespace}.<name>.<method>` (or beneath wherever this client is mounted), and \
-             its events are this client's, as `{event_ty}::{variant} {{ name, event }}`."
+             its events are this client's, as `{event_ty}::{variant} {{ name, event }}`. A \
+             name that is empty, holds a `.`, or is a static child's segment or a method of \
+             `{namespace}` is routed elsewhere by the service: every call through it fails at \
+             once with `ClientError::InvalidName`, and nothing is sent."
         );
         let doc = if n.description.is_empty() { routes } else { format!("{}\n\n{routes}", n.description) };
         quote! {
             #[doc = #doc]
-            pub fn #fn_name(&self, name: &str) -> #child_client<&T, A> {
-                let __name = ::std::string::String::from(name);
+            pub fn #fn_name(&self, name: &str)
+                -> #child_client<&T, #client::Named<L, #child_event, #event_ty>>
+            {
                 #child_client::lifted(
                     &self.transport,
-                    #client::__rt::join_dynamic(self.path(), name),
-                    self.lift.after(move |event| #event_ty::#variant {
-                        name: ::core::clone::Clone::clone(&__name),
-                        event: #event,
-                    }),
+                    self.route.instance(#namespace, name, &[#(#statics),*], &[#(#methods),*]),
+                    #client::Named::new(
+                        ::core::clone::Clone::clone(&self.lift),
+                        ::std::sync::Arc::from(name),
+                        |name, event| #event_ty::#variant { name, event: ::std::boxed::Box::new(event) },
+                    ),
                 )
             }
         }
     } else {
-        let event = wrap(quote! { event });
+        let joined = format!("{namespace}.{segment}");
+        let wrapped = if n.boxed { quote! { ::std::boxed::Box::new(event) } } else { quote! { event } };
         let routes = format!(
             "The `{segment}` child — its methods go to `{namespace}.{segment}.<method>` (or \
              beneath wherever this client is mounted), and its events are this client's, as \
@@ -776,11 +839,11 @@ fn child_accessor(n: &ChildNode, namespace: &str, event_ty: &syn::Ident, client:
         let doc = if n.description.is_empty() { routes } else { format!("{}\n\n{routes}", n.description) };
         quote! {
             #[doc = #doc]
-            pub fn #fn_name(&self) -> #child_client<&T, A> {
+            pub fn #fn_name(&self) -> #child_client<&T, #client::Static<L, #child_event, #event_ty>> {
                 #child_client::lifted(
                     &self.transport,
-                    #client::__rt::join_path(self.path(), #segment),
-                    self.lift.after(|event| #event_ty::#variant(#event)),
+                    self.route.child(#segment, #joined),
+                    #client::Static::new(::core::clone::Clone::clone(&self.lift), |event| #event_ty::#variant(#wrapped)),
                 )
             }
         }

@@ -10,14 +10,19 @@ This file starts at 0.7.0; earlier changes are in the git history.
 - RETURNS-46: the aggregate up the tree. `{Ns}Event` gains one variant per
   `#[child]` carrying the child's aggregate — a static child's
   `{"method": "<segment>", "event": <child's>}`, a dynamic child's
-  `{"method": "<child>", "event": {"name": "<instance>", "event": <child's>}}` —
-  and `From<ChildEvent>` per static child. A dynamic child gets an accessor,
-  `fn item(&self, name: &str) -> ItemClient<&T, A>`, reaching
-  `<path>.<name>.<method>`. Every client is `XClient<T, A = XEvent>`: one
-  built by a parent's accessor yields the parent's aggregate from
-  `.events()`. plexus-client: `Lift`, `Aggregated`, `MethodStream::lift`,
-  `__rt::join_dynamic`. A method whose wire name is a child's segment is
-  refused. No change for an activation without children.
+  `{"method": "<child>", "event": {"name": "<instance>", "event": <child's>}}`,
+  its event boxed and its name an `Arc<str>` — and `From<ChildEvent>` per
+  static child. A dynamic child gets an accessor,
+  `fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`,
+  reaching `<path>.<name>.<method>`; a name that is empty, holds a `.`, or is
+  a static child's segment or a method of the parent makes every call through
+  it fail at once with `ClientError::InvalidName` (`NameRefusal`), sending
+  nothing. `#[child(opaque)]`: a child with no client — no accessor, no
+  variant, routed as before. plexus-client: `Lift` (`Root`, `Static`,
+  `Named`), `Aggregated`, `HasClient`, `Route`, `RoutePath`,
+  `MethodStream::lifted`, `ClientError::InvalidName`. A method whose wire
+  name is a child's segment is refused. An activation without children: its
+  aggregate unchanged.
 
 - PERF.115-36: a typed client decodes an item's content straight from the
   wire's text into the method's event, never through a `Value`.
@@ -32,8 +37,28 @@ This file starts at 0.7.0; earlier changes are in the git history.
 
 ### Changed
 
-- RETURNS-46: a generated client is no longer `Copy` (it carries a `Lift`);
-  it is `Clone`, `Debug` and, for `XClient<T>`, `Default` as before.
+- RETURNS-46 breaks, each for a reason:
+  - **A generated client is `XClient<T, L = Root>`**, and a child accessor's
+    return type names its lift: `tickets.inputs()` is
+    `InputsClient<&T, Static<Root, InputsEvent, TicketsEvent>>` (was
+    `InputsClient<&T>`). Code that names it: let it be inferred, or name the
+    child's own client (`InputsClient::at(t, "tickets.inputs")`).
+  - **`.events()` on a call through an accessor yields the ancestor's
+    aggregate** — `tickets.inputs().answer(..).events()` yields
+    `TicketsEvent::Inputs(InputsEvent::Answer(..))`, not `InputsEvent`. Code
+    matching the child's own event there stops compiling; for the child's own
+    aggregate call through the child's own client, `InputsClient::new` /
+    `InputsClient::at`.
+  - **A child must have a client, or be `#[child(opaque)]`** — now a dynamic
+    child too (it had no accessor before). The error says so.
+  - **`MethodRef`'s path is a `RoutePath`** (a `&'static str` or an
+    `Arc<str>`), so `MethodRef` is `Clone`, not `Copy`; `MethodRef::at` takes
+    `impl Into<RoutePath>` (a `&'static str` still works) and `path()`
+    returns `&str`. `XClient::at` takes `impl Into<RoutePath>`; `path()`
+    returns `&str`. `__rt::join_path` is gone: no path is interned any more.
+  - **A generated client is no longer `Copy`**: it is `Clone`, `Debug` and,
+    for `XClient<T>`, `Default`.
+  - `MemoryTransport::params_of` takes `impl Borrow<MethodRef>`.
 
 - `WsTransport` reads each frame in place, not into a `Value`; a call that
   reads `StreamItem`s (`call`) gets the same items, built from their fields.

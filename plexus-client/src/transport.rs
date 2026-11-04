@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use std::fmt;
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// A boxed stream of wire items.
 ///
@@ -34,13 +35,112 @@ pub type RawItemStream<'a> =
 #[cfg(target_arch = "wasm32")]
 pub type RawItemStream<'a> = Pin<Box<dyn Stream<Item = Result<RawItem, TransportError>> + 'a>>;
 
+/// The dotted route a service reaches an activation at: `"tickets"`,
+/// `"tickets.inputs"`, `"tickets.acme"` (a dynamic instance).
+///
+/// RETURNS-46: a path built at run time — a child's, a dynamic instance's —
+/// is the client's own, shared by `Arc` and freed with the last client that
+/// holds it: no process-wide set, nothing leaked, no lock. A path known when
+/// the program is written (a namespace, a `MethodRef` constant) is a
+/// `&'static str` and costs nothing; `""` means "the namespace". So it is
+/// `Cow<'static, str>` with an `Arc` arm: a constant stays `const`, and a
+/// clone of a run-time path is a reference count, not a copy.
+#[derive(Clone)]
+pub struct RoutePath(PathRepr);
+
+#[derive(Clone)]
+enum PathRepr {
+    Static(&'static str),
+    Shared(Arc<str>),
+}
+
+impl RoutePath {
+    /// The empty path: the activation's own namespace.
+    pub const EMPTY: RoutePath = RoutePath(PathRepr::Static(""));
+
+    /// A path known when the program is written.
+    pub const fn from_static(path: &'static str) -> Self {
+        RoutePath(PathRepr::Static(path))
+    }
+
+    /// The path as text.
+    pub fn as_str(&self) -> &str {
+        match &self.0 {
+            PathRepr::Static(s) => s,
+            PathRepr::Shared(s) => s,
+        }
+    }
+
+    /// `true` for the empty path.
+    pub fn is_empty(&self) -> bool {
+        self.as_str().is_empty()
+    }
+
+    /// `"{self}.{segment}"`, or `segment` when `self` is empty — one
+    /// allocation, the new path's own.
+    pub fn join(&self, segment: &str) -> RoutePath {
+        if self.is_empty() {
+            return RoutePath::from(segment.to_owned());
+        }
+        let mut s = String::with_capacity(self.as_str().len() + 1 + segment.len());
+        s.push_str(self.as_str());
+        s.push('.');
+        s.push_str(segment);
+        RoutePath::from(s)
+    }
+}
+
+impl From<&'static str> for RoutePath {
+    fn from(s: &'static str) -> Self {
+        RoutePath::from_static(s)
+    }
+}
+
+impl From<String> for RoutePath {
+    fn from(s: String) -> Self {
+        RoutePath(PathRepr::Shared(Arc::from(s)))
+    }
+}
+
+impl From<Arc<str>> for RoutePath {
+    fn from(s: Arc<str>) -> Self {
+        RoutePath(PathRepr::Shared(s))
+    }
+}
+
+impl PartialEq for RoutePath {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for RoutePath {}
+
+impl std::hash::Hash for RoutePath {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.as_str().hash(h)
+    }
+}
+
+impl fmt::Debug for RoutePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl fmt::Display for RoutePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A fully qualified Plexus method — the activation namespace and the method
 /// name, kept as separate fields because the transports need them
 /// differently:
 ///
 /// | Transport | Uses |
 /// |---|---|
-/// | WebSocket JSON-RPC | `"{path}.{method}"` as the `params.method` of a `{hub}.call` subscription |
+/// | WebSocket JSON-RPC | `"{path}.{method}"` as the `params.method` of a `{service}.call` subscription |
 /// | REST + SSE | `POST /rest/{namespace}/{method}` |
 /// | in-process | `namespace` selects the activation, `method` is passed to `Activation::call` |
 ///
@@ -54,28 +154,32 @@ pub type RawItemStream<'a> = Pin<Box<dyn Stream<Item = Result<RawItem, Transport
 /// (`"tickets.inputs"`); [`MethodRef::qualified`] then answers
 /// `"{path}.{method}"`. Without a path (every [`MethodRef::new`]) the path is
 /// the namespace, exactly as before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// RETURNS-46: the path is a [`RoutePath`] — a dynamic instance's path is a
+/// run-time value — so a `MethodRef` is `Clone`, not `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MethodRef {
     namespace: &'static str,
     method: &'static str,
-    /// The dotted path the activation is reached at; `""` means its own
-    /// namespace (a hub's top-level activation).
-    path: &'static str,
+    /// The dotted path the activation is reached at; empty means its own
+    /// namespace (a service's top-level activation).
+    path: RoutePath,
 }
 
 impl MethodRef {
     pub const fn new(namespace: &'static str, method: &'static str) -> Self {
-        Self { namespace, method, path: "" }
+        Self { namespace, method, path: RoutePath::EMPTY }
     }
 
     /// The same method on the activation mounted at `path` — the dotted
-    /// route from the hub to it, e.g. `"tickets.inputs"` for the `inputs`
-    /// child of `tickets`. A path equal to the namespace, or empty, is the
-    /// top-level reference itself (so `at` never makes two equal methods
-    /// compare unequal).
-    pub fn at(self, path: &'static str) -> Self {
-        if path.is_empty() || path == self.namespace {
-            Self { path: "", ..self }
+    /// route from the service to it, e.g. `"tickets.inputs"` for the
+    /// `inputs` child of `tickets`. A path equal to the namespace, or empty,
+    /// is the top-level reference itself (so `at` never makes two equal
+    /// methods compare unequal).
+    pub fn at(self, path: impl Into<RoutePath>) -> Self {
+        let path = path.into();
+        if path.is_empty() || path.as_str() == self.namespace {
+            Self { path: RoutePath::EMPTY, ..self }
         } else {
             Self { path, ..self }
         }
@@ -94,15 +198,15 @@ impl MethodRef {
 
     /// The dotted path the activation is reached at: the namespace for a
     /// top-level activation, `"tickets.inputs"` for a child.
-    pub const fn path(&self) -> &'static str {
+    pub fn path(&self) -> &str {
         if self.path.is_empty() {
             self.namespace
         } else {
-            self.path
+            self.path.as_str()
         }
     }
 
-    /// The dotted form the hub's `call` method expects, e.g.
+    /// The dotted form the service's `call` method expects, e.g.
     /// `"tickets.watch"`, or `"tickets.inputs.answer"` for a child's method.
     pub fn qualified(&self) -> String {
         format!("{}.{}", self.path(), self.method)
@@ -113,47 +217,6 @@ impl fmt::Display for MethodRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}", self.path(), self.method)
     }
-}
-
-/// MACRO-16: `"{parent}.{child}"` as a `&'static str`, for a generated
-/// client's child accessor. A top-level parent (`""`) needs no join: the
-/// path is `segment` itself. A deeper one is joined once per distinct pair
-/// and kept for the life of the process — the set is the static tree of
-/// `#[child]` accessors, so it is bounded by the program, not by its input.
-#[doc(hidden)]
-pub fn join_path(parent: &'static str, segment: &'static str) -> &'static str {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    if parent.is_empty() {
-        return segment;
-    }
-    static PATHS: OnceLock<Mutex<HashMap<(&'static str, &'static str), &'static str>>> = OnceLock::new();
-    let mut paths = PATHS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-    paths
-        .entry((parent, segment))
-        .or_insert_with(|| Box::leak(format!("{parent}.{segment}").into_boxed_str()))
-}
-
-/// RETURNS-46: `"{parent}.{name}"` as a `&'static str`, for a generated
-/// client's dynamic-child accessor — `tree.item("a")` is reached at
-/// `tree.a`. The name is a runtime value, so unlike [`join_path`]'s set this
-/// one grows with the names a program reaches: one string per distinct
-/// `(parent, name)`, kept for the life of the process, never two for the
-/// same pair. A name is one route segment; one with a `.` in it is routed
-/// as two, as the service would.
-#[doc(hidden)]
-pub fn join_dynamic(parent: &'static str, name: &str) -> &'static str {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-    static PATHS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let joined = if parent.is_empty() { name.to_owned() } else { format!("{parent}.{name}") };
-    let mut paths = PATHS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(known) = paths.get(joined.as_str()) {
-        return known;
-    }
-    let leaked: &'static str = Box::leak(joined.into_boxed_str());
-    paths.insert(leaked);
-    leaked
 }
 
 /// One Plexus wire implementation.

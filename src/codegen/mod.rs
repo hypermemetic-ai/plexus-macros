@@ -808,9 +808,17 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     } else {
         TokenStream::new()
     };
-    let client_impl = match &client_path {
-        Some(path) => client::generate(&names.client_ident, &namespace, &methods, &child_methods, path)?,
-        None => TokenStream::new(),
+    let (client_impl, client_server_checks) = match &client_path {
+        Some(path) => {
+            let (client, checks) = client::generate(&names.client_ident, &namespace, &methods, &child_methods, path)?;
+            // RETURNS-46: this activation has a client, which a parent's
+            // `#[child]` checks for (in the server half, where the type is).
+            let has_client = quote! {
+                impl #impl_generics #path::HasClient for #self_ty #where_clause {}
+            };
+            (client, quote! { #has_client #checks })
+        }
+        None => (TokenStream::new(), TokenStream::new()),
     };
 
     // MACRO-2 / MACRO-13: the cfg the server half is gated on — `server_cfg`
@@ -899,6 +907,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         #children_deprecation_warning
         #mixed_auth_warning
         #required_posture_optional_auth_warning
+        #client_server_checks
     };
 
     let server_half = match &server_gate {

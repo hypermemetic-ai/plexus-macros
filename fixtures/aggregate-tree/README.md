@@ -34,6 +34,10 @@ struct variant, so every generator implements the one rule RETURNS-1 set
 (`tag = "method", content = "event"`), and a reader peels `method`/`event`
 pairs level by level, finding a `name` only where a dynamic child is.
 
+In Rust a dynamic child's event is boxed and its name an `Arc<str>`
+(every cycle a service can serve passes through a dynamic child); a static
+child's is held as is. The JSON is the same either way.
+
 The aggregate is derived by each generator and never sent.
 
 ## Files

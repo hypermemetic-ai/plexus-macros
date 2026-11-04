@@ -32,10 +32,7 @@ async fn a_static_child_of_a_dynamic_one_keeps_the_instances_name() {
     match &evs[1] {
         RootEvent::Org { name, event } => {
             assert_eq!(&**name, "acme");
-            match &**event {
-                OrgEvent::Stats(s) => assert!(matches!(**s, StatsEvent::Tick(N { n: 1 }))),
-                other => panic!("{other:?}"),
-            }
+            assert!(matches!(**event, OrgEvent::Stats(StatsEvent::Tick(N { n: 1 }))), "{event:?}");
         }
         other => panic!("{other:?}"),
     }
@@ -97,7 +94,11 @@ async fn mutual_recursion_compiles_and_nests() {
 
 #[tokio::test]
 async fn children_written_self_are_the_recursive_case() {
-    let t = service(LoopActivation);
+    // Client side only: a service cannot serve a static child that is its
+    // own type (describing its static children never ends), so `Fast`
+    // answers instead of a `DynamicHub`.
+    let _ = LoopActivation;
+    let t = Fast(1);
     let lp = LoopClient::new(&t);
     let me = lp.me();
     let again = me.again("n");

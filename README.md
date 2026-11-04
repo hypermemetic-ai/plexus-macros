@@ -644,7 +644,7 @@ pub enum TicketsEvent {                          // Pascal(namespace) + "Event"
     #[serde(rename = "import")] Import(#[serde(with = "plexus_client::wire_result")] Result<ImportSummary, ImportError>),
 }
 
-pub struct TicketsClient<T, A = TicketsEvent> { /* .. */ }   // A: RETURNS-46, the aggregate .events() lifts into
+pub struct TicketsClient<T, L = plexus_client::Root> { /* .. */ }   // L: RETURNS-46, the lift .events() applies
 
 impl<T> TicketsClient<T> {
     pub const NAMESPACE: &'static str = "tickets";
@@ -662,12 +662,12 @@ impl<T: plexus_client::Transport> TicketsClient<T> {
 
 }
 
-impl<T: plexus_client::Transport, A: 'static> TicketsClient<T, A> {
-    // many items: a MethodStream<'_, item, progress, aggregate>
+impl<T: plexus_client::Transport, L: plexus_client::Lift<TicketsEvent>> TicketsClient<T, L> {
+    // many items: a MethodStream<'_, item, progress, aggregate, lift>
     pub fn list(&self, epic: Option<String>)
-        -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, A>;
+        -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent, L>;
     pub fn import(&self, source: String)
-        -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, A>;
+        -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent, L>;
 }
 ```
 
@@ -722,7 +722,7 @@ while let Some(ev) = all.next().await { state.reduce(ev?) }   // ev: TicketsEven
 | **Transport-generic** | any `plexus_client::Transport` — in-process, WebSocket JSON-RPC, REST + SSE. The emitted code names none of them. |
 | **Two error layers** | `ClientError::Transport` (the connection failed) vs `ClientError::Remote(RemoteError)` (the server answered with a typed `error` frame). An activation's *own* `Err` item stays data. |
 | **Zero drift** | rename a field on an item type and every consumer of the client stops compiling. |
-| **Children** (MACRO-16, RETURNS-46) | a static `#[child] fn inputs(&self) -> Inputs` gives the parent's client `fn inputs(&self) -> InputsClient<&T, TicketsEvent>`, whose calls go to `tickets.inputs.<method>`, the path the service routes. A dynamic `#[child] fn item(&self, name: &str) -> Option<Item>` gives `fn item(&self, name: &str) -> ItemClient<&T, TicketsEvent>`, whose calls go to `tickets.<name>.<method>`. Accessors nest, so `client.inputs().history().tail(..)` goes to `tickets.inputs.history.tail`. The child must have a client too, or `InputsClient` does not resolve at the accessor's return type. `InputsClient::new(t)` alone still sends `inputs.<method>`; `InputsClient::at(t, "tickets.inputs")` mounts it by hand; both yield the child's own aggregate. |
+| **Children** (MACRO-16, RETURNS-46) | a static `#[child] fn inputs(&self) -> Inputs` gives the parent's client `fn inputs(&self) -> InputsClient<&T, Static<L, InputsEvent, TicketsEvent>>`, whose calls go to `tickets.inputs.<method>`, the path the service routes. A dynamic `#[child] fn item(&self, name: &str) -> Option<Item>` gives `fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`, whose calls go to `tickets.<name>.<method>`. `#[child(opaque)]`: neither. Accessors nest, so `client.inputs().history().tail(..)` goes to `tickets.inputs.history.tail`. The child must have a client too, or `InputsClient` does not resolve at the accessor's return type. `InputsClient::new(t)` alone still sends `inputs.<method>`; `InputsClient::at(t, "tickets.inputs")` mounts it by hand; both yield the child's own aggregate. |
 
 ### The aggregate up the tree (RETURNS-46)
 
@@ -730,9 +730,9 @@ An activation's aggregate nests its children's, at every level:
 
 ```rust
 pub enum TreeEvent {
-    #[serde(rename = "count")]  Count(Tick),                                  // a method's item, as before
-    #[serde(rename = "branch")] Branch(<BranchClient<()> as plexus_client::Aggregated>::Event),   // BranchEvent
-    #[serde(rename = "item")]   Item { name: String, event: <ItemClient<()> as plexus_client::Aggregated>::Event },
+    #[serde(rename = "count")]  Count(Tick),                    // a method's item, as before
+    #[serde(rename = "branch")] Branch(BranchEvent),            // a static child: its aggregate
+    #[serde(rename = "item")]   Item { name: Arc<str>, event: Box<ItemEvent> },   // a dynamic child
 }
 impl From<BranchEvent> for TreeEvent { /* TreeEvent::Branch */ }               // one per static child
 ```
@@ -745,14 +745,24 @@ impl From<BranchEvent> for TreeEvent { /* TreeEvent::Branch */ }               /
 A static child's variant is tagged with its route segment; a dynamic
 child's with the child method's name, its content `{name, event}`, the
 instance's name beside its event. A child's aggregate is named through its
-client (`plexus_client::Aggregated`), the rule the accessor names the client
-by, so a child whose namespace is not its stem is found all the same.
+client (`<BranchClient<()> as plexus_client::Aggregated>::Event`), the rule
+the accessor names the client by, so a child whose namespace is not its stem
+is found all the same.
+
+**A dynamic child's event is boxed; a static child's is not.** Every cycle
+a service can serve passes through a dynamic child — a cycle of static
+children is a tree with no bottom, whose schema the service never finishes
+describing — so boxing the dynamic variant breaks every cycle (`ping` with
+the static child `pong`, `pong` with the dynamic child `ping`), and a static
+level costs no allocation. A child that is the activation itself (`-> Self`,
+`-> Option<Self>`, its own name) is boxed too.
 
 **A client reached through a parent's accessor yields the parent's
-aggregate.** Every client is `XClient<T, A = XEvent>` and carries a
-`plexus_client::Lift<XEvent, A>`; an accessor wraps this level's variant
-(and a dynamic child's name) onto the parent's lift. So one listener over a
-subtree is one `select_all`, matched with no wildcard:
+aggregate.** Every client is `XClient<T, L = plexus_client::Root>`; `L` is
+its lift, a type: `Root` (nothing), `Static` (the parent's lift and the
+variant's constructor) or `Named` (the instance's name too, an `Arc<str>`
+every event shares). One listener over a subtree is one `select_all`,
+matched with no wildcard:
 
 ```rust
 let tree = TreeClient::new(&ws);
@@ -766,7 +776,7 @@ while let Some(ev) = all.next().await {
         TreeEvent::Count(t) => …,
         TreeEvent::Branch(BranchEvent::Grow(r)) => …,
         TreeEvent::Branch(BranchEvent::Leaf(FoliageEvent::Fall(f))) => …,
-        TreeEvent::Item { name, event: ItemEvent::Watch(s) } => …,   // name: "a" or "b"
+        TreeEvent::Item { name, event } => match *event { ItemEvent::Watch(s) => … },   // name: "a" or "b"
         TreeEvent::Ping(_) => …,
     }
 }
@@ -776,10 +786,23 @@ A child's own client (`BranchClient::at(t, "tree.branch")`) yields
 `BranchEvent`, and lifts one level with `TreeEvent::from`. No `From` is
 emitted for a dynamic child (the variant needs the name), for two static
 children of one type (which variant?), or for a child that is the activation
-itself, whose variant is boxed. A method whose wire name is a child's segment
-is refused: they share one route namespace and one tag. A dynamic
-instance's path is kept for the life of the process, one per distinct name.
-`fixtures/aggregate-tree` holds the JSON at every level.
+itself.
+
+**Instance names.** `tree.item(name)` reaches `tree.<name>`; a dynamic
+instance's path is the client's own (`RoutePath`, an `Arc<str>`), freed with
+it — no process-wide set, no lock. A name the service would route elsewhere
+— empty, holding a `.`, a static child's segment, a method of the parent —
+does not fail the accessor; every call through it, and through anything
+below it, fails at once with `ClientError::InvalidName { name, reason }`,
+and nothing is sent.
+
+**`#[child(opaque)]`** — a child whose type has no client (a hand-written
+`ChildRouter`, an activation without one): no accessor, no variant, routed
+as before. A child of a client activation without a client and without
+`opaque` is a compile error that says so. A method whose wire name is a
+child's segment is refused: they share one route namespace and one tag.
+`fixtures/aggregate-tree` holds the JSON at every level;
+`fixtures/aggregate-probe` the shapes the tree must survive.
 
 A one-item call reads the call to its `done` before it returns, so a
 transport that cancels a dropped call (the WebSocket one unsubscribes) never

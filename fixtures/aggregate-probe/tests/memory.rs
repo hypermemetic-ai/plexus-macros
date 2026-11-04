@@ -27,8 +27,12 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static A: Counting = Counting;
 
+/// The count is process-wide: the tests here take turns.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_million_names_leave_memory_flat() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fast(0);
     let root = RootClient::new(&f);
     // warm anything lazily allocated once
@@ -50,6 +54,7 @@ fn a_million_names_leave_memory_flat() {
 
 #[test]
 fn the_accessor_takes_no_lock() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     // With a process-wide lock, eight threads take longer than one doing
     // all their work; without one, they take less.
     let f = Arc::new(Fast(0));

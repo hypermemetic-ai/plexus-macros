@@ -3,23 +3,22 @@
 //!
 //! An activation's aggregate (`{Ns}Event`) nests its children's: a static
 //! child is a variant carrying the child's aggregate, a dynamic child a
-//! variant carrying the instance's name and its aggregate. A generated
-//! client carries a [`Lift`] from its own aggregate into the aggregate of
-//! the client it was reached from — the identity for a client made with
-//! `new` or `at`, and one wrapping per level for a client a parent's
-//! accessor made:
+//! variant carrying the instance's name and its aggregate. A generated client
+//! `XClient<T, L = Root>` carries a [`Lift`] `L` from its own aggregate into
+//! the aggregate of the client it was reached from:
 //!
-//! ```ignore
-//! let tree = TreeClient::new(&ws);                     // Lift<TreeEvent, TreeEvent>: identity
-//! let leaf = tree.branch().leaf();                     // LeafClient<_, TreeEvent>
-//! leaf.fall(2).events()                                // Events<'_, TreeEvent>:
-//!     // TreeEvent::Branch(BranchEvent::Leaf(FoliageEvent::Fall(..)))
-//! tree.item("a").watch(1).events()                     // TreeEvent::Item { name: "a", event: ItemEvent::Watch(..) }
-//! ```
+//! | client | `L` | its `.events()` yield |
+//! |---|---|---|
+//! | `TreeClient::new(t)` | [`Root`] | `TreeEvent` |
+//! | `tree.branch()` | `Static<Root, BranchEvent, TreeEvent>` | `TreeEvent::Branch(..)` |
+//! | `tree.item("a")` | `Named<Root, ItemEvent, TreeEvent>` | `TreeEvent::Item { name: "a", .. }` |
+//! | `tree.branch().leaf()` | `Static<Static<Root, ..>, FoliageEvent, BranchEvent>` | `TreeEvent::Branch(BranchEvent::Leaf(..))` |
 //!
-//! So `select_all` of calls anywhere below one client is one stream of that
-//! client's aggregate, matched with no wildcard; and a dynamic instance's
-//! name is in each of its events because its accessor was given it.
+//! The lift is a type: [`Root`] is nothing at all (an event of a client
+//! reached through nothing is its own, at no cost); [`Static`] is the
+//! parent's lift and a function pointer; [`Named`] adds the instance's name,
+//! an `Arc<str>` each event shares. No closure, no allocation but the
+//! variant's own box.
 //!
 //! [`Aggregated`] names a client's own aggregate — how a parent's expansion
 //! names a child's aggregate without guessing it from the child's type name
@@ -37,88 +36,112 @@ pub trait Aggregated {
     type Event;
 }
 
-/// A function from an aggregate `E` into an enclosing aggregate `A`: how
-/// many levels of variants to wrap an event in, and which dynamic names.
-///
-/// Cheap to clone (a function pointer, or an `Arc`), `Send` and `Sync`.
-pub struct Lift<E, A> {
-    f: Inner<E, A>,
-}
+/// An activation that has a generated client (RETURNS-46). The activation
+/// macro implements it beside the server half of every activation it emits
+/// a client for; a parent's expansion holds each `#[child]` to it, so a child
+/// without a client is told what to do.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` has no client, so the parent's client cannot reach it as a `#[child]`",
+    label = "a `#[child]` of an activation with a client must have a client too",
+    note = "mark the child `#[plexus_macros::child(opaque)]`: no accessor, no variant in the parent's aggregate, routed as before — or give `{Self}` a client (name it `…Activation`, or add `client`)"
+)]
+pub trait HasClient {}
 
-enum Inner<E, A> {
-    Fn(fn(E) -> A),
-    Closure(Arc<dyn Fn(E) -> A + Send + Sync>),
-}
-
-fn identity<E>(e: E) -> E {
-    e
-}
-
-impl<E> Lift<E, E> {
-    /// No lift: an event is its own aggregate's.
-    pub fn identity() -> Self {
-        Self { f: Inner::Fn(identity::<E>) }
-    }
-}
-
-impl<E, A> Lift<E, A> {
-    /// A lift that is a function pointer — a variant's constructor, say.
-    pub fn from_fn(f: fn(E) -> A) -> Self {
-        Self { f: Inner::Fn(f) }
-    }
-
-    /// A lift that is a closure — one that carries a dynamic child's name.
-    pub fn new(f: impl Fn(E) -> A + Send + Sync + 'static) -> Self {
-        Self { f: Inner::Closure(Arc::new(f)) }
-    }
-
+/// A lift from an aggregate `E` into an enclosing one, [`Lift::Out`]: how
+/// many levels of variants to wrap an event in, and which instance names.
+pub trait Lift<E>: Clone + Send + Sync + 'static {
+    /// The aggregate an event ends in.
+    type Out;
     /// Lift one event.
-    pub fn apply(&self, event: E) -> A {
-        match &self.f {
-            Inner::Fn(f) => f(event),
-            Inner::Closure(f) => f(event),
-        }
-    }
+    fn lift(&self, event: E) -> Self::Out;
+}
 
-    /// `inner`, then this lift: a child's event wrapped by `inner` into
-    /// this level's aggregate, then lifted as this level's are. What a
-    /// parent's accessor gives the child's client.
-    pub fn after<D>(&self, inner: impl Fn(D) -> E + Send + Sync + 'static) -> Lift<D, A>
-    where
-        E: 'static,
-        A: 'static,
-    {
-        let outer = self.clone();
-        Lift::new(move |d| outer.apply(inner(d)))
-    }
+/// No lift: an event is its own aggregate's. Zero-sized.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Root;
 
-    /// This lift, then `outer`.
-    pub fn then<B>(self, outer: Lift<A, B>) -> Lift<E, B>
-    where
-        E: 'static,
-        A: 'static,
-        B: 'static,
-    {
-        Lift::new(move |e| outer.apply(self.apply(e)))
+impl<E> Lift<E> for Root {
+    type Out = E;
+    #[inline(always)]
+    fn lift(&self, event: E) -> E {
+        event
     }
 }
 
-impl<E, A> Clone for Lift<E, A> {
+/// A static child's lift: wrap the child's event `C` in the parent's
+/// variant (`P`), then lift as the parent does (`L`).
+pub struct Static<L, C, P> {
+    outer: L,
+    wrap: fn(C) -> P,
+}
+
+impl<L, C, P> Static<L, C, P> {
+    /// `wrap`, then `outer`.
+    pub fn new(outer: L, wrap: fn(C) -> P) -> Self {
+        Self { outer, wrap }
+    }
+}
+
+impl<L: Lift<P>, C: 'static, P: 'static> Lift<C> for Static<L, C, P> {
+    type Out = L::Out;
+    #[inline]
+    fn lift(&self, event: C) -> L::Out {
+        self.outer.lift((self.wrap)(event))
+    }
+}
+
+/// A dynamic child's lift: the instance's name and the child's event `C` in
+/// the parent's variant (`P`), then lifted as the parent does (`L`).
+pub struct Named<L, C, P> {
+    outer: L,
+    name: Arc<str>,
+    wrap: fn(Arc<str>, C) -> P,
+}
+
+impl<L, C, P> Named<L, C, P> {
+    /// The instance `name`: `wrap`, then `outer`.
+    pub fn new(outer: L, name: Arc<str>, wrap: fn(Arc<str>, C) -> P) -> Self {
+        Self { outer, name, wrap }
+    }
+
+    /// The instance's name.
+    pub fn name(&self) -> &Arc<str> {
+        &self.name
+    }
+}
+
+impl<L: Lift<P>, C: 'static, P: 'static> Lift<C> for Named<L, C, P> {
+    type Out = L::Out;
+    #[inline]
+    fn lift(&self, event: C) -> L::Out {
+        self.outer.lift((self.wrap)(Arc::clone(&self.name), event))
+    }
+}
+
+impl<L: Clone, C, P> Clone for Static<L, C, P> {
     fn clone(&self) -> Self {
-        Self {
-            f: match &self.f {
-                Inner::Fn(f) => Inner::Fn(*f),
-                Inner::Closure(f) => Inner::Closure(Arc::clone(f)),
-            },
-        }
+        Self { outer: self.outer.clone(), wrap: self.wrap }
     }
 }
 
-impl<E, A> fmt::Debug for Lift<E, A> {
+impl<L: Clone, C, P> Clone for Named<L, C, P> {
+    fn clone(&self) -> Self {
+        Self { outer: self.outer.clone(), name: Arc::clone(&self.name), wrap: self.wrap }
+    }
+}
+
+impl<L: fmt::Debug, C, P> fmt::Debug for Static<L, C, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Lift")
-            .field("from", &std::any::type_name::<E>())
-            .field("into", &std::any::type_name::<A>())
+        f.debug_struct("Static").field("into", &std::any::type_name::<P>()).field("outer", &self.outer).finish()
+    }
+}
+
+impl<L: fmt::Debug, C, P> fmt::Debug for Named<L, C, P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Named")
+            .field("name", &self.name)
+            .field("into", &std::any::type_name::<P>())
+            .field("outer", &self.outer)
             .finish()
     }
 }
@@ -133,30 +156,28 @@ mod tests {
     }
     #[derive(Debug, PartialEq)]
     enum Branch {
-        Leaf(Leaf),
+        Leaf(Box<Leaf>),
     }
     #[derive(Debug, PartialEq)]
     enum Tree {
-        Branch(Branch),
-        Item { name: String, event: Leaf },
+        Branch(Box<Branch>),
+        Item { name: Arc<str>, event: Box<Leaf> },
     }
 
     #[test]
     fn lifts_compose_one_level_at_a_time() {
-        let tree: Lift<Tree, Tree> = Lift::identity();
-        let branch: Lift<Branch, Tree> = tree.after(Tree::Branch);
-        let leaf: Lift<Leaf, Tree> = branch.after(Branch::Leaf);
-        assert_eq!(leaf.apply(Leaf::Fall(1)), Tree::Branch(Branch::Leaf(Leaf::Fall(1))));
-        let name = String::from("a");
-        let item: Lift<Leaf, Tree> = tree.after(move |event| Tree::Item { name: name.clone(), event });
-        assert_eq!(item.apply(Leaf::Fall(2)), Tree::Item { name: "a".into(), event: Leaf::Fall(2) });
-        let then = Lift::from_fn(Leaf::Fall).then(leaf.clone());
-        assert_eq!(then.apply(3), Tree::Branch(Branch::Leaf(Leaf::Fall(3))));
+        let branch: Static<Root, Branch, Tree> = Static::new(Root, |b| Tree::Branch(Box::new(b)));
+        let leaf = Static::new(branch, |l| Branch::Leaf(Box::new(l)));
+        assert_eq!(leaf.lift(Leaf::Fall(1)), Tree::Branch(Box::new(Branch::Leaf(Box::new(Leaf::Fall(1))))));
+        let item: Named<Root, Leaf, Tree> = Named::new(Root, Arc::from("a"), |name, l| Tree::Item { name, event: Box::new(l) });
+        assert_eq!(item.lift(Leaf::Fall(2)), Tree::Item { name: Arc::from("a"), event: Box::new(Leaf::Fall(2)) });
     }
 
     #[test]
-    fn a_lift_is_send_sync_and_clone() {
+    fn the_root_lift_is_nothing() {
+        assert_eq!(std::mem::size_of::<Root>(), 0);
         fn send_sync<T: Send + Sync + Clone>() {}
-        send_sync::<Lift<String, u8>>();
+        send_sync::<Static<Root, Leaf, Tree>>();
+        send_sync::<Named<Root, Leaf, Tree>>();
     }
 }

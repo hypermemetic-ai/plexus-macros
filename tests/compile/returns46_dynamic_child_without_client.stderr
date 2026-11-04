@@ -1,0 +1,66 @@
+error[E0425]: cannot find type `SessionChildClient` in this scope
+  --> tests/compile/returns46_dynamic_child_without_client.rs:21:43
+   |
+21 |     fn session(&self, id: &str) -> Option<SessionChild> {
+   |                                           ^^^^^^^^^^^^
+...
+27 | pub struct SessionChild {
+   | ----------------------- similarly named struct `SessionChild` defined here
+
+warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_SessionChild`: plexus-macros (MACRO-13): `SessionChild` does not end in `Activation`, so no trait is emitted for it and its client is `SessionChildClient`. Rename it `SessionChildActivation` (or write `trait = "…"`); then `namespace`, `client`, `crate_path`, `server_cfg` and `#[method]` may all go. A later release refuses it.
+  --> tests/compile/returns46_dynamic_child_without_client.rs:33:6
+   |
+33 | impl SessionChild {
+   |      ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+error[E0277]: `SessionChild` has no client, so the parent's client cannot reach it as a `#[child]`
+  --> tests/compile/returns46_dynamic_child_without_client.rs:21:43
+   |
+21 |     fn session(&self, id: &str) -> Option<SessionChild> {
+   |                                           ^^^^^^^^^^^^ a `#[child]` of an activation with a client must have a client too
+   |
+help: the trait `HasClient` is not implemented for `SessionChild`
+  --> tests/compile/returns46_dynamic_child_without_client.rs:27:1
+   |
+27 | pub struct SessionChild {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = note: mark the child `#[plexus_macros::child(opaque)]`: no accessor, no variant in the parent's aggregate, routed as before — or give `SessionChild` a client (name it `…Activation`, or add `client`)
+help: the following other types implement trait `HasClient`
+  --> tests/compile/returns46_dynamic_child_without_client.rs:11:1
+   |
+11 |   #[plexus_macros::activation(crate_path = "plexus_core")]
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `HostActivation`
+   |
+  ::: $PLEXUS_CORE/src/activations/echo/activation.rs
+   |
+   | / #[plexus_macros::activation(
+   | |     version = "1.0.0",
+   | |     description = "Echo messages back - demonstrates plexus-macros usage",
+...  |
+   | | )]
+   | |__^ `EchoActivation`
+   |
+  ::: $PLEXUS_CORE/src/plexus/auth_activation.rs
+   |
+   | / #[plexus_macros::activation(
+   | |     version = "1.0.0",
+   | |     description = "Sign in, who am I, what does this need",
+   | |     roles(member = ["whoami", "logout", "requires"]),
+...  |
+   | |     typed_params,
+   | | )]
+   | |__^ `AuthActivation`
+note: required by a bound in `__plexus_child_needs_a_client`
+  --> tests/compile/returns46_dynamic_child_without_client.rs:11:1
+   |
+11 | #[plexus_macros::activation(crate_path = "plexus_core")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `__plexus_child_needs_a_client`
+   = note: this error originates in the attribute macro `plexus_macros::activation` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0433]: cannot find type `SessionChildClient` in this scope
+  --> tests/compile/returns46_dynamic_child_without_client.rs:21:43
+   |
+21 |     fn session(&self, id: &str) -> Option<SessionChild> {
+   |                                           ^^^^^^^^^^^^ use of undeclared type `SessionChildClient`

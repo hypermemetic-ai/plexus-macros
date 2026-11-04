@@ -135,6 +135,44 @@ pub enum ClientError {
         param: &'static str,
         message: String,
     },
+
+    /// RETURNS-46: a dynamic child's instance name the service would route
+    /// elsewhere than to that instance — so nothing was sent. Every call
+    /// through the instance's client, and through any client below it, is
+    /// this, at once.
+    InvalidName {
+        /// The name the accessor was given.
+        name: String,
+        /// Why it cannot name an instance.
+        reason: NameRefusal,
+    },
+}
+
+/// Why an instance name cannot reach its instance (RETURNS-46): the service
+/// routes `<parent>.<name>.<method>` by its first segment, a static child
+/// before the dynamic one and a method of the parent before either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NameRefusal {
+    /// `""`: there is no segment.
+    Empty,
+    /// It holds a `.`: the service would read two segments.
+    Dotted,
+    /// It is a static sibling's segment: the service routes it there.
+    StaticChild,
+    /// It is a method of the parent: the call would not reach a child.
+    Method,
+}
+
+impl fmt::Display for NameRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            NameRefusal::Empty => "it is empty",
+            NameRefusal::Dotted => "it contains '.', which the service reads as two segments",
+            NameRefusal::StaticChild => "it is a static child's segment, which the service routes there",
+            NameRefusal::Method => "it is a method of the parent",
+        })
+    }
 }
 
 impl ClientError {
@@ -185,6 +223,9 @@ impl fmt::Display for ClientError {
             ClientError::Encode { param, message } => {
                 write!(f, "encode param `{param}`: {message}")
             }
+            ClientError::InvalidName { name, reason } => {
+                write!(f, "instance name {name:?} refused, nothing sent: {reason}")
+            }
         }
     }
 }
@@ -194,7 +235,7 @@ impl std::error::Error for ClientError {
         match self {
             ClientError::Transport(e) => Some(e),
             ClientError::Remote(e) => Some(e),
-            ClientError::Decode { .. } | ClientError::Encode { .. } => None,
+            ClientError::Decode { .. } | ClientError::Encode { .. } | ClientError::InvalidName { .. } => None,
         }
     }
 }

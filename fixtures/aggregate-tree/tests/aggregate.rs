@@ -162,19 +162,15 @@ async fn select_all_over_three_levels_is_matched_with_no_wildcard() {
 
     let (mut ticks, mut buds, mut frosts, mut leaves, mut seen) = (0, 0, 0, 0, Vec::new());
     while let Some(ev) = all.next().await {
-        // Exhaustive: every variant of every level, and no `_`. A child's
-        // event is boxed (any two activations may be each other's children),
-        // so each level is a match of its own.
+        // Exhaustive: every variant of every level, and no `_`. A dynamic
+        // child's event is boxed (every cycle a service can serve passes
+        // through one), so its level is a match of its own.
         match ev.expect("no call fails") {
             TreeEvent::Ping(Pong { .. }) => unreachable!("ping is a one-item method: no .events()"),
             TreeEvent::Count(Tick { n }) => ticks += n,
-            TreeEvent::Branch(branch) => match *branch {
-                BranchEvent::Grow(Ok(Bud { bud })) => buds += bud,
-                BranchEvent::Grow(Err(GrowError::Frost { at })) => frosts += at,
-                BranchEvent::Leaf(leaf) => match *leaf {
-                    FoliageEvent::Fall(Fell { leaf }) => leaves += leaf,
-                },
-            },
+            TreeEvent::Branch(BranchEvent::Grow(Ok(Bud { bud }))) => buds += bud,
+            TreeEvent::Branch(BranchEvent::Grow(Err(GrowError::Frost { at }))) => frosts += at,
+            TreeEvent::Branch(BranchEvent::Leaf(FoliageEvent::Fall(Fell { leaf }))) => leaves += leaf,
             TreeEvent::Item { name, event } => match *event {
                 ItemEvent::Watch(Seen { seen: s, n }) => {
                     assert_eq!(*name, *s, "the event names the instance it came from");

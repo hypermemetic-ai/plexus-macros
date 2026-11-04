@@ -1057,6 +1057,11 @@ pub struct ChildMethodInfo {
     /// [`ChildForward::SameService`], a dynamic one the framework's default
     /// (`IdentityOnly`).
     pub forward: Option<ChildForward>,
+    /// RETURNS-46: `#[child(opaque)]` — the child's type has no client (a
+    /// hand-written `ChildRouter`, an activation without one): the parent's
+    /// client gets no accessor for it and its aggregate no variant. Routing
+    /// is unchanged.
+    pub opaque: bool,
     /// MACRO-16: the declared return type — `Child` for a static child,
     /// `Option<Child>` for a dynamic one. The client codegen names the
     /// child's generated client from it.
@@ -1075,7 +1080,7 @@ impl ChildMethodInfo {
         // CHILD-4: parse `list = "method"` / `search = "method"` args off the
         // `#[child(...)]` attribute. The attribute itself is the sole carrier
         // of these args — no other attribute recognizes them.
-        let (list_fn, search_fn, forward) = parse_child_attr_args(&method.attrs)?;
+        let (list_fn, search_fn, forward, opaque) = parse_child_attr_args(&method.attrs)?;
 
         // IR-3: capture deprecation metadata from `#[deprecated(...)]` +
         // `#[plexus_macros::removed_in("X")]` on this child method.
@@ -1146,6 +1151,7 @@ impl ChildMethodInfo {
             is_async,
             list_fn,
             search_fn,
+            opaque,
             deprecation,
             forward,
             return_ty,
@@ -1165,10 +1171,11 @@ impl ChildMethodInfo {
 /// Unknown args are rejected so typos surface early.
 fn parse_child_attr_args(
     attrs: &[syn::Attribute],
-) -> syn::Result<(Option<syn::Ident>, Option<syn::Ident>, Option<ChildForward>)> {
+) -> syn::Result<(Option<syn::Ident>, Option<syn::Ident>, Option<ChildForward>, bool)> {
     let mut list_fn: Option<syn::Ident> = None;
     let mut search_fn: Option<syn::Ident> = None;
     let mut forward: Option<ChildForward> = None;
+    let mut opaque = false;
 
     for attr in attrs {
         let path = attr.path();
@@ -1187,6 +1194,14 @@ fn parse_child_attr_args(
                 )?;
                 for meta in metas {
                     match meta {
+                        // RETURNS-46: `opaque` — the child has no client, so
+                        // the parent's client and aggregate leave it out.
+                        Meta::Path(ref p) if p.is_ident("opaque") => {
+                            if opaque {
+                                return Err(syn::Error::new_spanned(p, "duplicate `opaque` on #[plexus_macros::child]"));
+                            }
+                            opaque = true;
+                        }
                         Meta::NameValue(MetaNameValue { path, value, .. }) => {
                             let ident_key = match path.get_ident() {
                                 Some(id) => id.to_string(),
@@ -1194,7 +1209,7 @@ fn parse_child_attr_args(
                                     return Err(syn::Error::new_spanned(
                                         &path,
                                         "unknown argument to #[plexus_macros::child]; \
-                                         expected `list = \"method\"`, `search = \"method\"` or `forward = \"policy\"`",
+                                         expected `list = \"method\"`, `search = \"method\"`, `forward = \"policy\"` or `opaque`",
                                     ));
                                 }
                             };
@@ -1254,7 +1269,7 @@ fn parse_child_attr_args(
                                         &path,
                                         format!(
                                             "unknown argument `{}` to #[plexus_macros::child]; \
-                                             expected `list = \"method\"`, `search = \"method\"` or `forward = \"policy\"`",
+                                             expected `list = \"method\"`, `search = \"method\"`, `forward = \"policy\"` or `opaque`",
                                             other
                                         ),
                                     ));
@@ -1265,7 +1280,7 @@ fn parse_child_attr_args(
                             return Err(syn::Error::new_spanned(
                                 other,
                                 "unknown argument to #[plexus_macros::child]; \
-                                 expected `list = \"method\"`, `search = \"method\"` or `forward = \"policy\"`",
+                                 expected `list = \"method\"`, `search = \"method\"`, `forward = \"policy\"` or `opaque`",
                             ));
                         }
                     }
@@ -1281,7 +1296,7 @@ fn parse_child_attr_args(
         }
     }
 
-    Ok((list_fn, search_fn, forward))
+    Ok((list_fn, search_fn, forward, opaque))
 }
 
 /// The stream-return shape of a sibling `list` / `search` method referenced by

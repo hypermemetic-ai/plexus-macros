@@ -620,7 +620,13 @@ pub(crate) fn client_trait_impl(
         let ret = ret_ty(m, boxes);
         let const_ident = crate::codegen::client::method_const_ident(m);
         let links: Vec<TokenStream> = m.params.iter().map(crate::codegen::client::param_link).collect();
-        let call_params = quote! { #client::Params::new() #(#links)* .build() };
+        // RETURNS-46: along the client's route, or its refusal as the params.
+        let call_params = quote! {
+            self.route.method(Self::#const_ident).and_then(|_| #client::Params::new() #(#links)* .build())
+        };
+        let method_ref = quote! {
+            self.route.method(Self::#const_ident).unwrap_or(Self::#const_ident)
+        };
         let ok = &m.ok_ty;
         let decoder = match &m.err_ty {
             None => quote! { #client::Content::decode::<#ok> },
@@ -631,7 +637,7 @@ pub(crate) fn client_trait_impl(
             // text, decoded straight into the item.
             #call_params.map(|__p| #client::owned_call_raw(
                 ::core::clone::Clone::clone(&self.transport),
-                Self::#const_ident.at(self.path),
+                #method_ref,
                 __p,
             ))
         };
@@ -643,7 +649,7 @@ pub(crate) fn client_trait_impl(
             (Cardinality::One, _, _) => quote! {
                 #client::trait_one::<_, #item>(
                     ::core::clone::Clone::clone(&self.transport),
-                    Self::#const_ident.at(self.path),
+                    #method_ref,
                     #call_params,
                     #decoder,
                 )
