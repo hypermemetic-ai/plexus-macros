@@ -36,12 +36,15 @@
 //! `param` is omitted when the failure is not about one parameter (and
 //! decodes as `None` when absent or `null`).
 //!
-//! # Exhaustive on purpose
+//! # Open, typed
 //!
-//! No `#[non_exhaustive]`, no catch-all variant: a new failure kind must
-//! fail every receiver's build until it handles it. Adding a variant here
-//! means adding its `PlexusError` conversion in plexus-core and its mirrors
-//! in the Haskell protocol and the TS/Rust generators in the same change.
+//! A kind this build does not know — menger's `too_many_connections`, or
+//! `too_many_writes` with `retry_after_ms` — is [`RemoteError::Other`]: its
+//! `kind` and every other field kept, and written back exactly as it came
+//! (RETURNS-36, review #4). A known kind that does not fit its variant is
+//! still a decode error. The known variants stay exhaustive for a match;
+//! adding one means adding its `PlexusError` conversion in plexus-core and
+//! its mirrors in the Haskell protocol and the TS/Rust generators.
 
 use std::fmt::{self, Write as _};
 
@@ -49,7 +52,7 @@ use serde::{Deserialize, Serialize};
 
 /// Why a call failed — what an error frame carries, and the `data` of a
 /// JSON-RPC-level rejection.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemoteError {
@@ -105,6 +108,139 @@ pub enum RemoteError {
     /// The child the call was routed to did not open it in the service's
     /// time.
     ChildTimeout { child: String, timeout_ms: u64 },
+
+    /// A kind this build does not know, kept whole: its `kind` and every
+    /// other field (RETURNS-36), written back as it came. Read only for a
+    /// kind no known variant has (see the `Deserialize` impl).
+    #[serde(untagged)]
+    Other(OtherError),
+}
+
+/// [`RemoteError::Other`]'s content: a kind this build does not know and
+/// its other fields, exactly as they came.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OtherError {
+    /// The kind, as the server spelled it (`"too_many_writes"`).
+    pub kind: String,
+    /// Every other field (`retry_after_ms`, `message`, …).
+    #[serde(flatten)]
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The kinds the known variants take: one of them that does not fit its
+/// variant is a decode error, never [`RemoteError::Other`].
+const KNOWN_KINDS: &[&str] = &[
+    "activation_not_found",
+    "method_not_found",
+    "invalid_params",
+    "unauthenticated",
+    "forbidden",
+    "handle_not_supported",
+    "execution",
+    "too_many_calls",
+    "child_unavailable",
+    "child_timeout",
+];
+
+impl<'de> Deserialize<'de> for OtherError {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut fields = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
+        let kind = match fields.remove("kind") {
+            Some(serde_json::Value::String(k)) => k,
+            _ => return Err(serde::de::Error::missing_field("kind")),
+        };
+        if KNOWN_KINDS.contains(&kind.as_str()) {
+            return Err(serde::de::Error::custom(format!("a `{kind}` error that does not fit its fields")));
+        }
+        Ok(OtherError { kind, fields })
+    }
+}
+
+/// The known variants, as the wire reads them — the derive the public enum
+/// cannot have, since an unknown kind must read as [`RemoteError::Other`]
+/// while a known kind that does not fit stays a decode error naming why.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Known {
+    ActivationNotFound { activation: String },
+    MethodNotFound { activation: String, method: String },
+    InvalidParams {
+        #[serde(default)]
+        param: Option<String>,
+        #[serde(flatten)]
+        problem: ParamProblem,
+    },
+    Unauthenticated,
+    Forbidden {
+        #[serde(flatten)]
+        reason: DenyReason,
+    },
+    HandleNotSupported { activation: String },
+    Execution { message: String },
+    TooManyCalls {
+        max: u64,
+        #[serde(default)]
+        child: Option<String>,
+    },
+    ChildUnavailable { child: String, reason: String },
+    ChildTimeout { child: String, timeout_ms: u64 },
+}
+
+impl From<Known> for RemoteError {
+    fn from(k: Known) -> Self {
+        match k {
+            Known::ActivationNotFound { activation } => RemoteError::ActivationNotFound { activation },
+            Known::MethodNotFound { activation, method } => RemoteError::MethodNotFound { activation, method },
+            Known::InvalidParams { param, problem } => RemoteError::InvalidParams { param, problem },
+            Known::Unauthenticated => RemoteError::Unauthenticated,
+            Known::Forbidden { reason } => RemoteError::Forbidden { reason },
+            Known::HandleNotSupported { activation } => RemoteError::HandleNotSupported { activation },
+            Known::Execution { message } => RemoteError::Execution { message },
+            Known::TooManyCalls { max, child } => RemoteError::TooManyCalls { max, child },
+            Known::ChildUnavailable { child, reason } => RemoteError::ChildUnavailable { child, reason },
+            Known::ChildTimeout { child, timeout_ms } => RemoteError::ChildTimeout { child, timeout_ms },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RemoteError {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let v = serde_json::Value::deserialize(d)?;
+        let known = match v.get("kind") {
+            Some(serde_json::Value::String(k)) => KNOWN_KINDS.contains(&k.as_str()),
+            _ => return Err(D::Error::missing_field("kind")),
+        };
+        if known {
+            Known::deserialize(v).map(RemoteError::from).map_err(D::Error::custom)
+        } else {
+            OtherError::deserialize(v).map(RemoteError::Other).map_err(D::Error::custom)
+        }
+    }
+}
+
+impl std::hash::Hash for OtherError {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        serde_json::to_string(&self.fields).unwrap_or_default().hash(state);
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for OtherError {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "OtherError".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "A kind this build does not know, with its other fields.",
+            "type": "object",
+            "properties": { "kind": { "type": "string" } },
+            "required": ["kind"],
+            "additionalProperties": true
+        })
+    }
 }
 
 /// What is wrong with a call's params. Flattened into
@@ -156,8 +292,9 @@ pub enum DenyReason {
 impl RemoteError {
     /// The variant's `kind` tag, as on the wire (`"method_not_found"`, …) —
     /// for a log line or an exit code; match on the variant to handle it.
-    pub fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &str {
         match self {
+            RemoteError::Other(other) => &other.kind,
             RemoteError::ActivationNotFound { .. } => "activation_not_found",
             RemoteError::MethodNotFound { .. } => "method_not_found",
             RemoteError::InvalidParams { .. } => "invalid_params",
@@ -266,6 +403,14 @@ impl fmt::Display for RemoteError {
                 f.write_str("child ")?;
                 one_line(f, child)?;
                 write!(f, " did not open the call in {timeout_ms} ms")
+            }
+            RemoteError::Other(other) => {
+                one_line(f, &other.kind)?;
+                if let Some(message) = other.fields.get("message").and_then(|m| m.as_str()) {
+                    f.write_str(": ")?;
+                    one_line(f, message)?;
+                }
+                Ok(())
             }
         }
     }

@@ -125,7 +125,7 @@ pub use memory::MemoryTransport;
 pub use method_stream::{call_one, Decoder, Events, MethodStream, NoProgress, WithProgress};
 pub use params::Params;
 pub use progress::{Note, Progress};
-pub use remote_error::{DenyReason, ParamProblem, RemoteError};
+pub use remote_error::{DenyReason, OtherError, ParamProblem, RemoteError};
 pub use transport::{ItemStream, MethodRef, Transport};
 pub use watch::{
     watch, watch_with, Errors, Fallible, StopOnError, Watch, Watched10, Watched11, Watched12, Watched2, Watched3,
