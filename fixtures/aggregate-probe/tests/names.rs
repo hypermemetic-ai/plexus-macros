@@ -1,6 +1,6 @@
-//! RETURNS-46 review: an instance name that is empty, holds a `.`, or is a
-//! static sibling's segment or a method of the parent would be routed
-//! somewhere else than the instance it names. The accessor stays
+//! RETURNS-46 review: an instance name that is empty, holds a `.`, is not a
+//! segment of the service's path grammar, or is a static sibling's segment
+//! cannot reach the instance it names. The accessor stays
 //! infallible; every call through such an instance — or anything below it —
 //! fails at once with `ClientError::InvalidName`, and nothing is sent.
 
@@ -51,18 +51,53 @@ async fn a_static_siblings_segment_is_refused() {
     assert!(t.0.lock().unwrap().is_empty());
 }
 
+/// The service splits a path at its first dot and takes that segment as a
+/// child, never as the parent's method: an instance named after one of the
+/// parent's methods is the instance (the re-review's `root.tick.tick`).
 #[tokio::test]
-async fn a_method_of_the_parent_is_refused() {
+async fn an_instance_named_after_a_method_of_the_parent_is_reached() {
+    use plexus_core::plexus::{DynamicHub, HubTransport};
+    let t = HubTransport::anonymous(Arc::new(DynamicHub::new("svc").register(RootActivation)));
+    let root = RootClient::new(&t);
+    for name in ["tick", "schema"] {
+        let evs: Vec<RootEvent> = root.org(name).tick(2).events().try_collect().await.unwrap_or_else(|e| panic!("org({name:?}): {e}"));
+        assert_eq!(evs.len(), 2, "org({name:?})");
+        match &evs[1] {
+            RootEvent::Org { name: n, event } => {
+                assert_eq!(&**n, name);
+                assert!(matches!(**event, OrgEvent::Tick(N { n: 1 })), "{event:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // and below it
+        let s: Vec<RootEvent> = root.org(name).stats().tick(1).events().try_collect().await.unwrap();
+        assert_eq!(s.len(), 1);
+    }
+}
+
+/// A name the service's own path grammar refuses (`[a-z][a-z0-9_]*`, plexus-auth-core's
+/// `MethodPath` segment) fails on the client, nothing sent.
+#[tokio::test]
+async fn a_name_outside_the_services_grammar_is_refused() {
     let t = Recording::default();
     let root = RootClient::new(&t);
-    refused(root.org("tick").tick(1).events().try_collect().await, "tick", NameRefusal::Method);
-    refused(root.org("schema").tick(1).events().try_collect().await, "schema", NameRefusal::Method);
-    let left = root.left();
-    match left.dir("tick").tick(1).events().try_collect::<Vec<RootEvent>>().await {
-        Err(ClientError::InvalidName { name, reason: NameRefusal::Method }) => assert_eq!(name, "tick"),
-        other => panic!("{other:?}"),
+    for name in [" ", "a b", "ａcme", "LEFT", "x\n", "-", "9lives", "acme-co"] {
+        refused(root.org(name).tick(1).events().try_collect().await, name, NameRefusal::NotASegment);
     }
-    assert!(t.0.lock().unwrap().is_empty());
+    assert!(t.0.lock().unwrap().is_empty(), "sent {:?}", t.0.lock().unwrap());
+    // `..` and a dotted name are dotted
+    refused(root.org("..").tick(1).events().try_collect().await, "..", NameRefusal::Dotted);
+}
+
+/// The client's rule and the service's agree, name by name.
+#[test]
+fn the_clients_segment_rule_is_the_services() {
+    use plexus_core::plexus::MethodPath;
+    for name in ["", " ", "a b", "ａcme", "LEFT", "x\n", "-", "..", "a.b", "acme", "a_1", "_a", "9lives", "acme-co", "o"] {
+        let service = MethodPath::try_new(format!("root.{name}.tick")).is_ok();
+        let client = plexus_client::Route::ROOT.instance("root", name, &[]).method(MethodRef::new("org", "tick")).is_ok();
+        assert_eq!(client, service, "{name:?}: client {client}, service {service}");
+    }
 }
 
 #[tokio::test]
