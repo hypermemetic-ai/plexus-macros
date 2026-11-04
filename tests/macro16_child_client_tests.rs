@@ -35,7 +35,7 @@ impl Tickets {
         Inputs
     }
 
-    /// A dynamic child gets no accessor (its segment is a runtime name).
+    /// A dynamic child (RETURNS-46: `client.named("x")`, at `tickets.x`).
     #[plexus_macros::child]
     pub fn named(&self, name: &str) -> Option<Inputs> {
         (name == "x").then_some(Inputs)

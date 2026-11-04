@@ -134,6 +134,28 @@ pub fn join_path(parent: &'static str, segment: &'static str) -> &'static str {
         .or_insert_with(|| Box::leak(format!("{parent}.{segment}").into_boxed_str()))
 }
 
+/// RETURNS-46: `"{parent}.{name}"` as a `&'static str`, for a generated
+/// client's dynamic-child accessor — `tree.item("a")` is reached at
+/// `tree.a`. The name is a runtime value, so unlike [`join_path`]'s set this
+/// one grows with the names a program reaches: one string per distinct
+/// `(parent, name)`, kept for the life of the process, never two for the
+/// same pair. A name is one route segment; one with a `.` in it is routed
+/// as two, as the service would.
+#[doc(hidden)]
+pub fn join_dynamic(parent: &'static str, name: &str) -> &'static str {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static PATHS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let joined = if parent.is_empty() { name.to_owned() } else { format!("{parent}.{name}") };
+    let mut paths = PATHS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(known) = paths.get(joined.as_str()) {
+        return known;
+    }
+    let leaked: &'static str = Box::leak(joined.into_boxed_str());
+    paths.insert(leaked);
+    leaked
+}
+
 /// One Plexus wire implementation.
 ///
 /// Every method call on a generated client turns into exactly one

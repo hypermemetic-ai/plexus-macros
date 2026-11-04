@@ -104,6 +104,7 @@ pub mod decode;
 pub mod envelope;
 pub mod error;
 pub mod frame;
+pub mod lift;
 pub mod memory;
 pub mod method_stream;
 pub mod params;
@@ -126,6 +127,7 @@ pub use decode::{decode, decode_raw, decode_result, decode_with_progress};
 pub use envelope::{Content, RawItem, StreamItem, StreamMetadata};
 pub use error::{ClientError, TransportError, TransportErrorKind};
 pub use frame::Frame;
+pub use lift::{Aggregated, Lift};
 pub use memory::MemoryTransport;
 pub use method_stream::{call_one, Decoder, Events, MethodStream, NoProgress, WithProgress};
 pub use params::Params;
@@ -148,5 +150,5 @@ pub use ws::WsTransport;
 pub mod __rt {
     pub use serde;
     pub use serde_json;
-    pub use crate::transport::join_path;
+    pub use crate::transport::{join_dynamic, join_path};
 }

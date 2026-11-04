@@ -7,6 +7,18 @@ This file starts at 0.7.0; earlier changes are in the git history.
 
 ### Added
 
+- RETURNS-46: the aggregate up the tree. `{Ns}Event` gains one variant per
+  `#[child]` carrying the child's aggregate — a static child's
+  `{"method": "<segment>", "event": <child's>}`, a dynamic child's
+  `{"method": "<child>", "event": {"name": "<instance>", "event": <child's>}}` —
+  and `From<ChildEvent>` per static child. A dynamic child gets an accessor,
+  `fn item(&self, name: &str) -> ItemClient<&T, A>`, reaching
+  `<path>.<name>.<method>`. Every client is `XClient<T, A = XEvent>`: one
+  built by a parent's accessor yields the parent's aggregate from
+  `.events()`. plexus-client: `Lift`, `Aggregated`, `MethodStream::lift`,
+  `__rt::join_dynamic`. A method whose wire name is a child's segment is
+  refused. No change for an activation without children.
+
 - PERF.115-36: a typed client decodes an item's content straight from the
   wire's text into the method's event, never through a `Value`.
   `Transport::call_raw` yields the call's items as a typed client reads them
@@ -19,6 +31,9 @@ This file starts at 0.7.0; earlier changes are in the git history.
   77,577 to 16,145, a 17 KB ticket body from 176,873 to 128,388.
 
 ### Changed
+
+- RETURNS-46: a generated client is no longer `Copy` (it carries a `Lift`);
+  it is `Clone`, `Debug` and, for `XClient<T>`, `Default` as before.
 
 - `WsTransport` reads each frame in place, not into a `Value`; a call that
   reads `StreamItem`s (`call`) gets the same items, built from their fields.

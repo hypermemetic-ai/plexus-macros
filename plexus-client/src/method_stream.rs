@@ -51,6 +51,7 @@ use serde_json::Value;
 use crate::envelope::{Content, RawItem};
 use crate::error::ClientError;
 use crate::frame::Frame;
+use crate::lift::Lift;
 use crate::transport::{MethodRef, RawItemStream, Transport};
 
 /// Decodes one data frame's `content` into a method's item `I` — straight
@@ -237,7 +238,10 @@ fn message_of(e: &serde_json::Error) -> String {
 /// the call on a transport that can (the WebSocket one unsubscribes).
 pub struct MethodStream<'a, I, P = NoProgress, A = I> {
     core: Core<'a, I>,
-    event: fn(I) -> A,
+    /// An item as the aggregate: the method's variant, then (RETURNS-46)
+    /// whatever wrapping the client it was called on lifts its activation's
+    /// aggregate into.
+    event: Lift<I, A>,
     _progress: PhantomData<fn() -> P>,
 }
 
@@ -246,7 +250,7 @@ impl<'a, I, P, A> MethodStream<'a, I, P, A> {
     /// each data frame's `content`, `event` wraps an item in the
     /// aggregate (`TicketsEvent::List`) for [`events`](Self::events).
     pub fn new(items: RawItemStream<'a>, item: Decoder<I>, event: fn(I) -> A) -> Self {
-        Self::from_core(Core::new(State::Live(items), item), event)
+        Self::from_core(Core::new(State::Live(items), item), Lift::from_fn(event))
     }
 
     /// Call `method` on `transport` with `params` and type the answer — what
@@ -269,13 +273,30 @@ impl<'a, I, P, A> MethodStream<'a, I, P, A> {
             Ok(params) => State::Live(transport.call_raw(method, params)),
             Err(e) => State::Failed(e),
         };
-        Self::from_core(Core::new(state, item), event)
+        Self::from_core(Core::new(state, item), Lift::from_fn(event))
     }
 
-    fn from_core(core: Core<'a, I>, event: fn(I) -> A) -> Self {
+    fn from_core(core: Core<'a, I>, event: Lift<I, A>) -> Self {
         Self {
             core,
             event,
+            _progress: PhantomData,
+        }
+    }
+
+    /// RETURNS-46: the same call, its [`events`](Self::events) lifted by
+    /// `outer` into an enclosing aggregate — what a client reached through a
+    /// parent's accessor does with every many-item call, so the call's
+    /// events are the parent's (`TreeEvent::Branch(BranchEvent::Grow(..))`).
+    pub fn lift<B>(self, outer: Lift<A, B>) -> MethodStream<'a, I, P, B>
+    where
+        I: 'static,
+        A: 'static,
+        B: 'static,
+    {
+        MethodStream {
+            core: self.core,
+            event: self.event.then(outer),
             _progress: PhantomData,
         }
     }
@@ -314,9 +335,9 @@ impl<'a, I, P, A> MethodStream<'a, I, P, A> {
         P: 'a,
         A: 'a,
     {
-        let event = self.event;
+        let event = self.event.clone();
         Events {
-            inner: Box::pin(futures_util::StreamExt::map(self, move |r| r.map(event))),
+            inner: Box::pin(futures_util::StreamExt::map(self, move |r| r.map(|i| event.apply(i)))),
         }
     }
 }
