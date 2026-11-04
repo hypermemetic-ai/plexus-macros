@@ -1,8 +1,8 @@
 //! RETURNS-40: the IR the service writes (`<service>.ir`) is the IR synapse
-//! builds from the same service's raw schemas — `expected/ir.json` and
-//! `expected/ir.alpha.json`, written by synapse's `ir3-test` from
+//! builds from the same service's raw schemas — `expected/ir.json`,
+//! `expected/ir.alpha.json` and `expected/clash.ir.json`, written by synapse's `ir3-test` from
 //! `expected/schemas.json` — byte for byte in synapse's canonical form. A
-//! title collision is refused as synapse refuses it (`clash.error.txt`).
+//! title collision refuses its activation, as synapse's walk does.
 
 mod support;
 
@@ -48,12 +48,17 @@ async fn one_subtree() {
     same_as("ir.alpha.json", &served);
 }
 
+/// RETURNS-36 review #9: a title collision refuses its activation, not the
+/// walk — the clash service's IR is synapse's, the `clash` activation left
+/// out with a `title` refusal naming both sites.
 #[tokio::test]
-async fn a_title_collision_is_refused_as_synapse_refuses_it() {
+async fn a_title_collision_refuses_its_activation_as_synapse_does() {
     let hub = ir_service::clash_service();
-    let err = ir(&hub, json!({})).await.expect_err("two shapes under one title");
-    assert_eq!(err["type"], "title_collision", "{err}");
-    assert_eq!(err["message"].as_str().unwrap(), read("clash.error.txt").trim_end(), "{err}");
+    let served = ir(&hub, json!({})).await.expect("the walk goes on");
+    same_as("clash.ir.json", &served);
+    let titles: Vec<&Value> = served["irRefusals"].as_array().unwrap().iter().filter(|r| r["rfKeyword"] == "title").collect();
+    assert_eq!(titles.len(), 1, "{}", served["irRefusals"]);
+    assert_eq!(titles[0]["rfSite"], "clash");
 }
 
 #[tokio::test]

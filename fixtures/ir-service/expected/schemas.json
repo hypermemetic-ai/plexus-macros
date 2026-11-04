@@ -8,20 +8,20 @@
       },
       {
         "description": "Items, by query",
-        "hash": "1b1f707161e2e72a",
+        "hash": "8b89f28bb64ae238",
         "namespace": "beta"
       }
     ],
-    "children_hash": "605f8e513f95b7de",
+    "children_hash": "bb38497bca8f7051",
     "description": "Central routing and introspection",
-    "hash": "b20bb95055893298",
+    "hash": "a5851f74deb32cfa",
     "methods": [
       {
         "bidirectional": false,
         "cardinality": "many",
         "description": "Route a call to a registered activation",
         "grant": "irsvc.call",
-        "hash": "4d3b02f3de0084f7",
+        "hash": "88df47aab046f715",
         "http_method": "POST",
         "name": "call",
         "params": {
@@ -50,11 +50,32 @@
         },
         "returns": {
           "$defs": {
+            "OtherError": {
+              "additionalProperties": {
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "description": "A kind this build does not know, with its other fields.",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
             "RemoteError": {
-              "description": "Why a call failed — what an error frame carries, and the `data` of a\nJSON-RPC-level rejection.",
-              "oneOf": [
+              "anyOf": [
                 {
-                  "description": "The hub has no activation by this name.",
+                  "description": "The service has no activation by this name.",
                   "properties": {
                     "activation": {
                       "type": "string"
@@ -357,8 +378,13 @@
                     "timeout_ms"
                   ],
                   "type": "object"
+                },
+                {
+                  "$ref": "#/$defs/OtherError",
+                  "description": "A kind this build does not know, kept whole: its `kind` and every\nother field (RETURNS-36), written back as it came. Read only for a\nkind no known variant has (see the `Deserialize` impl)."
                 }
-              ]
+              ],
+              "description": "Why a call failed — what an error frame carries, and the `data` of a\nJSON-RPC-level rejection."
             },
             "StreamMetadata": {
               "description": "Metadata applied by the caller when wrapping activation responses\n\nThis metadata is added at each layer of the call stack, enabling\nprovenance tracking and cache invalidation.",
@@ -476,7 +502,8 @@
                   "description": "RETURNS-6: why the call failed, typed — what a typed client\ndecodes. Its `Display` is the human line."
                 },
                 "message": {
-                  "description": "spec/05: the human line — never parsed for meaning. For a failed\ndispatch, the server's `PlexusError` as it reads; else the\n[`RemoteError`]'s `Display`.",
+                  "default": "",
+                  "description": "spec/05: the human line — never parsed for meaning. For a failed\ndispatch, the server's `PlexusError` as it reads; else the\n[`RemoteError`]'s `Display`. Always written; optional on reading\n(RETURNS-6's frame has none, as plexus-client reads it): a frame\nwithout one reads as an empty line.",
                   "type": "string"
                 },
                 "metadata": {
@@ -496,7 +523,6 @@
                 "type",
                 "metadata",
                 "recoverable",
-                "message",
                 "error"
               ],
               "type": "object"
@@ -1813,7 +1839,7 @@
       }
     ],
     "namespace": "irsvc",
-    "self_hash": "4f76fa48c9cd6717",
+    "self_hash": "f606f3f0112a10c0",
     "version": "1.0.0"
   },
   "alpha": {
@@ -4749,14 +4775,59 @@
   },
   "beta": {
     "description": "Items, by query",
-    "hash": "1b1f707161e2e72a",
+    "hash": "8b89f28bb64ae238",
     "methods": [
       {
         "bidirectional": false,
         "cardinality": "one",
         "description": "The items matching a query.",
+        "error": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "description": "Why an item cannot be had.",
+          "oneOf": [
+            {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "not_found",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "since": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "gone",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "id",
+                "since"
+              ],
+              "type": "object"
+            }
+          ],
+          "title": "Missing"
+        },
         "grant": "beta.find",
-        "hash": "0c5d4235e0fd8cea",
+        "hash": "c3fe877305ca419d",
         "http_method": "POST",
         "name": "find",
         "params": {
@@ -6235,7 +6306,7 @@
       }
     ],
     "namespace": "beta",
-    "self_hash": "032e8f58455590e6",
+    "self_hash": "728bb80dea197847",
     "version": "1.0.0"
   }
 }

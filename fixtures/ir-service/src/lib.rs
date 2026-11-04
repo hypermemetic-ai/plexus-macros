@@ -7,12 +7,13 @@
 //! | `alpha` | `alpha` | a fallible method, a stream, a struct param, a static child |
 //! | `gamma` | `alpha.gamma` | a nested child; a type the reader refuses (`Odd`, `Choice`) |
 //! | `beta` | `beta` | the same types as `alpha` (shared between activations), typed progress, an array return |
-//! | `clash` | `clash` (its own service) | two types titled `Thing` with different shapes: refused |
+//! | `clash` | `clash` (its own service) | two types titled `Thing` with different shapes: the activation refused |
 //!
 //! `expected/` holds what synapse makes of it: `schemas.json` (every
 //! `<path>.schema` answer, by path — `""` the root), `ir.json` (the whole
 //! service), `ir.alpha.json` (the `alpha` subtree), and for the clash
-//! service `clash.schemas.json` and `clash.error.txt`. synapse's
+//! service `clash.schemas.json`, `clash.ir.json` (the walk refuses `clash`
+//! and goes on) and `clash.one.error.txt` (that plugin alone fails). synapse's
 //! `ir3-test` rewrites the IR files from the schemas
 //! (`SYNAPSE_GOLDEN_ACCEPT=1`); `tests/schemas.rs` rewrites the schemas
 //! from the served service (`IR_FIXTURE_ACCEPT=1`).
@@ -123,8 +124,11 @@ pub struct BetaActivation;
 impl BetaActivation {
     /// The items matching a query.
     #[plexus_macros::method(params(query = "What to match"))]
-    pub async fn find(&self, query: String) -> Vec<Item> {
-        vec![item(&query)]
+    // fallible since RETURNS-36's review #8: a client failure must become
+    // the item, and Vec<Item> cannot take FromClientError; its returns stay
+    // an array of Item
+    pub async fn find(&self, query: String) -> Result<Vec<Item>, Missing> {
+        Ok(vec![item(&query)])
     }
 
     /// Every change to the items, as `alpha.watch` says them.
@@ -199,4 +203,31 @@ pub fn service() -> DynamicHub {
 /// The clash service: `clash` alone.
 pub fn clash_service() -> DynamicHub {
     DynamicHub::new(CLASH_SERVICE).register(ClashActivation)
+}
+
+// RETURNS-36 (review #8): the activation's trait is always emitted and its
+// client implements it, so a client failure must become each method's item.
+// The shapes stay as they are (they are the IR's input); each folds the
+// failure into what it has.
+macro_rules! from_client_error {
+    ($($ty:ty => |$e:ident| $make:expr;)*) => {$(
+        impl plexus_client::FromClientError for $ty {
+            fn from_client_error($e: plexus_client::ClientError) -> Self {
+                $make
+            }
+        }
+    )*};
+}
+
+from_client_error! {
+    Item => |e| Item { id: e.to_string(), label: None, color: Color::Red, tags: vec![] };
+    Missing => |e| Missing::NotFound { id: e.to_string() };
+    Page => |e| Page { items: vec![], next: Some(e.to_string()), counts: Default::default(), span: (0, 0) };
+    ItemEvent => |e| ItemEvent::Removed { id: e.to_string() };
+    Name => |e| Name { value: e.to_string(), rank: 0 };
+    Odd => |e| Odd { name: e.to_string(), extra: Default::default() };
+    Choice => |e| Choice::Word(e.to_string());
+    Step => |_e| Step::Fetched { done: 0, of: 0 };
+    things::one::Thing => |e| things::one::Thing { id: e.to_string() };
+    things::two::Thing => |_e| things::two::Thing { id: 0, weight: 0 };
 }

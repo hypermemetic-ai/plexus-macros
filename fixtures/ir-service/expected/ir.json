@@ -1,6 +1,6 @@
 {
   "irBackend": "irsvc",
-  "irHash": "b20bb95055893298",
+  "irHash": "a5851f74deb32cfa",
   "irMetadata": null,
   "irMethods": {
     ".call": {
@@ -637,7 +637,13 @@
       "mdBidirType": null,
       "mdCardinality": "one",
       "mdDescription": "The items matching a query.",
-      "mdError": null,
+      "mdError": {
+        "contents": {
+          "qnLocalName": "Missing",
+          "qnNamespace": "beta"
+        },
+        "tag": "RefNamed"
+      },
       "mdFullPath": "beta.find",
       "mdGrant": "beta.find",
       "mdName": "find",
@@ -812,9 +818,9 @@
   },
   "irPluginHashes": {
     "": {
-      "phiChildrenHash": "b20bb95055893298",
-      "phiHash": "b20bb95055893298",
-      "phiSelfHash": "b20bb95055893298"
+      "phiChildrenHash": "a5851f74deb32cfa",
+      "phiHash": "a5851f74deb32cfa",
+      "phiSelfHash": "a5851f74deb32cfa"
     },
     "alpha": {
       "phiChildrenHash": "b71c44fef5ed8702",
@@ -827,9 +833,9 @@
       "phiSelfHash": "9771dbc5c7882134"
     },
     "beta": {
-      "phiChildrenHash": "1b1f707161e2e72a",
-      "phiHash": "1b1f707161e2e72a",
-      "phiSelfHash": "1b1f707161e2e72a"
+      "phiChildrenHash": "8b89f28bb64ae238",
+      "phiHash": "8b89f28bb64ae238",
+      "phiSelfHash": "8b89f28bb64ae238"
     }
   },
   "irPluginRequests": null,
@@ -881,6 +887,18 @@
     ]
   },
   "irRefusals": [
+    {
+      "rfDetail": "a map beside properties (a flattened map) has no IR form",
+      "rfKeyword": "additionalProperties",
+      "rfSite": ".OtherError",
+      "rfVariant": null
+    },
+    {
+      "rfDetail": "variant 10 shares no string-const property with the others and is not a string",
+      "rfKeyword": "anyOf",
+      "rfSite": ".RemoteError",
+      "rfVariant": 10
+    },
     {
       "rfDetail": "variant 0 is neither a string, an object nor a $ref to one",
       "rfKeyword": "anyOf",
@@ -1143,6 +1161,29 @@
       "tdName": "IrTypeSource",
       "tdNamespace": ""
     },
+    ".OtherError": {
+      "tdDescription": "A kind this build does not know, with its other fields.",
+      "tdKind": {
+        "ksFields": [
+          {
+            "fdDefault": null,
+            "fdDescription": null,
+            "fdName": "kind",
+            "fdRequired": true,
+            "fdType": {
+              "contents": [
+                "string",
+                null
+              ],
+              "tag": "RefPrimitive"
+            }
+          }
+        ],
+        "tag": "KindStruct"
+      },
+      "tdName": "OtherError",
+      "tdNamespace": ""
+    },
     ".PlexusStreamItem": {
       "tdDescription": "Universal stream item - all activations emit this type\n\nThe caller (DynamicHub routing layer) wraps activation responses with\nmetadata. This is the only type that crosses the wire.\n\n# 0.7 wire shape (RETURNS-6)\n\n```text\n{\"type\":\"data\",    \"metadata\":…, \"content_type\":\"ns.method\", \"content\":<T>}\n{\"type\":\"progress\",\"metadata\":…, \"content_type\":\"ns.method\", \"content\":<P>}\n{\"type\":\"error\",   \"metadata\":…, \"recoverable\":<bool>, \"error\":<RemoteError>}\n{\"type\":\"request\", \"requestId\":…, \"requestData\":…, \"timeoutMs\":…}\n{\"type\":\"done\",    \"metadata\":…}\n```\n\nThe progress frame carries the method's declared progress type `P`\n(`plexus_client::Note` by default) and the same `content_type` a data\nframe does, so a receiver attributes it to its call the same way. The\nerror frame carries a typed [`RemoteError`] — the call failed — in place\nof 0.6's stringly `message` / `code`; `RemoteError`'s `Display` is the\nhuman line. `plexus_client::StreamItem` mirrors this type; the\ncross-serialization test is `tests/client_envelope_compat.rs`.",
       "tdKind": {
@@ -1255,18 +1296,14 @@
                 "fdName": "error",
                 "fdRequired": true,
                 "fdType": {
-                  "contents": {
-                    "qnLocalName": "RemoteError",
-                    "qnNamespace": ""
-                  },
-                  "tag": "RefNamed"
+                  "tag": "RefUnknown"
                 }
               },
               {
-                "fdDefault": null,
-                "fdDescription": "spec/05: the human line — never parsed for meaning. For a failed\ndispatch, the server's `PlexusError` as it reads; else the\n[`RemoteError`]'s `Display`.",
+                "fdDefault": "",
+                "fdDescription": "spec/05: the human line — never parsed for meaning. For a failed\ndispatch, the server's `PlexusError` as it reads; else the\n[`RemoteError`]'s `Display`. Always written; optional on reading\n(RETURNS-6's frame has none, as plexus-client reads it): a frame\nwithout one reads as an empty line.",
                 "fdName": "message",
-                "fdRequired": true,
+                "fdRequired": false,
                 "fdType": {
                   "contents": [
                     "string",
@@ -1452,237 +1489,6 @@
         "tag": "KindStruct"
       },
       "tdName": "PluginHashes",
-      "tdNamespace": ""
-    },
-    ".RemoteError": {
-      "tdDescription": "Why a call failed — what an error frame carries, and the `data` of a\nJSON-RPC-level rejection.",
-      "tdKind": {
-        "keDiscriminator": "kind",
-        "keVariants": [
-          {
-            "vdDescription": "The hub has no activation by this name.",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "activation",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              }
-            ],
-            "vdName": "activation_not_found"
-          },
-          {
-            "vdDescription": "The activation exists but has no method by this name.",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "activation",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "method",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              }
-            ],
-            "vdName": "method_not_found"
-          },
-          {
-            "vdDescription": "The call's params did not fit the method.",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": "The parameter at fault, when the failure is about one.",
-                "fdName": "param",
-                "fdRequired": false,
-                "fdType": {
-                  "contents": {
-                    "contents": [
-                      "string",
-                      null
-                    ],
-                    "tag": "RefPrimitive"
-                  },
-                  "tag": "RefOptional"
-                }
-              }
-            ],
-            "vdName": "invalid_params"
-          },
-          {
-            "vdDescription": "The method requires credentials and the call carried none that\nverified.",
-            "vdFields": [],
-            "vdName": "unauthenticated"
-          },
-          {
-            "vdDescription": "The caller is authenticated but not allowed this call.",
-            "vdFields": [],
-            "vdName": "forbidden"
-          },
-          {
-            "vdDescription": "The activation does not resolve handles.",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "activation",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              }
-            ],
-            "vdName": "handle_not_supported"
-          },
-          {
-            "vdDescription": "The method ran and failed for a reason that is not the activation\nsaying no (that is an `err` item): a panic, a lost dependency.",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "message",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              }
-            ],
-            "vdName": "execution"
-          },
-          {
-            "vdDescription": "spec/05, 09: the connection — or the child the call was routed to —\nholds its maximum of open calls; close one and call again.",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": "The child whose limit it is, when the limit is a child's.",
-                "fdName": "child",
-                "fdRequired": false,
-                "fdType": {
-                  "contents": {
-                    "contents": [
-                      "string",
-                      null
-                    ],
-                    "tag": "RefPrimitive"
-                  },
-                  "tag": "RefOptional"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": "The most calls it holds open at once.",
-                "fdName": "max",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "integer",
-                    "uint64"
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              }
-            ],
-            "vdName": "too_many_calls"
-          },
-          {
-            "vdDescription": "spec/12 rule 5: the child the call was routed to is not there.",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "child",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "reason",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              }
-            ],
-            "vdName": "child_unavailable"
-          },
-          {
-            "vdDescription": "The child the call was routed to did not open it in the service's\ntime.",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "child",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": null,
-                "fdName": "timeout_ms",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "integer",
-                    "uint64"
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              }
-            ],
-            "vdName": "child_timeout"
-          }
-        ],
-        "tag": "KindEnum"
-      },
-      "tdName": "RemoteError",
       "tdNamespace": ""
     },
     ".StreamMetadata": {

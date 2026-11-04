@@ -9,14 +9,14 @@
     ],
     "children_hash": "7fa9e90d0a6d91d4",
     "description": "Central routing and introspection",
-    "hash": "8267cbd5ce03ead9",
+    "hash": "a0fc3a66c60337ec",
     "methods": [
       {
         "bidirectional": false,
         "cardinality": "many",
         "description": "Route a call to a registered activation",
         "grant": "clashsvc.call",
-        "hash": "4d3b02f3de0084f7",
+        "hash": "88df47aab046f715",
         "http_method": "POST",
         "name": "call",
         "params": {
@@ -45,11 +45,32 @@
         },
         "returns": {
           "$defs": {
+            "OtherError": {
+              "additionalProperties": {
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "description": "A kind this build does not know, with its other fields.",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
             "RemoteError": {
-              "description": "Why a call failed — what an error frame carries, and the `data` of a\nJSON-RPC-level rejection.",
-              "oneOf": [
+              "anyOf": [
                 {
-                  "description": "The hub has no activation by this name.",
+                  "description": "The service has no activation by this name.",
                   "properties": {
                     "activation": {
                       "type": "string"
@@ -352,8 +373,13 @@
                     "timeout_ms"
                   ],
                   "type": "object"
+                },
+                {
+                  "$ref": "#/$defs/OtherError",
+                  "description": "A kind this build does not know, kept whole: its `kind` and every\nother field (RETURNS-36), written back as it came. Read only for a\nkind no known variant has (see the `Deserialize` impl)."
                 }
-              ]
+              ],
+              "description": "Why a call failed — what an error frame carries, and the `data` of a\nJSON-RPC-level rejection."
             },
             "StreamMetadata": {
               "description": "Metadata applied by the caller when wrapping activation responses\n\nThis metadata is added at each layer of the call stack, enabling\nprovenance tracking and cache invalidation.",
@@ -471,7 +497,8 @@
                   "description": "RETURNS-6: why the call failed, typed — what a typed client\ndecodes. Its `Display` is the human line."
                 },
                 "message": {
-                  "description": "spec/05: the human line — never parsed for meaning. For a failed\ndispatch, the server's `PlexusError` as it reads; else the\n[`RemoteError`]'s `Display`.",
+                  "default": "",
+                  "description": "spec/05: the human line — never parsed for meaning. For a failed\ndispatch, the server's `PlexusError` as it reads; else the\n[`RemoteError`]'s `Display`. Always written; optional on reading\n(RETURNS-6's frame has none, as plexus-client reads it): a frame\nwithout one reads as an empty line.",
                   "type": "string"
                 },
                 "metadata": {
@@ -491,7 +518,6 @@
                 "type",
                 "metadata",
                 "recoverable",
-                "message",
                 "error"
               ],
               "type": "object"
@@ -1808,7 +1834,7 @@
       }
     ],
     "namespace": "clashsvc",
-    "self_hash": "4f76fa48c9cd6717",
+    "self_hash": "f606f3f0112a10c0",
     "version": "1.0.0"
   },
   "clash": {
