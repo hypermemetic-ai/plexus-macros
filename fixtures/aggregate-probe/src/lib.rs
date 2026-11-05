@@ -117,6 +117,14 @@ impl StatsActivation {
     pub async fn tick(&self, n: u32) -> impl Stream<Item = N> + Send + 'static {
         ticks(n)
     }
+
+    /// Each number sent in, doubled — a method with an input half (BIDIR-6)
+    /// on a child: it is lifted and named like any other.
+    #[plexus_macros::method]
+    pub async fn double(&self, ns: plexus_core::plexus::Input<N>) -> impl Stream<Item = N> + Send + 'static {
+        use futures::StreamExt;
+        ns.into_stream().map(|n| N { n: n.n * 2 })
+    }
 }
 
 /// A dynamic child under a dynamic one.

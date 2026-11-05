@@ -1,6 +1,7 @@
 //! Attribute parsing for Plexus RPC macros
 
 use std::collections::HashMap;
+use quote::ToTokens;
 use syn::{
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
@@ -139,6 +140,9 @@ pub struct HubMethodAttrs {
     /// answer a question the method asks mid-call. Checked in
     /// [`MethodInfo::from_fn`] (the error names the method).
     pub answer_by: Option<syn::LitStr>,
+    /// BIDIR-6: `input_window = N` and the opt-in ceilings of a method with
+    /// an `Input`.
+    pub input_ceiling: InputCeilingAttrs,
     /// SYNAPSE-13: `group = "write"` — the method's group in a listing
     /// (OpenAPI's tag); emitted as `MethodSchema.group`.
     pub group: Option<String>,
@@ -152,6 +156,62 @@ pub struct HubMethodAttrs {
     /// `x-plexus-values` on the param's property. Checked to name params in
     /// [`MethodInfo::from_fn`].
     pub values: Vec<(syn::Ident, Vec<String>)>,
+}
+
+/// BIDIR-6: what `#[method(...)]` says of a method's input half. `window`
+/// is the credit it grants; the rest are limits it opts into.
+#[derive(Debug, Clone, Default)]
+pub struct InputCeilingAttrs {
+    pub window: Option<syn::LitInt>,
+    pub max_items: Option<syn::LitInt>,
+    pub max_bytes: Option<syn::LitInt>,
+    pub max_buffered: Option<syn::LitInt>,
+}
+
+impl InputCeilingAttrs {
+    fn first(&self) -> Option<(&'static str, &syn::LitInt)> {
+        [("input_window", &self.window), ("input_max_items", &self.max_items), ("input_max_bytes", &self.max_bytes), ("input_max_buffered", &self.max_buffered)]
+            .into_iter()
+            .find_map(|(n, v)| v.as_ref().map(|v| (n, v)))
+    }
+}
+
+/// BIDIR-6: a method's `Input<T>` parameter.
+#[derive(Debug, Clone)]
+pub struct InputInfo {
+    pub name: syn::Ident,
+    /// `T`.
+    pub item: Type,
+    /// Where it sits among the RPC params.
+    pub at: usize,
+    pub description: Option<String>,
+    pub ceiling: InputCeilingAttrs,
+}
+
+/// BIDIR-6: `T` of `Input<T>`, written by its last path segment, as
+/// `AuthContext` and `Reach` are recognised.
+fn input_item_type(ty: &Type) -> Option<Type> {
+    let Type::Path(tp) = ty else { return None };
+    let last = tp.path.segments.last()?;
+    if last.ident != "Input" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &last.arguments else { return None };
+    match args.args.iter().collect::<Vec<_>>().as_slice() {
+        [GenericArgument::Type(item)] => Some(item.clone()),
+        _ => None,
+    }
+}
+
+/// BIDIR-6: does `Input<…>` appear anywhere in these tokens?
+fn names_input(tokens: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::TokenTree;
+    let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+    tokens.iter().enumerate().any(|(i, t)| match t {
+        TokenTree::Ident(id) => id == "Input" && matches!(tokens.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '<'),
+        TokenTree::Group(g) => names_input(g.stream()),
+        _ => false,
+    })
 }
 
 /// SYNAPSE-13: one `example(note = "…", params = r#"{…}"#)` on a method.
@@ -307,6 +367,8 @@ impl Parse for HubMethodAttrs {
         let mut target: Option<syn::LitStr> = None;
         // BIDIR-8: `answer_by = "…"`.
         let mut answer_by: Option<syn::LitStr> = None;
+        // BIDIR-6: `input_window = N` and the opt-in ceilings.
+        let mut input_ceiling = InputCeilingAttrs::default();
         // SYNAPSE-13: group, examples, values.
         let mut group: Option<String> = None;
         let mut examples: Vec<ParsedExample> = Vec::new();
@@ -391,6 +453,28 @@ impl Parse for HubMethodAttrs {
                                 ));
                             };
                             answer_by = Some(s);
+                        } else if path.is_ident("input_window")
+                            || path.is_ident("input_max_items")
+                            || path.is_ident("input_max_bytes")
+                            || path.is_ident("input_max_buffered")
+                        {
+                            // BIDIR-6: the method's input half.
+                            let Expr::Lit(ExprLit { lit: Lit::Int(n), .. }) = value else {
+                                return Err(syn::Error::new_spanned(
+                                    &path,
+                                    "expects a whole number, e.g. #[plexus_macros::method(input_window = 256)]",
+                                ));
+                            };
+                            let slot = if path.is_ident("input_window") {
+                                &mut input_ceiling.window
+                            } else if path.is_ident("input_max_items") {
+                                &mut input_ceiling.max_items
+                            } else if path.is_ident("input_max_bytes") {
+                                &mut input_ceiling.max_bytes
+                            } else {
+                                &mut input_ceiling.max_buffered
+                            };
+                            *slot = Some(n);
                         } else if path.is_ident("group") {
                             // SYNAPSE-13: the method's group in a listing.
                             let usage = "group = ... expects a non-empty string, e.g. \
@@ -539,7 +623,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, bidirectional, http_method, request_override, public, scopes, streaming, target, answer_by, group, examples, values })
+        Ok(HubMethodAttrs { name, description, param_docs, bidirectional, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
     }
 }
 
@@ -1791,6 +1875,9 @@ pub struct MethodInfo {
     /// so the schema of a method without it is unchanged. Emitted as
     /// `MethodSchema.answer_by`.
     pub answer_by: Option<String>,
+    /// BIDIR-6: the method's `Input<T>` parameter: not in `params`, so the
+    /// params object is the other parameters.
+    pub input: Option<InputInfo>,
     /// AUTH-3: the `///` doc comment when an explicit `description = "..."`
     /// replaced it as the description — what it says beyond the
     /// description; emitted as `MethodSchema.long_description`.
@@ -1894,6 +1981,8 @@ impl MethodInfo {
         let mut takes_reach = false;
         let mut typed_index = 0usize;
         let mut auth_at: Option<usize> = None;
+        // BIDIR-6: the one `Input<T>`.
+        let mut input: Option<InputInfo> = None;
         for arg in &method.sig.inputs {
             if let FnArg::Typed(pat_type) = arg {
                 let this_index = typed_index;
@@ -1969,6 +2058,28 @@ impl MethodInfo {
                             // Don't include ctx in params (it's provided by framework)
                             continue;
                         }
+                    }
+
+                    // BIDIR-6: `Input<T>` is the input half, not a param. At
+                    // most one, at the top level: anywhere else there is no
+                    // item for the macro to hand it.
+                    if let Some(item) = input_item_type(&pat_type.ty) {
+                        if let Some(first) = &input {
+                            return Err(syn::Error::new_spanned(
+                                pat_type,
+                                format!("`{method_name}` declares a second `Input` (the first is `{}`): a method takes at most one", first.name),
+                            ));
+                        }
+                        let description = param_docs.get(&name_str).cloned().or_else(|| extract_doc_description(&pat_type.attrs));
+                        let ceiling = hub_method_attrs.map(|a| a.input_ceiling.clone()).unwrap_or_default();
+                        input = Some(InputInfo { name, item, at: params.len(), description, ceiling });
+                        continue;
+                    }
+                    if names_input(pat_type.ty.to_token_stream()) {
+                        return Err(syn::Error::new_spanned(
+                            &pat_type.ty,
+                            format!("`{method_name}`: `Input` is a parameter of the method itself, by value: it cannot be nested in another type"),
+                        ));
                     }
 
                     // Param description precedence:
@@ -2074,6 +2185,20 @@ impl MethodInfo {
             },
         };
 
+        // BIDIR-6: the input half's attributes need an input half; a window
+        // of nothing would grant nothing.
+        let ceiling = hub_method_attrs.map(|a| a.input_ceiling.clone()).unwrap_or_default();
+        if input.is_none() {
+            if let Some((name, lit)) = ceiling.first() {
+                return Err(syn::Error::new(lit.span(), format!("{name} on `{fn_name}`, which has no `Input` parameter")));
+            }
+        }
+        if let Some(window) = &ceiling.window {
+            if window.base10_parse::<u64>()? == 0 {
+                return Err(syn::Error::new(window.span(), format!("input_window on `{fn_name}`: a window of 0 lets nothing in")));
+            }
+        }
+
         // SYNAPSE-13: values and examples name only the method's params.
         let known_params = || -> String {
             let known: Vec<String> = params.iter().map(|p: &ParamInfo| p.name.to_string()).collect();
@@ -2130,6 +2255,7 @@ impl MethodInfo {
             deprecation,
             target,
             answer_by,
+            input,
             long_description,
             group,
             examples,
@@ -2778,6 +2904,7 @@ mod tests {
             streaming: None,
             target: None,
             answer_by: None,
+            input_ceiling: InputCeilingAttrs::default(),
             group: None,
             examples: vec![],
             values: vec![],

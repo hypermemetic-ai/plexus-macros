@@ -183,6 +183,26 @@ where
     })
 }
 
+/// BIDIR-6: [`trait_one`], for a method with an input half.
+pub fn trait_one_with_input<T, I>(
+    transport: T,
+    method: MethodRef,
+    params: Result<Value, ClientError>,
+    input: crate::transport::InputItems<'static>,
+    item: crate::method_stream::Decoder<I>,
+) -> BoxFuture<'static, I>
+where
+    T: Transport + MaybeSend + Sync + 'static,
+    I: FromClientError + MaybeSend + 'static,
+{
+    Box::pin(async move {
+        match crate::method_stream::call_one_with_input(&transport, method, params, input, item).await {
+            Ok(i) => i,
+            Err(e) => I::from_client_error(e),
+        }
+    })
+}
+
 /// `-> impl Stream<Item = T>` / `Item = Result<T, E>`: many items.
 pub fn trait_many<I>(
     items: Result<RawItemStream<'static>, ClientError>,
@@ -353,6 +373,45 @@ where
     let driver: Driver = Box::pin(async move {
         let transport = transport;
         let mut items = transport.call_raw(method, params);
+        while let Some(item) = items.next().await {
+            *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
+            HandOff(false).await;
+        }
+    });
+    Box::pin(Owned { driver: Some(driver), slot })
+}
+
+/// BIDIR-6: [`owned_call_raw`], for a method with an input half.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn owned_call_raw_with_input<T>(transport: T, method: MethodRef, params: Value, input: crate::transport::InputItems<'static>) -> RawItemStream<'static>
+where
+    T: Transport + Send + Sync + 'static,
+{
+    let slot: Slot<RawItem> = Arc::new(Mutex::new(None));
+    let tx = slot.clone();
+    let driver: Driver = Box::pin(async move {
+        let transport = transport;
+        let mut items = transport.call_raw_with_input(method, params, input);
+        while let Some(item) = items.next().await {
+            *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
+            HandOff(false).await;
+        }
+    });
+    Box::pin(Owned { driver: Some(driver), slot })
+}
+
+/// BIDIR-6: [`owned_call_raw`], for a method with an input half. See the
+/// non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub fn owned_call_raw_with_input<T>(transport: T, method: MethodRef, params: Value, input: crate::transport::InputItems<'static>) -> RawItemStream<'static>
+where
+    T: Transport + 'static,
+{
+    let slot: Slot<RawItem> = Arc::new(Mutex::new(None));
+    let tx = slot.clone();
+    let driver: Driver = Box::pin(async move {
+        let transport = transport;
+        let mut items = transport.call_raw_with_input(method, params, input);
         while let Some(item) = items.next().await {
             *tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(item);
             HandOff(false).await;

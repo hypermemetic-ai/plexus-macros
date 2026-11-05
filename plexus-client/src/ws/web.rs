@@ -62,6 +62,17 @@ impl Conn {
             .map_err(|e| TransportError::other(format!("websocket send failed: {e:?}")))
     }
 
+    /// BIDIR-17: a binary input frame.
+    pub(crate) fn send_binary(&self, frame: Vec<u8>) -> Result<(), TransportError> {
+        if self.inner.socket.ready_state() != WebSocket::OPEN {
+            return Err(TransportError::closed("websocket connection is closed"));
+        }
+        self.inner
+            .socket
+            .send_with_u8_array(&frame)
+            .map_err(|e| TransportError::other(format!("websocket send failed: {e:?}")))
+    }
+
     /// The last `WsTransport` handle went away. `Socket`'s own `Drop` does
     /// this too, once every clone of this handle is gone; closing here means
     /// a browser tab does not hold a connection open for as long as some

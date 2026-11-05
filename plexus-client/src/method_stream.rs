@@ -52,7 +52,7 @@ use crate::envelope::{Content, RawItem};
 use crate::error::ClientError;
 use crate::frame::Frame;
 use crate::lift::{Lift, Root};
-use crate::transport::{MethodRef, RawItemStream, Transport};
+use crate::transport::{InputItems, MethodRef, RawItemStream, Transport};
 
 /// Decodes one data frame's `content` into a method's item `I` — straight
 /// from the wire's text where the transport kept it (PERF.115-36's
@@ -299,6 +299,26 @@ impl<'a, I, P, A> MethodStream<'a, I, P, A> {
         Self::from_core(Core::new(state, item), event)
     }
 
+    /// BIDIR-6: [`call`](Self::call), for a method with an input half:
+    /// `input` is sent under the callee's credit as the stream is read.
+    pub fn call_with_input<T>(
+        transport: &'a T,
+        method: MethodRef,
+        params: Result<Value, ClientError>,
+        input: InputItems<'a>,
+        item: Decoder<I>,
+        event: fn(I) -> A,
+    ) -> Self
+    where
+        T: Transport + ?Sized,
+    {
+        let state = match params {
+            Ok(params) => State::Live(transport.call_raw_with_input(method, params, input)),
+            Err(e) => State::Failed(e),
+        };
+        Self::from_core(Core::new(state, item), event)
+    }
+
     fn from_core(core: Core<'a, I>, event: fn(I) -> A) -> Self {
         Self {
             core,
@@ -325,6 +345,36 @@ impl<'a, I, P, A> MethodStream<'a, I, P, A> {
     {
         let state = match params {
             Ok(params) => State::Live(transport.call_raw(method, params)),
+            Err(e) => State::Failed(e),
+        };
+        MethodStream {
+            core: Core::new(state, item),
+            event,
+            _aggregate: PhantomData,
+            lift: Root,
+            _progress: PhantomData,
+        }
+    }
+}
+
+impl<'a, I, P, A> MethodStream<'a, I, P, A> {
+    /// [`call_as`](Self::call_as) for a method with an input half
+    /// (BIDIR-6, RETURNS-46): `input` is sent under the callee's credit as
+    /// the stream is read.
+    pub fn call_as_with_input<T, W>(
+        transport: &'a T,
+        method: MethodRef,
+        params: Result<Value, ClientError>,
+        input: InputItems<'a>,
+        item: Decoder<I>,
+        event: W,
+    ) -> MethodStream<'a, I, P, A, Root, W>
+    where
+        T: Transport + ?Sized,
+        W: EventOf<I, Aggregate = A>,
+    {
+        let state = match params {
+            Ok(params) => State::Live(transport.call_raw_with_input(method, params, input)),
             Err(e) => State::Failed(e),
         };
         MethodStream {
@@ -546,11 +596,32 @@ pub async fn call_one<T, I>(
 where
     T: Transport + ?Sized,
 {
+    let qualified = method.qualified();
+    one_of(MethodStream::call(transport, method, params, item, identity::<I>), qualified).await
+}
+
+/// BIDIR-6: [`call_one`], for a method with an input half: `input` is sent
+/// under the callee's credit while the call is read to its end.
+pub async fn call_one_with_input<'a, T, I>(
+    transport: &'a T,
+    method: MethodRef,
+    params: Result<Value, ClientError>,
+    input: InputItems<'a>,
+    item: Decoder<I>,
+) -> Result<I, ClientError>
+where
+    T: Transport + ?Sized,
+{
+    let qualified = method.qualified();
+    one_of(MethodStream::call_with_input(transport, method, params, input, item, identity::<I>), qualified).await
+}
+
+/// A one-item call's item, read to its terminal frame. `qualified` names
+/// the method in a contract break (RETURNS-46: a `MethodRef` is `Clone`, not
+/// `Copy`, so the name is taken before the call has it).
+async fn one_of<I>(mut items: MethodStream<'_, I>, qualified: String) -> Result<I, ClientError> {
     use futures_util::StreamExt;
 
-    let qualified = method.qualified();
-    let mut items: MethodStream<'_, I> =
-        MethodStream::call(transport, method, params, item, identity::<I>);
     let contract = |message: &str| ClientError::Decode {
         content_type: Some(qualified.clone()),
         message: message.to_string(),

@@ -20,6 +20,8 @@ use tokio_tungstenite::tungstenite::Message;
 #[derive(Debug)]
 enum Out {
     Frame(String),
+    /// BIDIR-17: a binary input frame.
+    Binary(Vec<u8>),
     /// The last `WsTransport` handle went away: shut the socket down rather
     /// than leave a connection open until the process exits.
     Close,
@@ -38,6 +40,12 @@ impl Conn {
     pub(crate) fn send(&self, text: String) -> Result<(), TransportError> {
         self.outbound
             .unbounded_send(Out::Frame(text))
+            .map_err(|_| TransportError::closed("websocket connection is closed"))
+    }
+
+    pub(crate) fn send_binary(&self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.outbound
+            .unbounded_send(Out::Binary(frame))
             .map_err(|_| TransportError::closed("websocket connection is closed"))
     }
 
@@ -89,6 +97,11 @@ pub(crate) async fn connect_with_headers(
             match out {
                 Out::Frame(text) => {
                     if sink.send(Message::text(text)).await.is_err() {
+                        break;
+                    }
+                }
+                Out::Binary(frame) => {
+                    if sink.send(Message::binary(frame)).await.is_err() {
                         break;
                     }
                 }

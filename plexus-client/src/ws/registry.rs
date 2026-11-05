@@ -27,6 +27,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub(crate) enum Delivered {
     Item(StreamItem),
     Raw(RawItem),
+    /// BIDIR-6: a frame of the call's input half. This transport's to spend,
+    /// so it is no item: a caller never sees one.
+    Input(InputSignal),
 }
 
 impl Delivered {
@@ -34,6 +37,7 @@ impl Delivered {
         match self {
             Delivered::Item(item) => item.is_terminal(),
             Delivered::Raw(item) => item.is_terminal(),
+            Delivered::Input(_) => false,
         }
     }
 
@@ -41,7 +45,7 @@ impl Delivered {
     pub(crate) fn into_item(self) -> StreamItem {
         match self {
             Delivered::Item(item) => item,
-            Delivered::Raw(_) => unreachable!("a call is handed the items it asked for"),
+            Delivered::Raw(_) | Delivered::Input(_) => unreachable!("a call is handed the items it asked for"),
         }
     }
 
@@ -50,6 +54,7 @@ impl Delivered {
         match self {
             Delivered::Raw(item) => item,
             Delivered::Item(item) => RawItem::from(item),
+            Delivered::Input(_) => unreachable!("a call is handed the items it asked for"),
         }
     }
 }
@@ -57,6 +62,28 @@ impl Delivered {
 /// The receiving half of one subscription's item channel.
 pub(crate) type Items = mpsc::UnboundedReceiver<Result<Delivered, TransportError>>;
 type ItemsTx = mpsc::UnboundedSender<Result<Delivered, TransportError>>;
+
+/// The input half's output items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputSignal {
+    /// `credit {n}`: `n` more items.
+    Credit(u64),
+    /// `input_closed`: the callee reads no more.
+    Closed,
+    /// `ack`: nothing for a sender that never resends.
+    Ack,
+}
+
+impl InputSignal {
+    fn of(result: &Value) -> Option<Self> {
+        match result.get("type")?.as_str()? {
+            "credit" => Some(Self::Credit(result.get("n")?.as_u64()?)),
+            "input_closed" => Some(Self::Closed),
+            "ack" => Some(Self::Ack),
+            _ => None,
+        }
+    }
+}
 
 /// One call's cancellation state, shared between the caller's stream and the
 /// connection's reader.
@@ -97,6 +124,11 @@ impl SubSlot {
     }
 
     /// The stream saw `done` or `error`.
+    /// The subscription id, once acknowledged.
+    pub(crate) fn subscription(&self) -> Option<Value> {
+        self.lock().subscription.clone()
+    }
+
     pub(crate) fn mark_finished(&self) {
         self.lock().finished = true;
     }
@@ -482,6 +514,11 @@ enum Kind {
     Error,
     Request,
     Done,
+    /// BIDIR-6: the input half's `credit`, `ack` and `input_closed`, read
+    /// through the `Value` reading (they are few: one a half window).
+    Credit,
+    Ack,
+    InputClosed,
     #[serde(other)]
     Other,
 }
@@ -517,7 +554,7 @@ impl Fields<'_> {
                 timeout_ms: self.timeout_ms.unwrap_or(0),
             },
             Kind::Done => StreamItem::Done { metadata },
-            Kind::Other => return None,
+            Kind::Credit | Kind::Ack | Kind::InputClosed | Kind::Other => return None,
         })
     }
 
@@ -530,7 +567,7 @@ impl Fields<'_> {
             Kind::Error => return None,
             Kind::Request => RawItem::Request,
             Kind::Done => RawItem::Done,
-            Kind::Other => return None,
+            Kind::Credit | Kind::Ack | Kind::InputClosed | Kind::Other => return None,
         })
     }
 }
@@ -772,6 +809,9 @@ impl Registry {
         if kind == Kind::Other {
             return;
         }
+        if matches!(kind, Kind::Credit | Kind::Ack | Kind::InputClosed) {
+            return drop(self.on_value(text));
+        }
         let key = key_of_text(note.subscription);
         let mut state = self.lock();
         let Some(sub) = state.subs.get_mut(key.as_ref()) else {
@@ -814,6 +854,11 @@ impl Registry {
         drop(state);
 
         let payload = frame.pointer("/params/result").cloned().unwrap_or(Value::Null);
+        // BIDIR-6: the input half's frames are this transport's.
+        if let Some(signal) = InputSignal::of(&payload) {
+            let _ = sink.unbounded_send(Ok(Delivered::Input(signal)));
+            return;
+        }
         // spec/03: an item of a `type` this client does not know is not
         // terminal; it is skipped, and the stream goes on.
         if payload.get("type").and_then(Value::as_str).is_some_and(|kind| !KINDS.contains(&kind)) {
@@ -917,6 +962,25 @@ pub(crate) fn subscribe_frame(
         "id": request_id,
         "method": format!("{hub_namespace}.call"),
         "params": { "method": qualified_method, "params": params },
+    })
+    .to_string()
+}
+
+/// BIDIR-6: `<hub>.input`, a notification: `items` is the items' JSON,
+/// comma-separated, already written.
+pub(crate) fn input_frame(hub_namespace: &str, subscription: &Value, seq: u64, items: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","method":{},"params":{{"subscription":{subscription},"seq":{seq},"items":[{items}]}}}}"#,
+        Value::from(format!("{hub_namespace}.input"))
+    )
+}
+
+/// BIDIR-6: `<hub>.end`: `seq` is the number of input frames sent.
+pub(crate) fn end_frame(hub_namespace: &str, subscription: &Value, seq: u64) -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "method": format!("{hub_namespace}.end"),
+        "params": { "subscription": subscription, "seq": seq },
     })
     .to_string()
 }
@@ -1277,6 +1341,40 @@ mod tests {
     #[test]
     fn a_numeric_and_a_string_subscription_id_do_not_collide() {
         assert_ne!(key_of(&json!(7)), key_of(&json!("7")));
+    }
+
+    #[test]
+    fn the_input_frames_are_the_ones_the_wire_says() {
+        let frame: Value = serde_json::from_str(&input_frame("menger", &json!(21), 0, r#"{"t":"The"},{"t":" cat"}"#)).unwrap();
+        assert_eq!(frame, json!({"jsonrpc":"2.0","method":"menger.input","params":{"subscription":21,"seq":0,"items":[{"t":"The"},{"t":" cat"}]}}));
+        let frame: Value = serde_json::from_str(&end_frame("menger", &json!(21), 2)).unwrap();
+        assert_eq!(frame, json!({"jsonrpc":"2.0","method":"menger.end","params":{"subscription":21,"seq":2}}));
+    }
+
+    /// BIDIR-6: an item that reaches a client before the id it follows is
+    /// kept for the call that learns it.
+    #[test]
+    fn an_item_before_its_subscribe_reply_is_held_for_it() {
+        let registry = Registry::new(Arc::from("menger"));
+        let slot = SubSlot::new();
+        let id = registry.next_request_id();
+        let mut reply = registry.register_pending(id, slot, false).unwrap();
+        let credit = json!({"jsonrpc":"2.0","method":"result","params":{"subscription":21,"result":{"type":"credit","n":64}}}).to_string();
+        assert!(registry.on_text(&credit).is_none());
+        let answer = json!({"jsonrpc":"2.0","id":id,"result":21}).to_string();
+        assert!(registry.on_text(&answer).is_none());
+        let mut items = reply.try_recv().unwrap().unwrap().unwrap();
+        assert!(matches!(items.try_recv().unwrap(), Ok(Delivered::Input(InputSignal::Credit(64)))));
+    }
+
+    /// With nothing outstanding an unknown subscription's item is dropped,
+    /// as ever: nothing grows.
+    #[test]
+    fn an_item_of_no_subscription_is_not_kept() {
+        let registry = Registry::new(Arc::from("menger"));
+        let stray = json!({"jsonrpc":"2.0","method":"result","params":{"subscription":9,"result":{"type":"done"}}}).to_string();
+        assert!(registry.on_text(&stray).is_none());
+        assert!(registry.lock().early.is_empty());
     }
 
     /// Reply first, then drop: the caller's guard has the id, so the reader

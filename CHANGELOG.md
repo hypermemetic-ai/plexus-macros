@@ -5,6 +5,8 @@ This file starts at 0.7.0; earlier changes are in the git history.
 
 ## [Unreleased]
 
+RETURNS-46, after 0.8.0: breaking, so the next release is 0.9.0.
+
 ### Added
 
 - RETURNS-46: the aggregate up the tree. `{Ns}Event` gains one variant per
@@ -24,24 +26,16 @@ This file starts at 0.7.0; earlier changes are in the git history.
   `MethodStream::lifted`, `ClientError::InvalidName`. A method whose wire
   name is a child's segment is refused. An activation without children: its
   aggregate unchanged.
-
-- PERF.115-36: a typed client decodes an item's content straight from the
-  wire's text into the method's event, never through a `Value`.
-  `Transport::call_raw` yields the call's items as a typed client reads them
-  (`RawItem`, its content a `Content`); its default maps `call`'s items, so
-  every transport has it, and `WsTransport` hands over the text unread.
-  `decode_raw` and `owned_call_raw` are `decode` and `owned_call` for them.
-  A generated client and a client's contract call these. A decode error is
-  worded as `decode` words it. On a WebSocket from plexus-core, a 64 B item
-  falls from 36,976 instructions to 6,404 in the client, a ticket row from
-  77,577 to 16,145, a 17 KB ticket body from 176,873 to 128,388.
+- A method with an input half (BIDIR-6) is lifted and named like any other:
+  its stream is `{Ns}{Method}Stream<'a, L>`, its `MethodRef` takes the
+  client's `RoutePath`; `MethodStream::call_as_with_input`.
 
 ### Changed
 
 - RETURNS-46 breaks, each for a reason:
   - **A generated client is `XClient<T, L = Root>`**, and a child accessor's
     return type names its lift: `tickets.inputs()` is
-    `InputsClient<&T, Static<Root, InputsEvent, TicketsEvent>>` (was
+    `InputsClient<&T, Static<Root, __TicketsClientInputs>>` (was
     `InputsClient<&T>`). Code that names it: let it be inferred, or name the
     child's own client (`InputsClient::at(t, "tickets.inputs")`).
   - **`.events()` on a call through an accessor yields the ancestor's
@@ -84,6 +78,72 @@ This file starts at 0.7.0; earlier changes are in the git history.
     for `XClient<T>`, `Default`.
   - `MemoryTransport::params_of` takes `impl Borrow<MethodRef>`.
 
+## [0.8.0]
+
+plexus-macros 0.8.0 and plexus-client 0.8.0, released with plexus-core 0.8.0:
+the code these macros emit needs it.
+
+### Changed (PUBLISH-3)
+
+- The tests' `plexus-auth-core` dev-dependency asks for 0.3 (`CallCeiling`
+  gained `max_buffered`, BIDIR-6).
+
+BIDIR-6: `Input<T>`. BIDIR-17: `Input<Bytes>` as binary frames.
+
+### Added (BIDIR-17)
+
+- `MethodSchema.input` of an `Input<Bytes>` is marked binary (through
+  plexus-core's `input::item_schema`).
+- plexus-client: `InputItems` carries `InputItem` (`Json`, or `Binary` with the
+  new `binary` feature, which `ws-native` and `ws-web` turn on; the default
+  core stays four dependencies). `encode_input` makes a `Bytes` item `Binary`
+  and needs `T: 'static`; `WsTransport` writes each as one binary frame.
+
+### Added
+
+- A method's `Input<T>` parameter: at most one, top-level, not in its params.
+  `MethodSchema.input` is `T`'s schema. A second one, or one nested in a type
+  the signature shows, is a compile error naming the method; one in a param's
+  struct does not compile, since `Input` takes no serde.
+- `#[method(input_window = N)]` (the credit, default 64),
+  `input_max_buffered = N` (bytes held past which credit is held back,
+  default 64 MiB; never a refusal), and the opt-in
+  `input_max_items = N`, `input_max_bytes = N`.
+- The emitted client takes the input as `impl Stream<Item = T>` in the
+  parameter's place; the emitted trait takes it as a boxed stream.
+- plexus-client: `Transport::call_with_input` (default: refused, naming the
+  method), `InputItems`, `encode_input`, `MaybeSend`, `owned_call_with_input`.
+  `WsTransport` feeds the input under credit as the returned stream is polled,
+  spends `credit`, `ack` and `input_closed` itself (a caller never sees them;
+  `StreamItem` is unchanged), and keeps items that arrive before their
+  subscription id.
+### Added
+
+- PERF.115-43: `#[derive(plexus_macros::Deserialize)]`, an internally tagged
+  enum's `Deserialize` that reads its tag first. Written where serde's
+  `Deserialize` goes on a house event (`#[serde(tag = "type")]`), it reads the
+  first key and, when it is the tag, reads the variant straight from the rest
+  of the object, without serde's buffer; anywhere else, serde reads the object
+  as before. Every `#[serde]` attribute is serde's own: the derive has serde
+  derive the enum twice more (`remote`), as written and without its tag.
+  Refused, by name: anything but an internally tagged enum, a generic one, one
+  with an untagged variant. In a generated client a 64 B item falls from 6,558
+  instructions to 6,081, a ticket row from 16,312 to 12,011; the event alone,
+  as any Rust reader reads it, from 2,312 to 1,831 and 12,043 to 7,740.
+  `plexus_client::__rt::type_first` is its runtime.
+- PERF.115-36: a typed client decodes an item's content straight from the
+  wire's text into the method's event, never through a `Value`.
+  `Transport::call_raw` yields the call's items as a typed client reads them
+  (`RawItem`, its content a `Content`); its default maps `call`'s items, so
+  every transport has it, and `WsTransport` hands over the text unread.
+  `decode_raw` and `owned_call_raw` are `decode` and `owned_call` for them.
+  A generated client and a client's contract call these. A decode error is
+  worded as `decode` words it. On a WebSocket from plexus-core, a 64 B item
+  falls from 36,976 instructions to 6,404 in the client, a ticket row from
+  77,577 to 16,145, a 17 KB ticket body from 176,873 to 128,388.
+
+### Changed
+
 - `WsTransport` reads each frame in place, not into a `Value`; a call that
   reads `StreamItem`s (`call`) gets the same items, built from their fields.
   A data notification as plexus-core writes it is read by its bytes for a
@@ -99,9 +159,7 @@ This file starts at 0.7.0; earlier changes are in the git history.
   kept, while a call waits for its id, and handed over when the id arrives
   (spec/02 rule 4); it was dropped.
 
-## [0.8.0] — unreleased (RETURNS-36: precise returns over main)
-
-### Breaking
+### Breaking (RETURNS-36: precise returns over main)
 
 - A method's return type is its contract (RETURNS-8): `-> T`,
   `-> Result<T, E>`, `-> impl Stream<Item = T | Result<T, E> |
