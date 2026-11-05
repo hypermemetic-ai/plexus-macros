@@ -18,6 +18,50 @@ warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATIO
 30 | impl Inputs {
    |      ^^^^^^
 
+error[E0277]: `Inputs` has no client, so the parent's client cannot reach it as a `#[child]`
+  --> tests/compile/macro16_child_without_client.rs:20:25
+   |
+20 |     fn inputs(&self) -> Inputs {
+   |                         ^^^^^^ a `#[child]` of an activation with a client must have a client too
+   |
+help: the trait `HasClient` is not implemented for `Inputs`
+  --> tests/compile/macro16_child_without_client.rs:26:1
+   |
+26 | pub struct Inputs;
+   | ^^^^^^^^^^^^^^^^^
+   = note: mark the child `#[plexus_macros::child(opaque)]`: no accessor, no variant in the parent's aggregate, routed as before — or give `Inputs` a client (name it `…Activation`, or add `client`)
+help: the following other types implement trait `HasClient`
+  --> tests/compile/macro16_child_without_client.rs:11:1
+   |
+11 |   #[plexus_macros::activation(namespace = "tickets", client)]
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Tickets`
+   |
+  ::: $PLEXUS_CORE/src/activations/echo/activation.rs
+   |
+   | / #[plexus_macros::activation(
+   | |     version = "1.0.0",
+   | |     description = "Echo messages back - demonstrates plexus-macros usage",
+...  |
+   | | )]
+   | |__^ `EchoActivation`
+   |
+  ::: $PLEXUS_CORE/src/plexus/auth_activation.rs
+   |
+   | / #[plexus_macros::activation(
+   | |     version = "1.0.0",
+   | |     description = "Sign in, who am I, what does this need",
+   | |     roles(member = ["whoami", "logout", "requires"]),
+...  |
+   | |     typed_params,
+   | | )]
+   | |__^ `AuthActivation`
+note: required by a bound in `__plexus_child_needs_a_client`
+  --> tests/compile/macro16_child_without_client.rs:11:1
+   |
+11 | #[plexus_macros::activation(namespace = "tickets", client)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `__plexus_child_needs_a_client`
+   = note: this error originates in the attribute macro `plexus_macros::activation` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0433]: cannot find type `InputsClient` in this scope
   --> tests/compile/macro16_child_without_client.rs:20:25
    |

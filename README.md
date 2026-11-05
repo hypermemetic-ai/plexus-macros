@@ -644,7 +644,7 @@ pub enum TicketsEvent {                          // Pascal(namespace) + "Event"
     #[serde(rename = "import")] Import(#[serde(with = "plexus_client::wire_result")] Result<ImportSummary, ImportError>),
 }
 
-pub struct TicketsClient<T> { /* .. */ }
+pub struct TicketsClient<T, L = plexus_client::Root> { /* .. */ }   // L: RETURNS-46, the lift .events() applies
 
 impl<T> TicketsClient<T> {
     pub const NAMESPACE: &'static str = "tickets";
@@ -660,11 +660,14 @@ impl<T: plexus_client::Transport> TicketsClient<T> {
     pub async fn health(&self) -> Result<Health, ClientError>;
     pub async fn get(&self, id: String) -> Result<Result<Ticket, GetError>, ClientError>;
 
-    // many items: a MethodStream<'_, item, progress, aggregate>
+}
+
+impl<T: plexus_client::Transport, L: plexus_client::Lift<TicketsEvent>> TicketsClient<T, L> {
+    // many items: a MethodStream<'_, item, progress, aggregate, lift>
     pub fn list(&self, epic: Option<String>)
-        -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent>;
+        -> MethodStream<'_, Result<ListItem, ListError>, NoProgress, TicketsEvent, L, __TicketsClientList>;
     pub fn import(&self, source: String)
-        -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent>;
+        -> MethodStream<'_, Result<ImportSummary, ImportError>, ImportStep, TicketsEvent, L, __TicketsClientImport>;
 }
 ```
 
@@ -715,11 +718,102 @@ while let Some(ev) = all.next().await { state.reduce(ev?) }   // ev: TicketsEven
 | **Typed params** | the method's own parameter types, in signature order. `#[activation_param]`, `#[from_auth]` and `auth:` params are absent — the server injects those. `Option` params that are `None` are **omitted**, not sent as `null`. |
 | **Precise items** | each method's own item type — not a shared enum, not a copy. A Result method's err is a value (`Ok(Err(e))` in a stream) and does not end it. |
 | **Typed call failures** | `ClientError::Remote(RemoteError)` — the server's error frame, `kind`-tagged and exhaustive (`method_not_found`, `invalid_params { param, problem }`, `unauthenticated`, `forbidden { reason }`, …) — vs `ClientError::Transport` (the connection failed), `Decode` (the answer does not fit the contract) and `Encode` (an argument would not serialize; nothing was sent). A failed call is an item of the stream, so a cut-off stream cannot pass for a finished one. |
-| **The aggregate** | `{Ns}Event`: one variant per method, named Pascal(method), tagged with the wire name, carrying the item. Derived, never sent. Every `.events()` has the same type, so merging calls is ordinary stream plumbing. |
+| **The aggregate** | `{Ns}Event`: one variant per method, named Pascal(method), tagged with the wire name, carrying the item; then one per `#[child]`, carrying the child's own aggregate (RETURNS-46, below). Derived, never sent. Every `.events()` has the same type, so merging calls is ordinary stream plumbing. |
 | **Transport-generic** | any `plexus_client::Transport` — in-process, WebSocket JSON-RPC, REST + SSE. The emitted code names none of them. |
 | **Two error layers** | `ClientError::Transport` (the connection failed) vs `ClientError::Remote(RemoteError)` (the server answered with a typed `error` frame). An activation's *own* `Err` item stays data. |
 | **Zero drift** | rename a field on an item type and every consumer of the client stops compiling. |
-| **Children** (MACRO-16) | a static `#[child] fn inputs(&self) -> Inputs` gives the parent's client `fn inputs(&self) -> InputsClient<&T>`, whose calls go to `tickets.inputs.<method>`, the path the hub routes. Accessors nest, so `client.inputs().history().tail(..)` goes to `tickets.inputs.history.tail`. The child must be declared with `client` too, or `InputsClient` does not resolve at the accessor's return type. `InputsClient::new(t)` alone still sends `inputs.<method>`. `InputsClient::at(t, "tickets.inputs")` mounts it by hand. Dynamic children (`fn x(&self, name: &str)`) get no accessor. |
+| **Children** (MACRO-16, RETURNS-46) | a static `#[child] fn inputs(&self) -> Inputs` gives the parent's client `fn inputs(&self) -> InputsClient<&T, Static<L, __TicketsClientInputs>>`, whose calls go to `tickets.inputs.<method>`, the path the service routes. A dynamic `#[child] fn item(&self, name: &str) -> Option<Item>` gives `fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`, whose calls go to `tickets.<name>.<method>`. `#[child(opaque)]`: neither. Accessors nest, so `client.inputs().history().tail(..)` goes to `tickets.inputs.history.tail`. The child must have a client too, or `InputsClient` does not resolve at the accessor's return type. `InputsClient::new(t)` alone still sends `inputs.<method>`; `InputsClient::at(t, "tickets.inputs")` mounts it by hand; both yield the child's own aggregate. |
+
+### The aggregate up the tree (RETURNS-46)
+
+An activation's aggregate nests its children's, at every level:
+
+```rust
+pub enum TreeEvent {
+    #[serde(rename = "count")]  Count(Tick),                    // a method's item, as before
+    #[serde(rename = "branch")] Branch(BranchEvent),            // a static child: its aggregate
+    #[serde(rename = "item")]   Item { name: Arc<str>, event: Box<ItemEvent> },   // a dynamic child
+}
+impl From<BranchEvent> for TreeEvent { /* TreeEvent::Branch */ }               // one per static child
+```
+
+```text
+{"method":"branch","event":{"method":"leaf","event":{"method":"fall","event":{"leaf":1}}}}
+{"method":"item","event":{"name":"a","event":{"method":"watch","event":{"seen":"a","n":1}}}}
+```
+
+A static child's variant is tagged with its route segment; a dynamic
+child's with the child method's name, its content `{name, event}`, the
+instance's name beside its event. A child's aggregate is named through its
+client (`<BranchClient<()> as plexus_client::Aggregated>::Event`), the rule
+the accessor names the client by, so a child whose namespace is not its stem
+is found all the same.
+
+**A dynamic child's event is boxed; a static child's is not.** Every cycle
+a service can serve passes through a dynamic child — a cycle of static
+children is a tree with no bottom, whose schema the service never finishes
+describing — so boxing the dynamic variant breaks every cycle (`ping` with
+the static child `pong`, `pong` with the dynamic child `ping`), and a static
+level costs no allocation. A child that is the activation itself (`-> Self`,
+`-> Option<Self>`, its own name) is boxed too.
+
+**A client reached through a parent's accessor yields the parent's
+aggregate.** Every client is `XClient<T, L = plexus_client::Root>`; `L` is
+its lift, a type: `Root` (nothing), `Static` (the parent's lift and a
+zero-sized `Wrap`, the variant) or `Named` (the instance's name too, an
+`Arc<str>` every event shares). A many-item method's stream names its
+variant as a zero-sized `EventOf` too (`MethodStream<'_, I, P, XEvent, L,
+__XClientM>`), so the variant and the lift inline into one step per event:
+a static level costs what the level's own client does. Each many-item
+method's stream has a name to hold it by, `{Ns}{Method}Stream<'a, L = Root>`
+(`TreeCountStream<'a>`, `BranchGrowStream<'a, L>`; `{Ns}{Method}MethodStream`
+when an item type already has that name), and the method returns it. One listener over a subtree is one `select_all`,
+matched with no wildcard:
+
+```rust
+let tree = TreeClient::new(&ws);
+let (branch, a, b) = (tree.branch(), tree.item("a"), tree.item("b"));
+let leaf = branch.leaf();
+let mut all = futures::stream::select_all([
+    tree.count(2).events(), branch.grow(3).events(), leaf.fall(2).events(), a.watch(2).events(), b.watch(1).events(),
+]);
+while let Some(ev) = all.next().await {
+    match ev? {
+        TreeEvent::Count(t) => …,
+        TreeEvent::Branch(BranchEvent::Grow(r)) => …,
+        TreeEvent::Branch(BranchEvent::Leaf(FoliageEvent::Fall(f))) => …,
+        TreeEvent::Item { name, event } => match *event { ItemEvent::Watch(s) => … },   // name: "a" or "b"
+        TreeEvent::Ping(_) => …,
+    }
+}
+```
+
+A child's own client (`BranchClient::at(t, "tree.branch")`) yields
+`BranchEvent`, and lifts one level with `TreeEvent::from`. No `From` is
+emitted for a dynamic child (the variant needs the name), for two static
+children of one type (which variant?), or for a child that is the activation
+itself.
+
+**Instance names.** `tree.item(name)` reaches `tree.<name>`; a dynamic
+instance's path is the client's own (`RoutePath`, an `Arc<str>`), freed with
+it — no process-wide set, no lock. A name that cannot reach the instance —
+empty, holding a `.`, outside the service's path grammar (`[a-z][a-z0-9_]*`),
+a static child's segment — does not fail the accessor; every call through
+it, and through anything below it, fails at once with
+`ClientError::InvalidName { name, reason }`, and nothing is sent. A name
+that is one of the parent's methods is the instance: the service takes the
+segment after the parent as a child. The static siblings checked are the
+ones this client was built against: a sibling a newer service adds is not
+known to an older client, whose instance of that name the service routes to
+the new sibling.
+
+**`#[child(opaque)]`** — a child whose type has no client (a hand-written
+`ChildRouter`, an activation without one): no accessor, no variant, routed
+as before. A child of a client activation without a client and without
+`opaque` is a compile error that says so. A method whose wire name is a
+child's segment is refused: they share one route namespace and one tag.
+`fixtures/aggregate-tree` holds the JSON at every level;
+`fixtures/aggregate-probe` the shapes the tree must survive.
 
 A one-item call reads the call to its `done` before it returns, so a
 transport that cancels a dropped call (the WebSocket one unsubscribes) never

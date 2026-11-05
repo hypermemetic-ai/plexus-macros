@@ -1,0 +1,5 @@
+error: #[plexus_macros::activation(client)]: the method `branch` and the child `branch` both derive the `TreeEvent::Branch` variant of the activation's aggregate (methods and children share one route namespace); rename one of them
+  --> tests/compile/returns46_method_and_child_share_a_name.rs:21:8
+   |
+21 |     fn branch(&self) -> BranchActivation {
+   |        ^^^^^^

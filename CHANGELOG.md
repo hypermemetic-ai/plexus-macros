@@ -3,6 +3,81 @@
 All notable changes to plexus-macros and plexus-client are documented here.
 This file starts at 0.7.0; earlier changes are in the git history.
 
+## [Unreleased]
+
+RETURNS-46, after 0.8.0: breaking, so the next release is 0.9.0.
+
+### Added
+
+- RETURNS-46: the aggregate up the tree. `{Ns}Event` gains one variant per
+  `#[child]` carrying the child's aggregate — a static child's
+  `{"method": "<segment>", "event": <child's>}`, a dynamic child's
+  `{"method": "<child>", "event": {"name": "<instance>", "event": <child's>}}`,
+  its event boxed and its name an `Arc<str>` — and `From<ChildEvent>` per
+  static child. A dynamic child gets an accessor,
+  `fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`,
+  reaching `<path>.<name>.<method>`; a name that is empty, holds a `.`, is
+  outside the service's path grammar (`[a-z][a-z0-9_]*`) or is a static
+  child's segment makes every call through it fail at once with
+  `ClientError::InvalidName` (`NameRefusal`), sending nothing; a name that
+  is a method of the parent is the instance. `#[child(opaque)]`: a child with no client — no accessor, no
+  variant, routed as before. plexus-client: `Lift` (`Root`, `Static`,
+  `Named`), `Wrap`, `EventOf`, `Aggregated`, `HasClient`, `Route`, `RoutePath`,
+  `MethodStream::lifted`, `ClientError::InvalidName`. A method whose wire
+  name is a child's segment is refused. An activation without children: its
+  aggregate unchanged.
+- A method with an input half (BIDIR-6) is lifted and named like any other:
+  its stream is `{Ns}{Method}Stream<'a, L>`, its `MethodRef` takes the
+  client's `RoutePath`; `MethodStream::call_as_with_input`.
+
+### Changed
+
+- RETURNS-46 breaks, each for a reason:
+  - **A generated client is `XClient<T, L = Root>`**, and a child accessor's
+    return type names its lift: `tickets.inputs()` is
+    `InputsClient<&T, Static<Root, __TicketsClientInputs>>` (was
+    `InputsClient<&T>`). Code that names it: let it be inferred, or name the
+    child's own client (`InputsClient::at(t, "tickets.inputs")`).
+  - **`.events()` on a call through an accessor yields the ancestor's
+    aggregate** — `tickets.inputs().answer(..).events()` yields
+    `TicketsEvent::Inputs(InputsEvent::Answer(..))`, not `InputsEvent`. Code
+    matching the child's own event there stops compiling; for the child's own
+    aggregate call through the child's own client, `InputsClient::new` /
+    `InputsClient::at`.
+  - **A cycle of static children across types is a compile error**
+    (E0391, "cycle detected when computing layout of `PingEvent`"): a
+    dynamic child's event is boxed, a static child's is not, so a cycle made
+    of static children alone has an aggregate of infinite size. No service
+    could serve one: its schema is a tree with no bottom, which the service
+    recurses into without end when it describes its static children (one
+    activation that is its own static child, `-> Self`, is boxed and
+    compiles — and overflows the stack in `DynamicHub::register`). The
+    macro cannot name the cycle: each activation is expanded alone, and a
+    cycle across types is visible to none of them. Break it with a dynamic
+    child.
+  - **A child must have a client, or be `#[child(opaque)]`** — now a dynamic
+    child too (it had no accessor before). The error says so.
+  - **`MethodRef`'s path is a `RoutePath`** (a `&'static str` or an
+    `Arc<str>`), so `MethodRef` is `Clone`, not `Copy`; `MethodRef::at` takes
+    `impl Into<RoutePath>` (a `&'static str` still works) and `path()`
+    returns `&str`. `XClient::at` takes `impl Into<RoutePath>`; `path()`
+    returns `&str`. `__rt::join_path` is gone: no path is interned any more.
+  - **A generated many-item method returns
+    `MethodStream<'_, I, P, XEvent, L, __XClientM>`** (was
+    `MethodStream<'_, I, P, XEvent>`): `L` the client's lift, `__XClientM` a
+    zero-sized `EventOf` emitted per method — its variant, inlined with the
+    lift (through a `fn` pointer and then the lift, a static level cost ~10
+    ns an event, about 10%). Code that names the type: use the method's
+    alias, `{Ns}{Method}Stream<'a, L = Root>` (`RootTickStream<'a>`;
+    `{Ns}{Method}MethodStream` when an item type is already called that),
+    which each method returns and its doc names — or name `L` and `W` as `_`. `MethodStream::call` / `new` with a
+    `fn(I) -> A` are as they were (`W` defaults to it); `call_as` takes an
+    `EventOf`. A static child's lift is `Static<L, __XClientChild>`, a
+    zero-sized `Wrap` per static child.
+  - **A generated client is no longer `Copy`**: it is `Clone`, `Debug` and,
+    for `XClient<T>`, `Default`.
+  - `MemoryTransport::params_of` takes `impl Borrow<MethodRef>`.
+
 ## [0.8.0]
 
 plexus-macros 0.8.0 and plexus-client 0.8.0, released with plexus-core 0.8.0:

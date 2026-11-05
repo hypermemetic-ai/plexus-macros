@@ -161,17 +161,18 @@ fn the_client_is_the_one_macro_4_emitted_for_a_type_named_echo() {
     assert_eq!(EchoClient::<MemoryTransport>::METHOD_SAY, before::EchoClient::<MemoryTransport>::METHOD_SAY);
     assert_eq!(EchoClient::<MemoryTransport>::METHOD_COUNT, before::EchoClient::<MemoryTransport>::METHOD_COUNT);
 
-    // … the same signatures (a change to either is a compile error here) …
+    // … the same signatures (a change to either is a compile error here; the
+    // lift and the variant are RETURNS-46's, left to inference) …
     fn now_sigs<T: Transport>(c: &EchoClient<T>) {
-        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.say(String::new());
-        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.count(0);
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _, _, _> = c.say(String::new());
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _, _, _> = c.count(0);
         let _ = c.say(String::new()).try_collect::<Vec<_>>();
         let _ = c.count(0).try_collect::<Vec<_>>();
         let _: &T = c.transport();
     }
     fn before_sigs<T: Transport>(c: &before::EchoClient<T>) {
-        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.say(String::new());
-        let _: plexus_client::MethodStream<'_, EchoEvent, _, _> = c.count(0);
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _, _, _> = c.say(String::new());
+        let _: plexus_client::MethodStream<'_, EchoEvent, _, _, _, _> = c.count(0);
         let _ = c.say(String::new()).try_collect::<Vec<_>>();
         let _ = c.count(0).try_collect::<Vec<_>>();
         let _: &T = c.transport();
@@ -180,8 +181,8 @@ fn the_client_is_the_one_macro_4_emitted_for_a_type_named_echo() {
 
     // … and the same call on the wire.
     let say = MethodRef::new("echo", "say");
-    let t1 = MemoryTransport::new().script_events(say, &[EchoEvent::Said { text: "x".into() }]);
-    let t2 = MemoryTransport::new().script_events(say, &[EchoEvent::Said { text: "x".into() }]);
+    let t1 = MemoryTransport::new().script_events(say.clone(), &[EchoEvent::Said { text: "x".into() }]);
+    let t2 = MemoryTransport::new().script_events(say.clone(), &[EchoEvent::Said { text: "x".into() }]);
     let (a, b) = futures::executor::block_on(async {
         (
             EchoClient::new(&t1).say("x".into()).try_collect::<Vec<_>>().await.unwrap(),
@@ -189,7 +190,7 @@ fn the_client_is_the_one_macro_4_emitted_for_a_type_named_echo() {
         )
     });
     assert_eq!(a, b);
-    assert_eq!(t1.params_of(say), t2.params_of(say));
+    assert_eq!(t1.params_of(&say), t2.params_of(&say));
 }
 
 fn is_echo<T: Echo>() {}
@@ -329,11 +330,11 @@ async fn an_injected_parameter_stays_off_the_trait_and_the_client_implements_it(
     assert_eq!(GuardedActivation.namespace(), "guarded");
 
     let greet = MethodRef::new("guarded", "greet");
-    let t = Arc::new(MemoryTransport::new().script_events(greet, &[EchoEvent::Said { text: "hi, ann".into() }]));
+    let t = Arc::new(MemoryTransport::new().script_events(greet.clone(), &[EchoEvent::Said { text: "hi, ann".into() }]));
     let client: Box<dyn Guarded> = Box::new(GuardedClient::new(t.clone()));
     let got: Vec<EchoEvent> = client.greet("hi".into()).collect().await;
     assert_eq!(got, vec![EchoEvent::Said { text: "hi, ann".into() }]);
-    assert_eq!(t.params_of(greet), Some(serde_json::json!({"greeting": "hi"})));
+    assert_eq!(t.params_of(&greet), Some(serde_json::json!({"greeting": "hi"})));
 }
 
 /// A client mounted at a path (MACRO-16's `XClient::at`), called through the

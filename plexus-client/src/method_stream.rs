@@ -51,6 +51,7 @@ use serde_json::Value;
 use crate::envelope::{Content, RawItem};
 use crate::error::ClientError;
 use crate::frame::Frame;
+use crate::lift::{Lift, Root};
 use crate::transport::{InputItems, MethodRef, RawItemStream, Transport};
 
 /// Decodes one data frame's `content` into a method's item `I` — straight
@@ -235,9 +236,35 @@ fn message_of(e: &serde_json::Error) -> String {
 /// `Unpin`, and `Send` wherever the transport's item stream is (everywhere
 /// but wasm32); dropping it mid-stream drops the wire stream, which cancels
 /// the call on a transport that can (the WebSocket one unsubscribes).
-pub struct MethodStream<'a, I, P = NoProgress, A = I> {
+/// How an item becomes its activation's aggregate: the method's variant.
+///
+/// A `fn(I) -> A` is one (`TicketsEvent::List`). The activation macro emits a
+/// zero-sized one per many-item method (RETURNS-46), so the variant and the
+/// lift above it are one inlined step per event — not a call through a
+/// pointer and then the lift, which costs about 10 ns an event.
+pub trait EventOf<I> {
+    /// The activation's aggregate.
+    type Aggregate;
+    /// `item` as its aggregate.
+    fn event(&self, item: I) -> Self::Aggregate;
+}
+
+impl<I, A> EventOf<I> for fn(I) -> A {
+    type Aggregate = A;
+    #[inline]
+    fn event(&self, item: I) -> A {
+        self(item)
+    }
+}
+
+pub struct MethodStream<'a, I, P = NoProgress, A = I, L = Root, W = fn(I) -> A> {
     core: Core<'a, I>,
-    event: fn(I) -> A,
+    /// An item as the activation's aggregate: the method's variant.
+    event: W,
+    _aggregate: PhantomData<fn() -> A>,
+    /// RETURNS-46: the aggregate as the client's — [`Root`] for a client
+    /// reached through nothing, a parent's wrapping for one an accessor made.
+    lift: L,
     _progress: PhantomData<fn() -> P>,
 }
 
@@ -296,6 +323,81 @@ impl<'a, I, P, A> MethodStream<'a, I, P, A> {
         Self {
             core,
             event,
+            _aggregate: PhantomData,
+            lift: Root,
+            _progress: PhantomData,
+        }
+    }
+
+    /// [`call`](Self::call) with the method's variant as an [`EventOf`] —
+    /// what a generated client passes (RETURNS-46): a zero-sized type, so
+    /// the variant inlines into [`events`](Self::events).
+    pub fn call_as<T, W>(
+        transport: &'a T,
+        method: MethodRef,
+        params: Result<Value, ClientError>,
+        item: Decoder<I>,
+        event: W,
+    ) -> MethodStream<'a, I, P, A, Root, W>
+    where
+        T: Transport + ?Sized,
+        W: EventOf<I, Aggregate = A>,
+    {
+        let state = match params {
+            Ok(params) => State::Live(transport.call_raw(method, params)),
+            Err(e) => State::Failed(e),
+        };
+        MethodStream {
+            core: Core::new(state, item),
+            event,
+            _aggregate: PhantomData,
+            lift: Root,
+            _progress: PhantomData,
+        }
+    }
+}
+
+impl<'a, I, P, A> MethodStream<'a, I, P, A> {
+    /// [`call_as`](Self::call_as) for a method with an input half
+    /// (BIDIR-6, RETURNS-46): `input` is sent under the callee's credit as
+    /// the stream is read.
+    pub fn call_as_with_input<T, W>(
+        transport: &'a T,
+        method: MethodRef,
+        params: Result<Value, ClientError>,
+        input: InputItems<'a>,
+        item: Decoder<I>,
+        event: W,
+    ) -> MethodStream<'a, I, P, A, Root, W>
+    where
+        T: Transport + ?Sized,
+        W: EventOf<I, Aggregate = A>,
+    {
+        let state = match params {
+            Ok(params) => State::Live(transport.call_raw_with_input(method, params, input)),
+            Err(e) => State::Failed(e),
+        };
+        MethodStream {
+            core: Core::new(state, item),
+            event,
+            _aggregate: PhantomData,
+            lift: Root,
+            _progress: PhantomData,
+        }
+    }
+}
+
+impl<'a, I, P, A, L, W> MethodStream<'a, I, P, A, L, W> {
+    /// RETURNS-46: the same call, its [`events`](Self::events) lifted by
+    /// `lift` into an enclosing aggregate — what a client reached through a
+    /// parent's accessor does with every many-item call, so the call's
+    /// events are the parent's (`TreeEvent::Branch(BranchEvent::Grow(..))`).
+    pub fn lifted<L2: Lift<A>>(self, lift: L2) -> MethodStream<'a, I, P, A, L2, W> {
+        MethodStream {
+            core: self.core,
+            event: self.event,
+            _aggregate: PhantomData,
+            lift,
             _progress: PhantomData,
         }
     }
@@ -328,22 +430,42 @@ impl<'a, I, P, A> MethodStream<'a, I, P, A> {
     /// ]);
     /// while let Some(ev) = all.next().await { state.reduce(ev?) }   // ev: TicketsEvent
     /// ```
-    pub fn events(self) -> Events<'a, A>
+    pub fn events(self) -> Events<'a, L::Out>
     where
+        L: Lift<A>,
+        W: EventOf<I, Aggregate = A> + Clone + MaybeSendSync + 'a,
         I: 'a,
         P: 'a,
         A: 'a,
+        L::Out: 'a,
     {
-        let event = self.event;
+        let event = self.event.clone();
+        let lift = self.lift.clone();
         Events {
-            inner: Box::pin(futures_util::StreamExt::map(self, move |r| r.map(event))),
+            inner: Box::pin(futures_util::StreamExt::map(self, move |r| r.map(|i| lift.lift(event.event(i))))),
         }
     }
 }
 
-impl<I, P, A> Stream for MethodStream<'_, I, P, A> {
+/// `Send + Sync` off wasm32, nothing on it — what an event constructor
+/// moved into a boxed [`Events`] must be.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSendSync: Send + Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync> MaybeSendSync for T {}
+/// See the non-wasm32 variant.
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSendSync {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSendSync for T {}
+
+// No field is pinned: the wire stream is boxed, the lift a plain value.
+impl<I, P, A, L, W> Unpin for MethodStream<'_, I, P, A, L, W> {}
+
+impl<I, P, A, L, W> Stream for MethodStream<'_, I, P, A, L, W> {
     type Item = Result<I, ClientError>;
 
+    #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.get_mut()
             .core
@@ -359,13 +481,13 @@ impl<I, P, A> Stream for MethodStream<'_, I, P, A> {
     }
 }
 
-impl<I, P, A> FusedStream for MethodStream<'_, I, P, A> {
+impl<I, P, A, L, W> FusedStream for MethodStream<'_, I, P, A, L, W> {
     fn is_terminated(&self) -> bool {
         self.core.is_terminated()
     }
 }
 
-impl<I, P, A> fmt::Debug for MethodStream<'_, I, P, A> {
+impl<I, P, A, L, W> fmt::Debug for MethodStream<'_, I, P, A, L, W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MethodStream")
             .field("state", &self.core.state_name())
@@ -474,7 +596,8 @@ pub async fn call_one<T, I>(
 where
     T: Transport + ?Sized,
 {
-    one_of(MethodStream::call(transport, method, params, item, identity::<I>), method).await
+    let qualified = method.qualified();
+    one_of(MethodStream::call(transport, method, params, item, identity::<I>), qualified).await
 }
 
 /// BIDIR-6: [`call_one`], for a method with an input half: `input` is sent
@@ -489,15 +612,18 @@ pub async fn call_one_with_input<'a, T, I>(
 where
     T: Transport + ?Sized,
 {
-    one_of(MethodStream::call_with_input(transport, method, params, input, item, identity::<I>), method).await
+    let qualified = method.qualified();
+    one_of(MethodStream::call_with_input(transport, method, params, input, item, identity::<I>), qualified).await
 }
 
-/// A one-item call's item, read to its terminal frame.
-async fn one_of<I>(mut items: MethodStream<'_, I>, method: MethodRef) -> Result<I, ClientError> {
+/// A one-item call's item, read to its terminal frame. `qualified` names
+/// the method in a contract break (RETURNS-46: a `MethodRef` is `Clone`, not
+/// `Copy`, so the name is taken before the call has it).
+async fn one_of<I>(mut items: MethodStream<'_, I>, qualified: String) -> Result<I, ClientError> {
     use futures_util::StreamExt;
 
     let contract = |message: &str| ClientError::Decode {
-        content_type: Some(method.qualified()),
+        content_type: Some(qualified.clone()),
         message: message.to_string(),
     };
     let first = match items.next().await {
