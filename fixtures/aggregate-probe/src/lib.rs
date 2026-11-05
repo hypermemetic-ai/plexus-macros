@@ -25,12 +25,6 @@ pub struct N {
     pub n: u32,
 }
 
-impl plexus_client::FromClientError for N {
-    fn from_client_error(_e: plexus_client::ClientError) -> Self {
-        N { n: u32::MAX }
-    }
-}
-
 fn ticks(n: u32) -> impl Stream<Item = N> + Send + 'static {
     stream! { for i in 0..n { yield N { n: i }; } }
 }

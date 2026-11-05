@@ -68,8 +68,10 @@
 //! | `-> impl Stream<Item = Result<Progress<T, P>, E>>` | many | T / E / P |
 //!
 //! A Result item travels as data, `{"ok": t}` or `{"err": e}`; a
-//! `Progress::Update(p)` as a progress frame. The namespace is the stem of
-//! `impl FooActivation` (MACRO-13; `namespace = "..."` overrides it).
+//! `Progress::Update(p)` as a progress frame. The namespace is the type's
+//! name — `impl Foo`, or the stem of `impl FooActivation` — or the trait's,
+//! on `impl Foo for Type` (MACRO-13, RETURNS-47; `namespace = "..."`
+//! overrides it).
 //! `#[method(returns(..))]` and `#[derive(StreamEvent)]` are gone, and
 //! `#[method(streaming)]` is a deprecated no-op on a stream form. See the
 //! README's per-macro reference.
@@ -562,63 +564,72 @@ fn generate_schema_fn(
 /// Both flags are opt-in: an activation that names neither expands exactly
 /// as it did before.
 ///
-/// # `#[activation]` needs nothing — MACRO-13
+/// # `#[activation]` needs nothing — MACRO-13, RETURNS-47
 ///
-/// On `impl FooActivation` the stem `Foo` names everything, every key is an
-/// override, and the trait is always emitted (the owner's `always`):
+/// The type names everything, every key is an override, and a trait is
+/// emitted only when named:
 ///
 /// ```ignore
-/// /// A deploy driver.                      // the activation's description
+/// /// Tickets.                              // the activation's description
 /// #[plexus_macros::activation]
-/// impl DriverActivation {
-///     /// What this driver can do.          // the method's description
-///     pub async fn describe(&self) -> impl Stream<Item = DriverEvent> + Send + 'static { .. }
+/// impl Tickets {
+///     /// Every ticket.                     // the method's description
+///     pub async fn list(&self) -> impl Stream<Item = Ticket> + Send + 'static { .. }
+///     #[plexus_macros::method]
+///     pub async fn total(&self) -> u64 { .. }    // one item: marked
 ///     pub fn new() -> Self { .. }           // not async: a plain method
 ///     async fn helper(&self) -> u32 { .. }  // not pub: a plain method
 /// }
-/// // namespace "driver"; `pub trait Driver: Send + Sync + 'static` with
-/// // `fn describe(&self) -> BoxStream<'static, DriverEvent>`;
-/// // `impl Driver for DriverActivation`; `DriverClient<T>`, and
-/// // `impl<T: Transport + Clone + Send + Sync + 'static> Driver for DriverClient<T>`.
+/// // namespace "tickets"; `TicketsClient<T>`, whose `total()` answers
+/// // `Result<u64, ClientError>` and `list()` a `MethodStream`. No trait.
 /// ```
 ///
-/// - **The name rule.** The namespace defaults to the stem in snake_case
-///   (`TicketsApiActivation` → `tickets_api`); the client is `FooClient<T>`.
-///   `trait = "Bar"` names the trait and the client (and, absent
-///   `namespace`, the namespace `bar`) whatever the type is called. A type
-///   not named `…Activation`, without `trait = "…"` or `namespace`, does not
-///   compile.
-/// - **The trait, always.** Each wire method is on it with the parameters a
-///   caller passes. Each event type must implement
-///   `plexus_client::FromClientError` when there is a client: the client's
-///   implementation yields an `Err(ClientError)` as
-///   `E::from_client_error(err)` and ends (`String` has it). The activation
-///   implements its own trait by cloning itself into each stream (`register`
-///   already asks for `Clone`) — unless a wire method takes what the server
-///   injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`, a
-///   bidirectional `ctx`): then only the client implements it.
+/// - **The name rule.** `impl Tickets` is named by itself (RETURNS-47: no
+///   suffix forced); `impl TicketsActivation` by its stem, `Tickets`, as
+///   before. The namespace is the name in snake_case (`TicketsApi` →
+///   `tickets_api`), the client `TicketsClient<T>`. `namespace = "…"`
+///   overrides the namespace.
+/// - **A trait only when named.** `trait = "Bar"` emits `trait Bar` (and
+///   names the client `BarClient` and, absent `namespace`, the namespace
+///   `bar`), each wire method in it under its own return type, boxed; the
+///   activation implements it by cloning itself into each stream — unless a
+///   wire method takes what the server injects (`auth`, `reach`,
+///   `#[from_auth]`, `#[activation_param]`, a bidirectional `ctx`). The
+///   client implements no trait: its methods answer `Result<T, ClientError>`
+///   (one item) or the `{Ns}{Method}Stream` alias (many), so no item type
+///   needs `plexus_client::FromClientError`.
+/// - **`impl Trait for Type`.** `#[plexus_macros::activation] impl
+///   forge::Forge for GitHub` serves a trait written by hand: the trait
+///   names the namespace (`forge`) and the client (`ForgeClient<T>`, emitted
+///   here), the type names nothing, and every `async fn` on `&self` is a
+///   wire method, called as `<GitHub as forge::Forge>::m`. Its methods reach
+///   their caller through the call's context, `plexus_core::call::caller()`
+///   (a trait's signature cannot carry `#[from_auth]`); it has no direct
+///   JSON-RPC methods, only the service's `{ns}.call`; `#[child]` in it is
+///   not served yet (GRAFT-1).
 /// - **Every public method a wire method.** Every `pub async fn` on `&self`
 ///   returning `impl Stream<Item = E>` is on the wire with no `#[method]`
-///   (which stays for its overrides); one returning anything else is a
-///   compile error; `methods = marked` restores the `#[method]`-only rule.
+///   (which stays for its overrides, and marks a one-item method); one
+///   returning anything else unmarked is a compile error; `methods = marked`
+///   restores the `#[method]`-only rule.
 /// - **The client without a flag**, whenever the crate depends on
 ///   `plexus-client`; `client` is accepted with a deprecation warning.
 /// - **The `server` feature default.** A crate whose manifest declares a
 ///   `server` feature gets its server half under `#[cfg(feature =
 ///   "server")]`; `server_cfg` overrides. The trait and the client are never
 ///   gated.
-/// - **A bodiless activation is a contract.** When every wire method is
-///   bodiless (`pub async fn f(&self, ..) -> impl Stream<..>;`), the macro
-///   emits `pub struct FooActivation<D: Foo>(Arc<D>)` delegating to `D`,
-///   `impl<D: Foo> Foo for FooActivation<D>`, and `Foo::server(self)`:
-///   `hub.register(Local::new().server())`, or
-///   `hub.register(FooClient::new(transport).server())` for a proxy.
+/// - **A bodiless activation is a contract**, and a contract is its trait:
+///   when every wire method is bodiless (`pub async fn f(&self, ..) ->
+///   impl Stream<..>;`), on `impl FooActivation` (trait `Foo`) or with
+///   `trait = "…"`, the macro emits `pub struct FooActivation<D: Foo>(Arc<D>)`
+///   delegating to `D`, `impl<D: Foo> Foo for FooActivation<D>`, and
+///   `Foo::server(self)`: `service.register(Local::new().server())`.
 ///
-/// **Before the renames land.** An activation written before MACRO-13 — a
-/// type not named `…Activation`, no `trait = "…"`, its `namespace` given —
-/// expands exactly as it did (no trait; the client on the `client` flag;
-/// only `#[method]`s on the wire) with a deprecation warning asking for the
-/// rename. A later release refuses it.
+/// **Written before MACRO-13.** An activation on a type not named
+/// `…Activation` that says its `namespace` expands exactly as it did (no
+/// trait; the client on the `client` flag; only `#[method]`s on the wire)
+/// with a deprecation warning saying what to change. A later release
+/// refuses it.
 #[proc_macro_attribute]
 pub fn activation(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as HubMethodsAttrs);

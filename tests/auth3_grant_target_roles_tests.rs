@@ -159,18 +159,31 @@ async fn first_data(stream: plexus_core::plexus::PlexusStream) -> serde_json::Va
     panic!("no data item");
 }
 
-/// Outside a gated dispatch, a method that takes `reach` gets everywhere —
-/// what an activation always meant without a gate.
+/// Through a service without a gate, a method that takes `reach` gets
+/// everywhere — what an activation always meant without a gate, said by the
+/// service's dispatch. RETURNS-47: called outside any dispatch it is refused
+/// (`Unauthenticated`), never handed everything (it was, by the fallback in
+/// `current_reach`).
 #[tokio::test]
 async fn without_a_gate_reach_is_everywhere() {
-    let out = first_data(Tickets.call("list", serde_json::json!({}), None, None).await.unwrap()).await;
+    let service = plexus_core::DynamicHub::new("svc").register(Tickets);
+    let out = first_data(service.route("tickets.list", serde_json::json!({}), None).await.unwrap()).await;
     assert_eq!(out, "*");
     let auth = AuthContext::new("u1".into(), "s1".into(), vec![], serde_json::Value::Null);
     let out = first_data(
-        Tickets.call("set_status", serde_json::json!({"id": "MNG-2", "status": "Ready"}), Some(&auth), None).await.unwrap(),
+        service
+            .route("tickets.set_status", serde_json::json!({"id": "MNG-2", "status": "Ready"}), Some(&auth))
+            .await
+            .unwrap(),
     )
     .await;
     assert_eq!(out, "u1 MNG-2 Ready true");
+}
+
+#[tokio::test]
+async fn outside_a_call_reach_is_refused_not_everywhere() {
+    let refused = Tickets.call("list", serde_json::json!({}), None, None).await;
+    assert!(matches!(refused, Err(plexus_core::PlexusError::Unauthenticated(_))), "{:?}", refused.err());
 }
 
 #[test]

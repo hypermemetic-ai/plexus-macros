@@ -131,23 +131,3 @@ impl ItemActivation {
         }
     }
 }
-
-// The activations' traits are always emitted, and their clients implement
-// them (RETURNS-36), so a client failure must become each method's item.
-macro_rules! from_client_error {
-    ($($ty:ty => |$e:ident| $make:expr;)*) => {$(
-        impl plexus_client::FromClientError for $ty {
-            fn from_client_error($e: plexus_client::ClientError) -> Self {
-                $make
-            }
-        }
-    )*};
-}
-
-from_client_error! {
-    Pong => |e| Pong { message: e.to_string() };
-    Tick => |_e| Tick { n: 0 };
-    GrowError => |_e| GrowError::Frost { at: 0 };
-    Fell => |_e| Fell { leaf: 0 };
-    Seen => |e| Seen { seen: e.to_string(), n: 0 };
-}

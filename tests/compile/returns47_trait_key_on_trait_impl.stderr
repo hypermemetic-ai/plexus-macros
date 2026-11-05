@@ -1,0 +1,5 @@
+error: `trait = "Forge2"` on `impl Forge for GitHub`: the trait is the one this impl implements, and the macro emits no other. Remove `trait = "…"`.
+  --> tests/compile/returns47_trait_key_on_trait_impl.rs:12:37
+   |
+12 | #[plexus_macros::activation(trait = "Forge2")]
+   |                                     ^^^^^^^^

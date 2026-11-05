@@ -78,6 +78,60 @@ RETURNS-46, after 0.8.0: breaking, so the next release is 0.9.0.
     for `XClient<T>`, `Default`.
   - `MemoryTransport::params_of` takes `impl Borrow<MethodRef>`.
 
+### RETURNS-47: no suffix forced, a trait only when named, `impl Trait for Type`
+
+Owner, 2026-11-04 (option 2), reversing MACRO-13's `always` and superseding
+RETURNS-43. Breaking.
+
+#### Added
+
+- `#[plexus_macros::activation] impl Tickets` — a type not named
+  `…Activation`, nothing in the attribute — is a whole declaration: namespace
+  `tickets`, client `TicketsClient`. MACRO-13 refused it.
+- `#[plexus_macros::activation] impl forge::Forge for GitHub`: a trait
+  written by hand, served. The trait names the namespace (`forge`) and the
+  client (`ForgeClient<T>`, emitted beside the impl); the type names nothing.
+  Every `async fn` on `&self` is a wire method, any of RETURNS-8's forms,
+  called as `<GitHub as forge::Forge>::m`. The trait needs no object safety
+  to be served: rustc checks the concrete futures for `Send`. A method
+  reaches its caller through the call's context
+  (`plexus_core::call::caller()`), so `auth = "required"` asks no
+  `#[from_auth]` of it. It has no direct JSON-RPC methods (only `{ns}.call`,
+  where the context is). Refused, by name: `trait = "…"` beside it, a
+  bodiless method, `#[child]` (GRAFT-1's).
+
+#### Changed
+
+- **No trait unless named.** `impl FooActivation` emits no `trait Foo` any
+  more; `trait = "Foo"` emits it (implemented by the activation, as before),
+  and a bodiless contract is still its trait. A bare `trait` key is refused
+  ("a trait is emitted only when named"). What to do: add `trait = "Foo"`
+  where the trait is used.
+- **The client implements no trait.** Its methods answer
+  `Result<T, ClientError>` (one item) or the `{Ns}{Method}Stream` alias
+  (many), as their inherent methods did; nothing asks an item type for
+  `FromClientError`, so `-> u64`, `-> bool`, `-> Vec<T>` compile. A client
+  can no longer be a `dyn Foo` or served as a proxy with
+  `FooClient::new(t).server()`: write the implementation that calls it, and
+  says its failures as you want them (`tests/macro13_contract_tests.rs`,
+  `Proxy`).
+- `reach: Reach` is read with `current_reach()?` (plexus-core's, now
+  fallible): outside a call the method is refused, never handed everywhere.
+- The deprecation warning on an activation written before MACRO-13 (a type
+  not named `…Activation` that says its `namespace`) says to drop
+  `namespace`, or to name the type `…Activation` to keep it as an override —
+  not that the suffix is needed.
+
+#### Removed
+
+- plexus-client: `into_events`, `error_events`, `trait_one`,
+  `trait_one_with_input`, `trait_many`, `trait_progress`,
+  `trait_result_progress`, `owned_call`, `owned_call_raw`,
+  `owned_call_raw_with_input` — the client's half of the trait, nothing else
+  used them. `FromClientError` stays (other code implements it) and is
+  required by nothing; `BoxStream`, `BoxFuture`, `MaybeSend` stay.
+- The fixtures' `from_client_error!` blocks.
+
 ## [0.8.0]
 
 plexus-macros 0.8.0 and plexus-client 0.8.0, released with plexus-core 0.8.0:

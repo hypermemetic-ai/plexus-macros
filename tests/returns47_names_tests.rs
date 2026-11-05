@@ -148,7 +148,8 @@ fn impl_tickets_with_no_suffix_serves_tickets() {
     assert_eq!(schema.namespace, "tickets");
     let mut names: Vec<&str> = schema.methods.iter().map(|m| m.name.as_str()).collect();
     names.sort();
-    assert_eq!(names, ["ids", "names", "total", "up"]);
+    // `schema` is the built-in every activation answers; the rest are its own.
+    assert_eq!(names, ["ids", "names", "schema", "total", "up"]);
     assert_eq!(schema.description, "Tickets, with no suffix.");
 }
 
@@ -172,8 +173,11 @@ async fn an_activation_named_with_the_suffix_still_takes_its_stem_and_emits_no_t
     let ids: Vec<u32> = client.ids(2).try_collect().await.unwrap();
     assert_eq!(ids, [1, 2]);
     // The author's `trait Tickets` is the only one: the macro emitted none.
-    impl suffixed::Tickets for () {}
+    fn is_the_authors<T: suffixed::Tickets>() {}
+    is_the_authors::<()>();
 }
+
+impl suffixed::Tickets for () {}
 
 fn is_tickets2<T: named::Tickets2>() {}
 
@@ -197,7 +201,7 @@ fn impl_forge_for_github_serves_the_traits_methods_under_forge() {
     assert_eq!(schema.namespace, "forge");
     let mut names: Vec<&str> = schema.methods.iter().map(|m| m.name.as_str()).collect();
     names.sort();
-    assert_eq!(names, ["events", "names", "total", "up"]);
+    assert_eq!(names, ["events", "names", "schema", "total", "up"]);
     assert_eq!(schema.description, "GitHub, as a forge.");
     let total = schema.methods.iter().find(|m| m.name == "total").unwrap();
     assert_eq!(total.description, "How many repositories.");

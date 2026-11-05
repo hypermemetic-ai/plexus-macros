@@ -4,7 +4,7 @@ error[E0425]: cannot find type `InputsClient` in this scope
 20 |     fn inputs(&self) -> Inputs {
    |                         ^^^^^^ not found in this scope
 
-warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_Tickets`: plexus-macros (MACRO-13): `Tickets` does not end in `Activation`, so no trait is emitted for it and its client is `TicketsClient`. Rename it `TicketsActivation` (or write `trait = "…"`); then `namespace`, `client`, `crate_path`, `server_cfg` and `#[method]` may all go. A later release refuses it.
+warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_Tickets`: plexus-macros (MACRO-13, RETURNS-47): `Tickets` says its `namespace`, so it expands as before MACRO-13 (only `#[method]`s on the wire, the client on the `client` flag). Remove `namespace` — `impl Tickets` is named by itself: namespace `tickets`, client `TicketsClient` — or name the type `TicketsActivation` to keep `namespace` as an override; then `client`, `crate_path`, `server_cfg` and `#[method]` may go too. A later release refuses it.
   --> tests/compile/macro16_child_without_client.rs:12:6
    |
 12 | impl Tickets {
@@ -12,7 +12,7 @@ warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATIO
    |
    = note: `#[warn(deprecated)]` on by default
 
-warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_Inputs`: plexus-macros (MACRO-13): `Inputs` does not end in `Activation`, so no trait is emitted for it and its client is `InputsClient`. Rename it `InputsActivation` (or write `trait = "…"`); then `namespace`, `client`, `crate_path`, `server_cfg` and `#[method]` may all go. A later release refuses it.
+warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_Inputs`: plexus-macros (MACRO-13, RETURNS-47): `Inputs` says its `namespace`, so it expands as before MACRO-13 (only `#[method]`s on the wire, the client on the `client` flag). Remove `namespace` — `impl Inputs` is named by itself: namespace `inputs`, client `InputsClient` — or name the type `InputsActivation` to keep `namespace` as an override; then `client`, `crate_path`, `server_cfg` and `#[method]` may go too. A later release refuses it.
   --> tests/compile/macro16_child_without_client.rs:30:6
    |
 30 | impl Inputs {

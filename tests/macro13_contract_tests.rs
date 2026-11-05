@@ -4,12 +4,14 @@
 //! declared: the macro emits `ContractActivation<D: Contract>`, delegating to
 //! `D`, `impl<D: Contract> Contract for ContractActivation<D>`, and
 //! `Contract::server(self)`. So an implementation is served with
-//! `hub.register(Impl::new().server())`, and a remote one — the client — is
-//! served here as a proxy with `hub.register(ContractClient::new(t).server())`.
+//! `hub.register(Impl::new().server())`. RETURNS-47: the client implements
+//! no trait, so a remote one is served here as a proxy by an implementation
+//! that calls the client and says its failures in band, written by hand
+//! (`Proxy`): `hub.register(Proxy(ContractClient::new(t)).server())`.
 
 use async_stream::stream;
-use futures::{Stream, StreamExt};
-use plexus_client::{BoxStream, ClientError, FromClientError};
+use futures::{Stream, StreamExt, TryStreamExt};
+use plexus_client::BoxStream;
 use plexus_core::plexus::{Activation, InProcessTransport, PlexusStreamItem};
 use plexus_core::DynamicHub;
 use schemars::JsonSchema;
@@ -22,12 +24,6 @@ pub enum ContractEvent {
     Pong { text: String },
     Sum { value: i64 },
     Error { message: String },
-}
-
-impl FromClientError for ContractEvent {
-    fn from_client_error(error: ClientError) -> Self {
-        ContractEvent::Error { message: error.to_string() }
-    }
 }
 
 /// A contract: ping and add.
@@ -97,10 +93,44 @@ async fn an_implementation_is_served_with_server() {
     answers_both(&hub).await;
 }
 
+/// A remote implementation, through its client: what the client's own
+/// implementation of the trait did before RETURNS-47, written where it is
+/// wanted — each call's items as they come, a client failure as the event's
+/// own error, and the end.
+struct Proxy<T>(ContractClient<T>);
+
+fn in_band<T: plexus_client::Transport + Clone + Send + Sync + 'static>(
+    client: ContractClient<T>,
+    call: impl FnOnce(&ContractClient<T>) -> futures::stream::BoxStream<'_, Result<ContractEvent, plexus_client::ClientError>> + Send + 'static,
+) -> BoxStream<'static, ContractEvent> {
+    Box::pin(stream! {
+        let mut items = call(&client);
+        while let Some(item) = items.next().await {
+            match item {
+                Ok(event) => yield event,
+                Err(e) => {
+                    yield ContractEvent::Error { message: e.to_string() };
+                    break;
+                }
+            }
+        }
+    })
+}
+
+impl<T: plexus_client::Transport + Clone + Send + Sync + 'static> Contract for Proxy<T> {
+    fn ping(&self, text: String) -> BoxStream<'static, ContractEvent> {
+        in_band(self.0.clone(), move |c| c.ping(text).boxed())
+    }
+
+    fn add(&self, a: i64, b: i64) -> BoxStream<'static, ContractEvent> {
+        in_band(self.0.clone(), move |c| c.add(a, b).boxed())
+    }
+}
+
 #[tokio::test]
 async fn a_client_is_served_as_a_proxy_with_server() {
     let remote = InProcessTransport::new(Impl::new().server());
-    let proxy = ContractClient::new(remote).server();
+    let proxy = Proxy(ContractClient::new(remote)).server();
     let hub = DynamicHub::new("toy").register(proxy);
     answers_both(&hub).await;
 }
@@ -113,7 +143,7 @@ async fn the_served_contract_is_itself_a_contract() {
     let all: Vec<Box<dyn Contract>> = vec![
         Box::new(Impl::new()),
         Box::new(served.clone()),
-        Box::new(ContractClient::new(InProcessTransport::new(served))),
+        Box::new(Proxy(ContractClient::new(InProcessTransport::new(served)))),
     ];
     for c in &all {
         let got: Vec<ContractEvent> = c.add(1, 2).collect().await;
@@ -139,11 +169,11 @@ impl plexus_client::Transport for TextOnly {
     }
 }
 
-/// PERF.115-36: a client's contract reads through `call_raw` too, the content
+/// PERF.115-36: a contract's client reads through `call_raw`, the content
 /// decoded straight from the wire's text.
 #[tokio::test]
-async fn a_clients_contract_decodes_the_wires_text_through_call_raw() {
-    let got: Vec<ContractEvent> = Contract::add(&ContractClient::new(TextOnly), 2, 3).collect().await;
+async fn a_contracts_client_decodes_the_wires_text_through_call_raw() {
+    let got: Vec<ContractEvent> = ContractClient::new(TextOnly).add(2, 3).try_collect().await.unwrap();
     assert_eq!(got, vec![ContractEvent::Sum { value: 5 }]);
 }
 
@@ -156,8 +186,8 @@ fn the_contracts_schema_carries_its_doc_comments() {
 
 // ------------------------------------------------- RETURNS-36: every form
 
-/// A contract whose methods have their own return types (RETURNS-36, the
-/// owner's rule of 2026-10-16: the trait always): a one-item method is a
+/// A contract whose methods have their own return types (RETURNS-36): a
+/// one-item method is a
 /// boxed future in the trait, and an implementation served through the
 /// contract answers it with one data item.
 mod own_types {
@@ -199,9 +229,10 @@ mod own_types {
         assert_eq!(data(&service, "forms.half", json!({"n": 4})).await, vec![json!({"ok": 2})]);
         assert_eq!(data(&service, "forms.half", json!({"n": 3})).await, vec![json!({"err": "3 is odd"})]);
         assert_eq!(data(&service, "forms.upto", json!({"n": 2})).await, vec![json!("1"), json!("2")]);
-        // … and the client, through the trait.
+        // … and the client, whose one-item methods answer `Result`s
+        // (RETURNS-47: it implements no trait).
         let client = FormsClient::new(InProcessTransport::new(Impl.server()));
-        assert_eq!(Forms::ping(&client, "y".into()).await, "pong y");
-        assert_eq!(Forms::half(&client, 3).await, Err("3 is odd".to_string()));
+        assert_eq!(client.ping("y".into()).await.unwrap(), "pong y");
+        assert_eq!(client.half(3).await.unwrap(), Err("3 is odd".to_string()));
     }
 }

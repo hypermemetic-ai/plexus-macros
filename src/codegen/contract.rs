@@ -1,27 +1,32 @@
-//! MACRO-13 · `#[activation]` needs nothing.
+//! MACRO-13 · `#[activation]` needs nothing; RETURNS-47 · no suffix forced,
+//! a trait only when named.
 //!
-//! On `impl FooActivation` the stem `Foo` names the namespace (`foo`), the
-//! trait (`trait Foo`) and the client (`FooClient<T>`); `trait = "Bar"` names
-//! them whatever the type is called. Every `pub async fn` on `&self`
-//! returning one of RETURNS-8's signature forms is a wire method (`methods =
-//! marked` restores the `#[method]`-only rule).
+//! On `impl FooActivation` the stem `Foo` names the namespace (`foo`) and the
+//! client (`FooClient<T>`); on `impl Foo` (RETURNS-47) the type's own name
+//! does; `trait = "Bar"` names the trait, the client and the namespace
+//! whatever the type is called. On `impl forge::Forge for GitHub` the trait
+//! names the namespace (`forge`) and the client (`ForgeClient<T>`), and the
+//! type names nothing. Every `pub async fn` on `&self` returning one of
+//! RETURNS-8's signature forms is a wire method (`methods = marked` restores
+//! the `#[method]`-only rule); in a trait impl, every `async fn` on `&self`.
 //!
-//! The trait is always emitted (the owner, 2026-10-16), each method in it
-//! under its own return type, boxed (RETURNS-36): `-> T` and
-//! `-> Result<T, E>` as `BoxFuture<'static, …>`, every stream form as
-//! `BoxStream<'static, item>` — so every signature form is in it, and an
-//! activation written before 0.7 (`impl Stream<Item = E>` throughout) has
-//! the trait it had. Its client folds a client failure into each method's
-//! item through `FromClientError`. A crate that declares a `server` feature gets its server half gated
-//! on it. A bodiless activation is a contract: the macro emits
-//! `FooActivation<D: Foo>`, delegating to `D`, and `Foo::server(self)`.
+//! A trait is emitted only when named (`trait = "…"`), or for a contract (a
+//! bodiless activation, which is its trait): each method under its own
+//! return type, boxed (RETURNS-36) — `-> T` and `-> Result<T, E>` as
+//! `BoxFuture<'static, …>`, every stream form as `BoxStream<'static, item>`
+//! — implemented by the activation (and by a contract's struct). The client
+//! implements no trait (RETURNS-47, superseding RETURNS-43): its methods
+//! answer `Result<T, ClientError>` or a `MethodStream`, so an item type needs
+//! no `FromClientError` and `-> u64` is a method like any other. A crate that
+//! declares a `server` feature gets its server half gated on it. A bodiless
+//! activation is a contract: the macro emits `FooActivation<D: Foo>`,
+//! delegating to `D`, and `Foo::server(self)`.
 //!
-//! A type not named `…Activation` and without `trait = "…"` cannot be named,
-//! and is refused — except an activation written before MACRO-13, which says
-//! its `namespace`: it expands as it did (no trait, the client on the
+//! An activation written before MACRO-13 — a type not named `…Activation`
+//! that says its `namespace` — expands as it did (no trait, the client on the
 //! `client` flag, only `#[method]`s on the wire), with a deprecation warning
-//! asking for the rename, so that every repository that takes the macro by
-//! path keeps building until its own rename lands.
+//! saying what to change, so every repository that takes the macro by path
+//! keeps building until it does.
 
 use crate::parse::{classify_return, Cardinality, HubMethodsAttrs, MethodInfo};
 use proc_macro2::{Span, TokenStream};
@@ -36,26 +41,16 @@ const SUFFIX: &str = "Activation";
 
 /// What the name rule makes of an activation.
 pub(crate) struct Names {
-    /// The rule applies: the type is named `…Activation`, or the attribute
-    /// names the trait. `false` only for an activation written before
-    /// MACRO-13 (a type the rule cannot name, with its `namespace` given).
+    /// The rule applies: every activation but one written before MACRO-13
+    /// (a type not named `…Activation` that says its `namespace`, which
+    /// expands as it did).
     pub new_form: bool,
-    /// The trait's name — the stem, or `trait = "…"`. `None` exactly when
-    /// `new_form` is false.
+    /// The trait the macro emits — only when named (`trait = "…"`), or
+    /// for a contract (a bodiless activation is its trait). RETURNS-47: no
+    /// trait by default.
     pub trait_ident: Option<syn::Ident>,
     pub namespace: String,
     pub client_ident: syn::Ident,
-}
-
-fn refusal(struct_name: &syn::Ident) -> syn::Error {
-    syn::Error::new(
-        struct_name.span(),
-        format!(
-            "`{struct_name}` does not end in `Activation`, so #[plexus_macros::activation] cannot \
-             name the trait, the client or the namespace. Name the type `{struct_name}Activation`, \
-             or write `trait = \"…\"` in the attribute."
-        ),
-    )
 }
 
 /// The stem the name rule takes from a type name: `FooActivation` → `Foo`.
@@ -64,50 +59,118 @@ pub(crate) fn stem_of(type_name: &str) -> Option<&str> {
 }
 
 impl Names {
-    pub fn resolve(args: &HubMethodsAttrs, struct_name: &syn::Ident) -> syn::Result<Self> {
+    /// `trait_impl`: the trait of `impl Trait for Type`; `contract`: every
+    /// wire method is bodiless.
+    pub fn resolve(
+        args: &HubMethodsAttrs,
+        struct_name: &syn::Ident,
+        trait_impl: Option<&syn::Path>,
+        contract: bool,
+    ) -> syn::Result<Self> {
+        // RETURNS-47: `impl forge::Forge for GitHub` — the trait names the
+        // namespace and the client; the type names nothing.
+        if let Some(path) = trait_impl {
+            if let Some(lit) = &args.trait_attr {
+                return Err(syn::Error::new(
+                    lit.span(),
+                    format!(
+                        "`trait = \"{}\"` on `impl {} for {struct_name}`: the trait is the one this impl \
+                         implements, and the macro emits no other. Remove `trait = \"…\"`.",
+                        lit.value(),
+                        quote!(#path).to_string().replace(' ', ""),
+                    ),
+                ));
+            }
+            let stem = path
+                .segments
+                .last()
+                .map(|s| s.ident.clone())
+                .ok_or_else(|| syn::Error::new_spanned(path, "expected a trait path"))?;
+            return Ok(Names {
+                new_form: true,
+                namespace: args.namespace.clone().unwrap_or_else(|| snake_case(&stem.to_string())),
+                client_ident: format_ident!("{}Client", stem),
+                trait_ident: None,
+            });
+        }
+
         let type_name = struct_name.to_string();
         let type_stem = stem_of(&type_name).map(|s| syn::Ident::new(s, struct_name.span()));
         let explicit = args
             .trait_attr
             .as_ref()
             .map(|lit| syn::Ident::new(&lit.value(), lit.span()));
-        let stem = explicit.or(type_stem);
 
-        let Some(stem) = stem else {
-            // Before MACRO-13 every activation said its namespace; one that
-            // still does keeps its old expansion, with a deprecation warning
-            // (`legacy_name_warning`). One that does not cannot be named.
-            return match &args.namespace {
-                Some(ns) => Ok(Names {
-                    new_form: false,
-                    trait_ident: None,
-                    namespace: ns.clone(),
-                    client_ident: format_ident!("{}Client", struct_name),
-                }),
-                None => Err(refusal(struct_name)),
-            };
-        };
+        // `trait = "Bar"` names the trait, the client and (absent
+        // `namespace`) the namespace, as MACRO-13 had it.
+        if let Some(named) = explicit {
+            return Ok(Names {
+                new_form: true,
+                namespace: args.namespace.clone().unwrap_or_else(|| snake_case(&named.to_string())),
+                client_ident: format_ident!("{}Client", named),
+                trait_ident: Some(named),
+            });
+        }
 
+        // `impl FooActivation`: the stem, as MACRO-13 had it — a trait only
+        // for a contract, which is its trait.
+        if let Some(stem) = type_stem {
+            return Ok(Names {
+                new_form: true,
+                namespace: args.namespace.clone().unwrap_or_else(|| snake_case(&stem.to_string())),
+                client_ident: format_ident!("{}Client", stem),
+                trait_ident: contract.then(|| stem.clone()),
+            });
+        }
+
+        // Before MACRO-13 every activation said its namespace; one not named
+        // `…Activation` that still does keeps its old expansion, with a
+        // deprecation warning (`legacy_name_warning`).
+        if let Some(ns) = &args.namespace {
+            return Ok(Names {
+                new_form: false,
+                trait_ident: None,
+                namespace: ns.clone(),
+                client_ident: format_ident!("{}Client", struct_name),
+            });
+        }
+
+        // RETURNS-47: `impl Tickets` — the type's own name names it.
+        if contract {
+            return Err(syn::Error::new(
+                struct_name.span(),
+                format!(
+                    "`{struct_name}` is bodiless, so it is a contract, and a contract is its trait — which \
+                     cannot share the type's name. Name the trait with `trait = \"…\"`, name the type \
+                     `{struct_name}Activation` (the trait is then `{struct_name}`), or write the trait by \
+                     hand and `#[plexus_macros::activation] impl {struct_name} for YourType`."
+                ),
+            ));
+        }
         Ok(Names {
             new_form: true,
-            namespace: args.namespace.clone().unwrap_or_else(|| snake_case(&stem.to_string())),
-            client_ident: format_ident!("{}Client", stem),
-            trait_ident: Some(stem),
+            namespace: snake_case(&type_name),
+            client_ident: format_ident!("{}Client", struct_name),
+            trait_ident: None,
         })
     }
 }
 
-/// An activation written before MACRO-13 on a type the name rule cannot
-/// name: it still builds, as it did, and says what to rename.
+/// An activation written before MACRO-13 on a type not named
+/// `…Activation`, its `namespace` given: it still builds, as it did, and
+/// says what to change.
 pub(crate) fn legacy_name_warning(struct_name: &syn::Ident) -> TokenStream {
     let span = struct_name.span();
     let const_name = format_ident!("_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_{}", struct_name, span = span);
     let touch = format_ident!("_plexus_macros_touch_unnamed_activation_{}", struct_name, span = span);
     let note = format!(
-        "plexus-macros (MACRO-13): `{struct_name}` does not end in `Activation`, so no trait is \
-         emitted for it and its client is `{struct_name}Client`. Rename it `{struct_name}Activation` \
-         (or write `trait = \"…\"`); then `namespace`, `client`, `crate_path`, `server_cfg` and \
-         `#[method]` may all go. A later release refuses it."
+        "plexus-macros (MACRO-13, RETURNS-47): `{struct_name}` says its `namespace`, so it expands as \
+         before MACRO-13 (only `#[method]`s on the wire, the client on the `client` flag). Remove \
+         `namespace` — `impl {struct_name}` is named by itself: namespace `{ns}`, client \
+         `{struct_name}Client` — or name the type `{struct_name}Activation` to keep `namespace` as an \
+         override; then `client`, `crate_path`, `server_cfg` and `#[method]` may go too. A later \
+         release refuses it.",
+        ns = snake_case(&struct_name.to_string()),
     );
     quote::quote_spanned! { span =>
         #[doc(hidden)]
@@ -222,6 +285,17 @@ pub(crate) fn is_wire_shape(method: &ImplItemFn) -> syn::Result<bool> {
              (then only #[plexus_macros::method]s are on the wire)."
         ),
     ))
+}
+
+/// RETURNS-47: on `impl Trait for Type`, is this method on the wire? Every
+/// `async fn` on `&self` is: the trait is the contract, and a trait impl's
+/// methods carry no `pub`. Anything else is a plain method.
+pub(crate) fn is_trait_wire_shape(method: &ImplItemFn) -> bool {
+    let on_ref_self = matches!(
+        method.sig.inputs.first(),
+        Some(FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none()
+    );
+    method.sig.asyncness.is_some() && on_ref_self
 }
 
 /// Does the consuming crate's manifest declare a `server` feature?
@@ -407,7 +481,7 @@ pub(crate) fn trait_def(
     let server = if contract {
         let gate = server_gate.map(|m| quote! { #[cfg(#m)] });
         quote! {
-            /// Serve this implementation on a hub: `hub.register(x.server())`.
+            /// Serve this implementation on a service: `service.register(x.server())`.
             #gate
             fn server(self) -> #struct_name<Self>
             where
@@ -428,11 +502,11 @@ pub(crate) fn trait_def(
     quote! {
         #doc
         ///
-        /// Emitted by `#[plexus_macros::activation]` (MACRO-13) from the
-        /// activation's wire methods, each under its own return type
-        /// (RETURNS-36): implemented by the activation and by its client, so
-        /// anything that implements it can be served and anything served can
-        /// be called through it.
+        /// Emitted by `#[plexus_macros::activation]` (`trait = "…"`, or a
+        /// bodiless contract) from the activation's wire methods, each under
+        /// its own return type (RETURNS-36): implemented by the activation, so
+        /// anything that implements it can be served. Its client implements
+        /// no trait (RETURNS-47); its methods answer `Result`s.
         pub trait #trait_ident: ::core::marker::Send + ::core::marker::Sync + 'static {
             #(#items)*
             #server
@@ -616,115 +690,6 @@ pub(crate) fn contract_items(
         }
 
         impl<#d: #trait_ident> #trait_ident for #struct_name<#d> {
-            #(#items)*
-        }
-    }
-}
-
-/// `impl<T: Transport + Clone + Send + Sync + 'static> Foo for FooClient<T>`:
-/// each method the call made from an owned transport, its answer the
-/// method's own return type, a client failure folded in by
-/// `FromClientError` (RETURNS-36: `plexus_client::trait_one`, `trait_many`,
-/// `trait_progress`, `trait_result_progress`).
-pub(crate) fn client_trait_impl(
-    trait_ident: &syn::Ident,
-    client_ident: &syn::Ident,
-    methods: &[MethodInfo],
-    client: &syn::Path,
-    boxes: &Boxes,
-) -> TokenStream {
-    let items = methods.iter().map(|m| {
-        let fn_ident = &m.fn_name;
-        let (params, _) = sig_params(m, &boxes.stream);
-        let ret = ret_ty(m, boxes);
-        let const_ident = crate::codegen::client::method_const_ident(m);
-        let links: Vec<TokenStream> = m.params.iter().map(crate::codegen::client::param_link).collect();
-        // RETURNS-46: along the client's route, or its refusal as the params.
-        let call_params = quote! {
-            self.route.method(Self::#const_ident).and_then(|_| #client::Params::new() #(#links)* .build())
-        };
-        let method_ref = quote! {
-            self.route.method(Self::#const_ident).unwrap_or(Self::#const_ident)
-        };
-        let ok = &m.ok_ty;
-        let decoder = match &m.err_ty {
-            None => quote! { #client::Content::decode::<#ok> },
-            Some(e) => quote! { #client::wire_result::from_content::<#ok, #e> },
-        };
-        let items = match &m.input {
-            None => quote! {
-                // PERF.115-36: the items with their content still the wire's
-                // text, decoded straight into the item.
-                #call_params.map(|__p| #client::owned_call_raw(
-                    ::core::clone::Clone::clone(&self.transport),
-                    #method_ref,
-                    __p,
-                ))
-            },
-            // BIDIR-6: the input half sent as the items are read.
-            Some(i) => {
-                let name = &i.name;
-                quote! {
-                    #call_params.map(|__p| #client::owned_call_raw_with_input(
-                        ::core::clone::Clone::clone(&self.transport),
-                        #method_ref,
-                        __p,
-                        #client::encode_input(#name),
-                    ))
-                }
-            }
-        };
-        // The item named with the signature's own tokens, so a type that
-        // does not implement `FromClientError` is pointed at where it is
-        // written.
-        let item = item_ty(m, client);
-        let body = match (m.cardinality, &m.progress_ty, &m.err_ty) {
-            (Cardinality::One, _, _) if m.input.is_some() => {
-                let name = &m.input.as_ref().expect("guarded").name;
-                quote! {
-                    #client::trait_one_with_input::<_, #item>(
-                        ::core::clone::Clone::clone(&self.transport),
-                        #method_ref,
-                        #call_params,
-                        #client::encode_input(#name),
-                        #decoder,
-                    )
-                }
-            }
-            (Cardinality::One, _, _) => quote! {
-                #client::trait_one::<_, #item>(
-                    ::core::clone::Clone::clone(&self.transport),
-                    #method_ref,
-                    #call_params,
-                    #decoder,
-                )
-            },
-            (Cardinality::Many, None, _) => quote! { #client::trait_many::<#item>(#items, #decoder) },
-            (Cardinality::Many, Some(p), None) => {
-                let p = p.to_type(client);
-                quote! { #client::trait_progress::<#ok, #p>(#items, #decoder) }
-            }
-            (Cardinality::Many, Some(p), Some(e)) => {
-                let p = p.to_type(client);
-                quote! { #client::trait_result_progress::<#ok, #p, #e>(#items, #decoder) }
-            }
-        };
-        quote! {
-            #[allow(clippy::too_many_arguments)]
-            fn #fn_ident(&self #(, #params)*) -> #ret {
-                #body
-            }
-        }
-    });
-    quote! {
-        impl<T> #trait_ident for #client_ident<T>
-        where
-            T: #client::Transport
-                + ::core::clone::Clone
-                + ::core::marker::Send
-                + ::core::marker::Sync
-                + 'static,
-        {
             #(#items)*
         }
     }

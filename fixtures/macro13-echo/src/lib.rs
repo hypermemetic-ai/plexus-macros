@@ -2,16 +2,19 @@
 //!
 //! | Build | Gets |
 //! |---|---|
-//! | default (`server`, `host`) | the three activations, their traits and clients |
+//! | default (`server`, `host`) | the three activations, their clients, the named trait `Echo` and the contract `Promise` |
 //! | `--no-default-features --features server` | `EchoActivation`'s server half; `HostActivation`'s is gated on `host` |
 //! | `--no-default-features` | the traits and the clients, no plexus-core in the tree |
+//!
+//! RETURNS-47: a trait only when named — `Echo` is (`trait = "Echo"`),
+//! `Host` is not and has none; a contract (`Promise`) is its trait. The
+//! clients implement no trait.
 //!
 //! Neither attribute says `server_cfg` for the `server` gate: the crate's
 //! manifest declares a `server` feature, so the macro gates on it.
 
 #[cfg(feature = "server")]
 use futures::Stream;
-use plexus_client::{ClientError, FromClientError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -21,19 +24,13 @@ pub enum EchoEvent {
     Error { message: String },
 }
 
-impl FromClientError for EchoEvent {
-    fn from_client_error(error: ClientError) -> Self {
-        EchoEvent::Error { message: error.to_string() }
-    }
-}
-
 /// The author gates their own struct; the macro gates its output.
 #[cfg(feature = "server")]
 #[derive(Clone, Default)]
 pub struct EchoActivation;
 
 /// Echo things back.
-#[plexus_macros::activation]
+#[plexus_macros::activation(trait = "Echo")]
 impl EchoActivation {
     /// Say a thing back.
     pub async fn say(&self, /** what to say */ text: String) -> impl Stream<Item = EchoEvent> + Send + 'static {
@@ -64,46 +61,44 @@ impl PromiseActivation {
     pub async fn keep(&self, text: String) -> impl Stream<Item = EchoEvent> + Send + 'static;
 }
 
-/// The traits and the clients, in every build.
-pub fn reach_it_through_the_trait<T>(transport: T) -> Box<dyn Echo>
-where
-    T: plexus_client::Transport + Clone + Send + Sync + 'static,
-{
-    Box::new(EchoClient::new(transport))
+/// The client, in every build.
+pub fn reach_it<T: plexus_client::Transport>(transport: T) -> EchoClient<T> {
+    EchoClient::new(transport)
 }
 
-/// `Host` and `HostClient`, in every build.
-pub fn reach_the_host<T>(transport: T) -> Box<dyn Host>
-where
-    T: plexus_client::Transport + Clone + Send + Sync + 'static,
-{
-    Box::new(HostClient::new(transport))
+/// `HostClient`, in every build.
+pub fn reach_the_host<T: plexus_client::Transport>(transport: T) -> HostClient<T> {
+    HostClient::new(transport)
 }
 
-/// `Promise` and `PromiseClient`, in every build.
-pub fn reach_the_promise<T>(transport: T) -> Box<dyn Promise>
-where
-    T: plexus_client::Transport + Clone + Send + Sync + 'static,
-{
-    Box::new(PromiseClient::new(transport))
+/// `PromiseClient`, in every build.
+pub fn reach_the_promise<T: plexus_client::Transport>(transport: T) -> PromiseClient<T> {
+    PromiseClient::new(transport)
 }
+
+/// The named trait and the contract's, in every build: what an
+/// implementation outside the server half is written against.
+pub fn the_traits(_: &dyn Echo, _: &dyn Promise) {}
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+    use futures::TryStreamExt;
     use plexus_core::plexus::{Activation, InProcessTransport};
 
     #[tokio::test]
     async fn both_halves_with_default_features() {
         assert_eq!(EchoActivation.namespace(), "echo");
         assert_eq!(HostActivation.namespace(), "host");
-        let echo = reach_it_through_the_trait(InProcessTransport::new(EchoActivation));
-        let got: Vec<EchoEvent> = echo.say("hi".into()).collect().await;
+        let echo = reach_it(InProcessTransport::new(EchoActivation));
+        let got: Vec<EchoEvent> = echo.say("hi".into()).try_collect().await.unwrap();
         assert_eq!(got, vec![EchoEvent::Said { text: "hi".into() }]);
         let host = reach_the_host(InProcessTransport::new(HostActivation));
-        let got: Vec<EchoEvent> = host.say("hi".into()).collect().await;
+        let got: Vec<EchoEvent> = host.say("hi".into()).try_collect().await.unwrap();
         assert_eq!(got, vec![EchoEvent::Said { text: "hi".into() }]);
+        // The named trait, implemented by the activation.
+        let through: Vec<EchoEvent> = futures::StreamExt::collect(Echo::say(&EchoActivation, "hi".into())).await;
+        assert_eq!(through, vec![EchoEvent::Said { text: "hi".into() }]);
     }
 
     struct Kept;
@@ -118,7 +113,7 @@ mod tests {
         let served = Kept.server();
         assert_eq!(served.namespace(), "promise");
         let promise = reach_the_promise(InProcessTransport::new(served));
-        let got: Vec<EchoEvent> = promise.keep("hi".into()).collect().await;
+        let got: Vec<EchoEvent> = promise.keep("hi".into()).try_collect().await.unwrap();
         assert_eq!(got, vec![EchoEvent::Said { text: "hi".into() }]);
     }
 }

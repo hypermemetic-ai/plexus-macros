@@ -191,14 +191,35 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         _ => return Err(syn::Error::new_spanned(&input_impl.self_ty, "Expected struct type")),
     };
 
-    // MACRO-13: the name rule — on `impl FooActivation` (or with `trait` in
-    // the attribute) the stem names the namespace, the trait and the client.
-    let names = contract::Names::resolve(&args, &struct_name)?;
-    let namespace = names.namespace.clone();
+    // RETURNS-47: `impl Trait for Type` — the trait names the contract.
+    let trait_impl: Option<syn::Path> = match &input_impl.trait_ {
+        None => None,
+        Some((Some(bang), _, _)) => {
+            return Err(syn::Error::new_spanned(bang, "a negative impl cannot be an activation"))
+        }
+        Some((None, path, _)) => Some(path.clone()),
+    };
 
     // MACRO-13: a bodiless method (`pub async fn f(&self) -> …;`) arrives as
     // verbatim tokens; give it a placeholder body and remember it.
     let bodiless = contract::take_bodiless(&mut input_impl);
+    if let (Some(path), Some(f)) = (&trait_impl, bodiless.first()) {
+        return Err(syn::Error::new(
+            f.span(),
+            format!(
+                "`{f}` has no body, in `impl {} for {struct_name}`: a trait impl has every body; \
+                 the contract is the trait itself",
+                quote!(#path).to_string().replace(' ', "")
+            ),
+        ));
+    }
+
+    // MACRO-13 / RETURNS-47: the name rule — on `impl FooActivation` the
+    // stem, on `impl Foo` the type's own name, with `trait = "…"` the trait's
+    // name, on `impl Trait for Type` the trait's, names the namespace and the
+    // client; a trait is emitted only when named, or for a contract.
+    let names = contract::Names::resolve(&args, &struct_name, trait_impl.as_ref(), !bodiless.is_empty())?;
+    let namespace = names.namespace.clone();
 
     // MACRO-13: under the name rule every `pub async fn` on `&self`
     // returning a signature form (RETURNS-8) is a wire method, unless the
@@ -228,6 +249,19 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             // block doesn't still carry the (now-no-op) `#[child]` macro
             // invocation.
             if has_child_attr(method) {
+                // RETURNS-47: a trait impl's children are GRAFT-1's (a graft
+                // point typed by an interface); not taken here.
+                if let Some(path) = &trait_impl {
+                    return Err(syn::Error::new_spanned(
+                        &method.sig.ident,
+                        format!(
+                            "#[plexus_macros::child] in `impl {} for {struct_name}`: a trait impl's children \
+                             are not served yet (GRAFT-1); declare the child in an inherent \
+                             `#[plexus_macros::activation] impl` instead",
+                            quote!(#path).to_string().replace(' ', "")
+                        ),
+                    ));
+                }
                 child_methods.push(ChildMethodInfo::from_fn(method)?);
                 // Strip #[child] and the companion #[plexus_macros::removed_in]
                 // — they're both macro-only markers that rustc does not
@@ -258,7 +292,14 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                     Meta::NameValue(_) => None,
                 };
                 methods.push(MethodInfo::from_fn(method, hub_method_attrs.as_ref())?);
-            } else if all_public_methods && contract::is_wire_shape(method)? {
+            } else if all_public_methods
+                && (if trait_impl.is_some() {
+                    // RETURNS-47: every `async fn` on `&self` of the trait.
+                    contract::is_trait_wire_shape(method)
+                } else {
+                    contract::is_wire_shape(method)?
+                })
+            {
                 // MACRO-13: unmarked, and on the wire by its shape.
                 methods.push(MethodInfo::from_fn(method, None)?);
             } else {
@@ -326,22 +367,21 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             ));
         }
     }
-    // MACRO-13 (`always`): every activation the name rule names has its
-    // trait; a contract needs one, so one written before MACRO-13 (no trait
-    // to name) cannot be a contract.
+    // A contract is its trait; one written before MACRO-13 (its namespace
+    // said, no trait named) has none to be.
     if contract_mode && names.trait_ident.is_none() {
         return Err(syn::Error::new(
             struct_name.span(),
             format!(
                 "`{struct_name}` is bodiless, so it is a contract, and a contract is its trait; \
-                 but `{struct_name}` does not end in `Activation`, so the trait cannot be named. \
-                 Name the type `{struct_name}Activation`, or write `trait = \"…\"` in the attribute."
+                 name it with `trait = \"…\"` in the attribute (or name the type \
+                 `{struct_name}Activation`, whose trait is `{struct_name}`)."
             ),
         ));
     }
-    // MACRO-13 (`always`, the owner, 2026-10-16): every activation the name
-    // rule names has its trait — RETURNS-36: each method in it under its own
-    // return type, so every signature form is in it.
+    // RETURNS-47 (owner, 2026-11-04, reversing MACRO-13's `always`): a
+    // trait only when named (`trait = "…"`) or for a contract — each method
+    // in it under its own return type (RETURNS-36).
     let trait_ident: Option<syn::Ident> = names.trait_ident.clone();
     let self_callable = contract::self_callable(&methods);
     if contract_mode && !self_callable {
@@ -684,7 +724,11 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     match effective_auth_posture {
         crate::parse::AuthPosture::Required => {
             for m in &methods {
-                if m.auth_resolvers.is_empty() && !m.public {
+                // RETURNS-47: a trait impl's signature cannot carry
+                // `#[from_auth]`; its methods reach their caller through the
+                // call's context (`plexus_core::call::caller()`), the gate
+                // having decided first.
+                if m.auth_resolvers.is_empty() && !m.public && trait_impl.is_none() {
                     if m.auth_optional {
                         required_posture_optional_auth_methods.push(m);
                         continue;
@@ -785,6 +829,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &deps,
         &declared_roles,
         args.typed_params, // MACRO-31: an unknown key is refused under it
+        trait_impl.as_ref(), // RETURNS-47: methods called through the trait
     );
 
     // MACRO-2 / MACRO-13: the typed client. Under the name rule it is
@@ -880,15 +925,6 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 &methods,
                 &boxes,
                 &deps,
-            ));
-        }
-        if let Some(path) = &client_path {
-            trait_items.extend(contract::client_trait_impl(
-                trait_ident,
-                &names.client_ident,
-                &methods,
-                path,
-                &boxes,
             ));
         }
     }

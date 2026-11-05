@@ -1,19 +1,19 @@
 error[E0277]: `PingActivation` must implement `Clone` to implement its activation trait
- --> tests/compile/macro13_activation_not_clone.rs:8:1
+ --> tests/compile/macro13_activation_not_clone.rs:9:1
   |
-8 | #[plexus_macros::activation]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this activation is not `Clone`
+9 | #[plexus_macros::activation(trait = "Ping")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this activation is not `Clone`
   |
   = help: the trait `Clone` is not implemented for `PingActivation`
   = note: #[plexus_macros::activation] (MACRO-13) implements the activation's trait by cloning the activation into each method's stream, as `register` does; derive or implement `Clone` for `PingActivation` (wrap its state in `Arc`)
 note: required for `PingActivation` to implement `__PlexusActivationClone`
- --> tests/compile/macro13_activation_not_clone.rs:8:1
+ --> tests/compile/macro13_activation_not_clone.rs:9:1
   |
-8 | #[plexus_macros::activation]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+9 | #[plexus_macros::activation(trait = "Ping")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = note: this error originates in the attribute macro `plexus_macros::activation` (in Nightly builds, run with -Z macro-backtrace for more info)
 help: consider annotating `PingActivation` with `#[derive(Clone)]`
   |
-6 + #[derive(Clone)]
-7 | pub struct PingActivation;
+7 + #[derive(Clone)]
+8 | pub struct PingActivation;
   |

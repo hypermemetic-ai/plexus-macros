@@ -124,9 +124,10 @@ pub struct BetaActivation;
 impl BetaActivation {
     /// The items matching a query.
     #[plexus_macros::method(params(query = "What to match"))]
-    // fallible since RETURNS-36's review #8: a client failure must become
-    // the item, and Vec<Item> cannot take FromClientError; its returns stay
-    // an array of Item
+    // fallible since RETURNS-36's review #8 (a client failure had to become
+    // the item, and Vec<Item> could not take FromClientError; RETURNS-47
+    // ended that), kept so the IR stays the one its readers hold; its
+    // returns an array of Item
     pub async fn find(&self, query: String) -> Result<Vec<Item>, Missing> {
         Ok(vec![item(&query)])
     }
@@ -203,31 +204,4 @@ pub fn service() -> DynamicHub {
 /// The clash service: `clash` alone.
 pub fn clash_service() -> DynamicHub {
     DynamicHub::new(CLASH_SERVICE).register(ClashActivation)
-}
-
-// RETURNS-36 (review #8): the activation's trait is always emitted and its
-// client implements it, so a client failure must become each method's item.
-// The shapes stay as they are (they are the IR's input); each folds the
-// failure into what it has.
-macro_rules! from_client_error {
-    ($($ty:ty => |$e:ident| $make:expr;)*) => {$(
-        impl plexus_client::FromClientError for $ty {
-            fn from_client_error($e: plexus_client::ClientError) -> Self {
-                $make
-            }
-        }
-    )*};
-}
-
-from_client_error! {
-    Item => |e| Item { id: e.to_string(), label: None, color: Color::Red, tags: vec![] };
-    Missing => |e| Missing::NotFound { id: e.to_string() };
-    Page => |e| Page { items: vec![], next: Some(e.to_string()), counts: Default::default(), span: (0, 0) };
-    ItemEvent => |e| ItemEvent::Removed { id: e.to_string() };
-    Name => |e| Name { value: e.to_string(), rank: 0 };
-    Odd => |e| Odd { name: e.to_string(), extra: Default::default() };
-    Choice => |e| Choice::Word(e.to_string());
-    Step => |_e| Step::Fetched { done: 0, of: 0 };
-    things::one::Thing => |e| things::one::Thing { id: e.to_string() };
-    things::two::Thing => |_e| things::two::Thing { id: 0, weight: 0 };
 }

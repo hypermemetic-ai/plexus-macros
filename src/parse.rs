@@ -635,13 +635,14 @@ const MAX_DESCRIPTION_WORDS: usize = 15;
 
 /// Parsed attributes for #[hub_methods]
 pub struct HubMethodsAttrs {
-    /// `namespace = "..."`. MACRO-13: optional — when absent, the stem of
-    /// `impl FooActivation` (or the trait's name) in snake_case.
+    /// `namespace = "..."`. MACRO-13: optional — when absent, the type's
+    /// name (`impl Foo`, the stem of `impl FooActivation`) or the trait's
+    /// name in snake_case.
     pub namespace: Option<String>,
     /// MACRO-13: `trait = "Bar"` — names the activation's trait (and its
     /// client, and absent `namespace` its namespace) whatever the type is
-    /// called. Without it the trait is named from the stem of
-    /// `impl FooActivation`; it is always emitted.
+    /// called. RETURNS-47: without it no trait is emitted (but for a
+    /// contract, which is its trait).
     pub trait_attr: Option<syn::LitStr>,
     /// Span of the `trait` key, for diagnostics.
     pub trait_span: Option<proc_macro2::Span>,
@@ -967,12 +968,12 @@ impl Parse for HubMethodsAttrs {
                             hub = true;
                             hub_span = Some(path.span());
                         } else if path.is_ident(TRAIT_KEY) {
-                            // MACRO-13 (`always`): the trait is emitted for
-                            // every activation; a bare `trait` asks nothing.
+                            // RETURNS-47: a trait only when named; a bare
+                            // `trait` names none.
                             return Err(syn::Error::new(
                                 path.span(),
-                                "the trait is always emitted, named from `impl FooActivation`'s \
-                                 stem; write `trait = \"Name\"` to name it otherwise",
+                                "a trait is emitted only when named: write `trait = \"Name\"` \
+                                 (or write the trait by hand and `impl Name for YourType`)",
                             ));
                         } else if path.is_ident("client") {
                             // MACRO-2: also emit the typed client.
