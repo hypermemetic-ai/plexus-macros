@@ -73,8 +73,10 @@ This file starts at 0.7.0; earlier changes are in the git history.
     `MethodStream<'_, I, P, XEvent>`): `L` the client's lift, `__XClientM` a
     zero-sized `EventOf` emitted per method — its variant, inlined with the
     lift (through a `fn` pointer and then the lift, a static level cost ~10
-    ns an event, about 10%). Code that names the type: name `L` and `W` as
-    `_`, or let it be inferred. `MethodStream::call` / `new` with a
+    ns an event, about 10%). Code that names the type: use the method's
+    alias, `{Ns}{Method}Stream<'a, L = Root>` (`RootTickStream<'a>`;
+    `{Ns}{Method}MethodStream` when an item type is already called that),
+    which each method returns and its doc names — or name `L` and `W` as `_`. `MethodStream::call` / `new` with a
     `fn(I) -> A` are as they were (`W` defaults to it); `call_as` takes an
     `EventOf`. A static child's lift is `Static<L, __XClientChild>`, a
     zero-sized `Wrap` per static child.

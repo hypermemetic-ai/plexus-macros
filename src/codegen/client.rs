@@ -228,6 +228,22 @@ pub(crate) fn aggregate_name(namespace: &str) -> String {
     format!("{}Event", pascal(namespace))
 }
 
+/// RETURNS-46: a many-item method's stream alias, `{Ns}{Method}Stream` —
+/// or `{Ns}{Method}MethodStream` when an item type of the activation is
+/// already called that, as the aggregate is `{Ns}Aggregate` then.
+pub(crate) fn stream_alias_name(namespace: &str, wire_method: &str, methods: &[MethodInfo]) -> String {
+    let name = format!("{}{}Stream", pascal(namespace), pascal(wire_method));
+    let named = |ty: &Type| match ty {
+        Type::Path(tp) => tp.path.segments.last().is_some_and(|s| s.ident == name),
+        _ => false,
+    };
+    if methods.iter().any(|m| named(&m.ok_ty) || m.err_ty.as_ref().is_some_and(named)) {
+        format!("{}{}MethodStream", pascal(namespace), pascal(wire_method))
+    } else {
+        name
+    }
+}
+
 /// A path as the string a serde attribute takes (`crate = "…"`, `with =
 /// "…"`), without the spaces `TokenStream`'s `Display` puts between tokens.
 fn path_string(tokens: TokenStream) -> String {
@@ -451,17 +467,33 @@ pub(crate) fn generate(
                     }
                     None => quote! { #client_path::NoProgress },
                 };
+                let alias = derived_ident(
+                    &stream_alias_name(namespace, wire_method, methods),
+                    &format!("the method `{wire_method}`"),
+                    m.fn_name.span(),
+                )?;
                 let doc = format!(
-                    "{doc}\n\nMany items, as a stream of `Result<item, ClientError>`; \
-                     progress is dropped unless opted in with `.with_progress()`, and \
-                     `.events()` yields `{event_ty}::{variant}` — lifted by `L` into the \
+                    "{doc}\n\nMany items, as a stream of `Result<item, ClientError>` — a \
+                     [`{alias}`]; progress is dropped unless opted in with `.with_progress()`, \
+                     and `.events()` yields `{event_ty}::{variant}` — lifted by `L` into the \
                      aggregate of the client this one was reached from (RETURNS-46)."
                 );
                 // RETURNS-46: the method's variant as a zero-sized `EventOf`,
                 // so it and the lift inline into one step per event.
                 let ctor = wrap_ident(client_ty, &variant);
                 let ctor_doc = format!("RETURNS-46: an item of `{namespace}.{wire_method}` as `{event_ty}::{variant}`.");
+                let alias_doc = format!(
+                    "The stream of a `{namespace}.{wire_method}` call: `MethodStream<'a, item, progress, \
+                     {event_ty}, L, _>`, its variant a hidden zero-sized type (RETURNS-46). `L` is the \
+                     lift of the client the call was made on — `Root` for one made with `new` or `at`, \
+                     a parent's for one an accessor made. Name a held call's type with it."
+                );
                 ctors.push(quote! {
+                    #[doc = #alias_doc]
+                    #[allow(private_interfaces)]
+                    pub type #alias<'a, L = #client_path::Root> =
+                        #client_path::MethodStream<'a, #item_ty, #progress_ty, #event_ty, L, #ctor>;
+
                     #[doc = #ctor_doc]
                     #[doc(hidden)]
                     #[derive(Debug, Clone, Copy, Default)]
@@ -479,9 +511,7 @@ pub(crate) fn generate(
                 quote! {
                     #[allow(clippy::too_many_arguments)]
                     #[doc = #doc]
-                    pub fn #fn_ident(&self #(, #sig_params)*)
-                        -> #client_path::MethodStream<'_, #item_ty, #progress_ty, #event_ty, L, #ctor>
-                    {
+                    pub fn #fn_ident(&self #(, #sig_params)*) -> #alias<'_, L> {
                         let (__method, __params) = match self.route.method(#client_ty::<T>::#const_ident) {
                             ::core::result::Result::Ok(m) => (m, #params),
                             ::core::result::Result::Err(e) => (#client_ty::<T>::#const_ident, ::core::result::Result::Err(e)),
@@ -918,6 +948,12 @@ mod tests {
         assert_eq!(pascal("set-status"), "SetStatus");
         assert_eq!(pascal("a.b"), "AB");
         assert_eq!(pascal("getHTTP"), "GetHTTP");
+    }
+
+    #[test]
+    fn a_stream_alias_is_pascal_namespace_and_method_plus_stream() {
+        assert_eq!(stream_alias_name("root", "tick", &[]), "RootTickStream");
+        assert_eq!(stream_alias_name("claude_code", "get_status", &[]), "ClaudeCodeGetStatusStream");
     }
 
     #[test]

@@ -764,7 +764,10 @@ zero-sized `Wrap`, the variant) or `Named` (the instance's name too, an
 `Arc<str>` every event shares). A many-item method's stream names its
 variant as a zero-sized `EventOf` too (`MethodStream<'_, I, P, XEvent, L,
 __XClientM>`), so the variant and the lift inline into one step per event:
-a static level costs what the level's own client does. One listener over a subtree is one `select_all`,
+a static level costs what the level's own client does. Each many-item
+method's stream has a name to hold it by, `{Ns}{Method}Stream<'a, L = Root>`
+(`TreeCountStream<'a>`, `BranchGrowStream<'a, L>`; `{Ns}{Method}MethodStream`
+when an item type already has that name), and the method returns it. One listener over a subtree is one `select_all`,
 matched with no wildcard:
 
 ```rust

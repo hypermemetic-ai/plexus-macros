@@ -1,9 +1,9 @@
 //! `#[child(opaque)]` (RETURNS-46 review): a dynamic child whose type has no
 //! client gets no accessor and no variant, and is routed as before.
 //!
-//! [`SessionChild`] is plexus-substrate's `claudecode` shape: a legacy name
+//! `SessionChild` is plexus-substrate's `claudecode` shape: a legacy name
 //! (no `…Activation`, no `client` flag), so no `SessionChildClient`.
-//! [`RawRouter`] is a hand-written `ChildRouter`, no macro at all.
+//! `RawRouter` is a hand-written `ChildRouter`, no macro at all.
 
 use super::{ticks, N};
 use async_trait::async_trait;

@@ -40,9 +40,10 @@ async fn a_stream_is_named_by_its_alias() {
     let o: Vec<RootEvent> = held.org.events().try_collect().await.unwrap();
     assert_eq!((r.len(), l.len(), o.len()), (2, 2, 2));
     assert!(matches!(l[0], RootEvent::Left(SideEvent::Tick(N { n: 0 }))), "{:?}", l[0]);
-    assert!(matches!(&o[1], RootEvent::Org { name, .. } if &**name == "acme"), "{:?}", o[1]);
+    assert!(matches!(&o[1], RootEvent::Org { name, .. } if name.as_ref() == "acme"), "{:?}", o[1]);
     // the child's own client, its default lift
-    let own: SideTickStream<'_> = SideClient::at(&f, "root.left").tick(1);
+    let side = SideClient::at(&f, "root.left");
+    let own: SideTickStream<'_> = side.tick(1);
     let own: Vec<SideEvent> = own.events().try_collect().await.unwrap();
-    assert_eq!(own.len(), 1);
+    assert_eq!(own.len(), 2, "Fast(2) answers any call with two items");
 }
