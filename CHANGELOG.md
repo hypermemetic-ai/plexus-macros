@@ -107,6 +107,10 @@ RETURNS-43. Breaking.
   (only `{ns}.call`, where the context is). Refused, by name: `trait = "…"`
   beside it, a bodiless method, `#[child]` (GRAFT-1's), and a method-level
   `#[from_auth]` on an inherent impl.
+- A trait-impl activation can be a child: where its client is named
+  otherwise than its type (`impl Trait for Type`, `trait = "…"`), the type's
+  name is an alias of the client (`pub type TypeClient<T, L = Root> =
+  TraitClient<T, L>`), which a parent's `#[child]` names.
 
 #### Changed
 
