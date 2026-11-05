@@ -897,7 +897,22 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     };
     let (client_impl, client_server_checks) = match &client_path {
         Some(path) => {
-            let (client, checks) = client::generate(&names.client_ident, &namespace, &methods, &child_methods, path)?;
+            let (mut client, checks) = client::generate(&names.client_ident, &namespace, &methods, &child_methods, path)?;
+            // RETURNS-47: a parent's `#[child]` names its child's client from
+            // the child type (`{stem}Client`, MACRO-16). Where this
+            // activation's client is named otherwise — `impl Trait for Type`
+            // (the trait's), `trait = "…"` — the type's name is an alias of
+            // it, so the type can be a child.
+            let type_name = struct_name.to_string();
+            let by_type = format_ident!("{}Client", contract::stem_of(&type_name).unwrap_or(&type_name));
+            if by_type != names.client_ident {
+                let client_ident = &names.client_ident;
+                let doc = format!("`{client_ident}`, by the name of the type it is the client of (`{struct_name}`): how a parent's `#[child]` names it.");
+                client.extend(quote! {
+                    #[doc = #doc]
+                    pub type #by_type<T, L = #path::Root> = #client_ident<T, L>;
+                });
+            }
             // RETURNS-46: this activation has a client, which a parent's
             // `#[child]` checks for (in the server half, where the type is).
             let has_client = quote! {
