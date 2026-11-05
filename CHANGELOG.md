@@ -110,7 +110,11 @@ RETURNS-43. Breaking.
 - A trait-impl activation can be a child: where its client is named
   otherwise than its type (`impl Trait for Type`, `trait = "…"`), the type's
   name is an alias of the client (`pub type TypeClient<T, L = Root> =
-  TraitClient<T, L>`), which a parent's `#[child]` names.
+  TraitClient<T, L>`), which a parent's `#[child]` names. The alias is a new
+  name in the impl's module: a type of the user's own there named
+  `{Type}Client` clashes with it (E0428). The macro cannot see the module
+  (only the impl's tokens), so it cannot detect the clash and skip the alias;
+  rename the user's type, or the activation's.
 
 #### Changed
 
