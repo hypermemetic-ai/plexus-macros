@@ -151,7 +151,9 @@ async fn a_same_service_child_sees_the_caller_whole() {
 async fn an_identity_only_child_does_not() {
     let v = seen("deputy").await;
     assert_eq!(v["user"], json!("u1"));
-    assert_eq!(v["metadata"], Value::Null);
+    // RETURNS-47: the principal stamp is the identity, kept; nothing else of
+    // the metadata is.
+    assert_eq!(v["metadata"], json!({"principal": "key:abc"}));
 }
 
 #[tokio::test]

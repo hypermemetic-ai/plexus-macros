@@ -1,0 +1,5 @@
+error: `Driver` is bodiless, so it is a contract, and a contract is its trait — which cannot share the type's name. Name the trait with `trait = "…"`, name the type `DriverActivation` (the trait is then `Driver`), or write the trait by hand and `#[plexus_macros::activation] impl Driver for YourType`.
+ --> tests/compile/returns47_bare_contract_unnamed.rs:6:6
+  |
+6 | impl Driver {
+  |      ^^^^^^

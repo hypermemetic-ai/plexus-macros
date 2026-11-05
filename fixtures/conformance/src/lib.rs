@@ -49,9 +49,13 @@ const MAX_LOAD: u32 = 3;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ConformanceActivation;
 
+// RETURNS-47: a trait only when named — named here, so the trait half of
+// the fixture (`tests/trait.rs`) still holds all six forms. The trait adds
+// nothing to the wire.
 #[plexus_macros::activation(
     description = "Conformance fixture: one method per signature form",
-    crate_path = "plexus_core"
+    crate_path = "plexus_core",
+    trait = "Conformance"
 )]
 impl ConformanceActivation {
     // -> T: one item, infallible.
@@ -138,28 +142,4 @@ impl ConformanceActivation {
             yield Progress::Item(Warmed { entries: 2 });
         }
     }
-}
-
-// RETURNS-36 (review #8): the activation's trait is always emitted, each
-// method under its own return type, and its client implements it — so a
-// client failure must become each method's item. The fixture's shapes are
-// the contract's (expected/schema.json) and stay as they are, so each folds
-// the failure into what it has.
-macro_rules! from_client_error {
-    ($($ty:ty => |$e:ident| $make:expr;)*) => {$(
-        impl plexus_client::FromClientError for $ty {
-            fn from_client_error($e: plexus_client::ClientError) -> Self {
-                $make
-            }
-        }
-    )*};
-}
-
-from_client_error! {
-    Pong => |e| Pong { message: e.to_string() };
-    LookupError => |e| LookupError::NotFound { id: e.to_string() };
-    Tick => |_e| Tick { n: 0 };
-    ScanError => |e| ScanError::Unreadable { key: e.to_string() };
-    LoadError => |_e| LoadError::TooMany { n: 0, max: 0 };
-    Warmed => |_e| Warmed { entries: 0 };
 }

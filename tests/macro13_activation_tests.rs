@@ -1,8 +1,8 @@
 //! MACRO-13 · `#[activation]` needs nothing.
 //!
 //! A bare attribute on `impl EchoActivation`: the stem `Echo` names the
-//! namespace (`echo`), the trait (`trait Echo`, always emitted) and
-//! the client (`EchoClient<T>`); every `pub async fn` on `&self` returning a
+//! namespace (`echo`) and the client (`EchoClient<T>`) — RETURNS-47: no
+//! trait, unless named; every `pub async fn` on `&self` returning a
 //! stream is a wire method, with nothing marked; descriptions come from `///`
 //! alone. The schema is the one the same methods published before MACRO-13
 //! (declared on `impl Echo` with `#[method]` and `namespace = "echo"`), and
@@ -10,7 +10,7 @@
 
 use futures::{Stream, StreamExt};
 use futures::TryStreamExt;
-use plexus_client::{ClientError, FromClientError, MemoryTransport, MethodRef, StreamItem, Transport};
+use plexus_client::{ClientError, MemoryTransport, MethodRef, StreamItem, Transport};
 use plexus_core::plexus::{Activation, InProcessTransport};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -22,12 +22,6 @@ pub enum EchoEvent {
     Said { text: String },
     Counted { n: u32 },
     Error { message: String },
-}
-
-impl FromClientError for EchoEvent {
-    fn from_client_error(error: ClientError) -> Self {
-        EchoEvent::Error { message: error.to_string() }
-    }
 }
 
 /// The MACRO-13 form: nothing in the attribute.
@@ -128,7 +122,7 @@ mod before {
     }
 }
 
-use now::{Echo, EchoActivation, EchoClient};
+use now::{EchoActivation, EchoClient};
 
 #[test]
 fn a_bare_activation_publishes_namespace_echo_with_exactly_its_two_public_stream_methods() {
@@ -193,30 +187,26 @@ fn the_client_is_the_one_macro_4_emitted_for_a_type_named_echo() {
     assert_eq!(t1.params_of(&say), t2.params_of(&say));
 }
 
-fn is_echo<T: Echo>() {}
-
+// RETURNS-47 (reversing MACRO-13's acceptance 1, the owner's `always`): no
+// `trait Echo` is emitted for a bare `impl EchoActivation`, and the client
+// implements no trait. What was asserted through `dyn Echo` is asserted on
+// each directly: the activation serves both methods, the client calls them.
 #[tokio::test]
-async fn the_activation_and_its_client_are_both_an_echo_and_round_trip_through_it() {
-    is_echo::<EchoActivation>();
-    is_echo::<EchoClient<InProcessTransport<EchoActivation>>>();
-
-    let echoes: Vec<Box<dyn Echo>> = vec![
-        Box::new(EchoActivation::new()),
-        Box::new(EchoClient::new(InProcessTransport::new(EchoActivation::new()))),
-    ];
-    for echo in &echoes {
-        let said: Vec<EchoEvent> = echo.say("hi".into()).collect().await;
-        assert_eq!(said, vec![EchoEvent::Said { text: "hi".into() }]);
-        let counted: Vec<EchoEvent> = echo.count(3).collect().await;
-        assert_eq!(
-            counted,
-            vec![EchoEvent::Counted { n: 1 }, EchoEvent::Counted { n: 2 }, EchoEvent::Counted { n: 3 }]
-        );
-    }
+async fn the_client_round_trips_both_wire_methods() {
+    let client = EchoClient::new(InProcessTransport::new(EchoActivation::new()));
+    let said: Vec<EchoEvent> = client.say("hi".into()).try_collect().await.unwrap();
+    assert_eq!(said, vec![EchoEvent::Said { text: "hi".into() }]);
+    let counted: Vec<EchoEvent> = client.count(3).try_collect().await.unwrap();
+    assert_eq!(
+        counted,
+        vec![EchoEvent::Counted { n: 1 }, EchoEvent::Counted { n: 2 }, EchoEvent::Counted { n: 3 }]
+    );
 }
 
+// RETURNS-47 (superseding RETURNS-43): a client failure is the stream's
+// `Err(ClientError)`, then its end — never folded into the event type.
 #[tokio::test]
-async fn a_client_failure_is_the_event_types_own_error_and_ends_the_stream() {
+async fn a_client_failure_is_an_err_and_ends_the_stream() {
     let say = MethodRef::new("echo", "say");
     let t = MemoryTransport::new().script(
         say,
@@ -233,9 +223,10 @@ async fn a_client_failure_is_the_event_types_own_error_and_ends_the_stream() {
             StreamItem::data(serde_json::json!({"type": "said", "text": "late"})),
         ],
     );
-    let client: Box<dyn Echo> = Box::new(EchoClient::new(Arc::new(t)));
-    let got: Vec<EchoEvent> = client.say("hi".into()).collect().await;
-    assert_eq!(got, vec![EchoEvent::Error { message: "remote error: no".into() }]);
+    let client = EchoClient::new(Arc::new(t));
+    let got: Vec<Result<EchoEvent, ClientError>> = client.say("hi".into()).collect().await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(matches!(&got[0], Err(ClientError::Remote(_))), "{got:?}");
 }
 
 /// `namespace = "other"` overrides the stem; `methods = marked` publishes
@@ -299,9 +290,9 @@ fn streams_are_streams(s: impl Stream<Item = EchoEvent>) -> impl Stream<Item = E
     s.map(|e| e)
 }
 
-/// A method that takes what the server injects (`auth`) is on the trait with
-/// what a caller passes; the client implements the trait, and the activation
-/// — which has no caller to take `auth` from — does not.
+/// A method that takes what the server injects (`auth`): its client sends
+/// only what a caller passes. (RETURNS-47: no trait, so nothing for the
+/// client to implement.)
 mod injected {
     use super::EchoEvent;
     use async_stream::stream;
@@ -323,29 +314,26 @@ mod injected {
 }
 
 #[tokio::test]
-async fn an_injected_parameter_stays_off_the_trait_and_the_client_implements_it() {
-    use injected::{Guarded, GuardedActivation, GuardedClient};
-    fn is_guarded<T: Guarded>() {}
-    is_guarded::<GuardedClient<Arc<MemoryTransport>>>();
+async fn an_injected_parameter_stays_off_the_client() {
+    use injected::{GuardedActivation, GuardedClient};
     assert_eq!(GuardedActivation.namespace(), "guarded");
 
     let greet = MethodRef::new("guarded", "greet");
     let t = Arc::new(MemoryTransport::new().script_events(greet.clone(), &[EchoEvent::Said { text: "hi, ann".into() }]));
-    let client: Box<dyn Guarded> = Box::new(GuardedClient::new(t.clone()));
-    let got: Vec<EchoEvent> = client.greet("hi".into()).collect().await;
+    let client = GuardedClient::new(t.clone());
+    let got: Vec<EchoEvent> = client.greet("hi".into()).try_collect().await.unwrap();
     assert_eq!(got, vec![EchoEvent::Said { text: "hi, ann".into() }]);
     assert_eq!(t.params_of(&greet), Some(serde_json::json!({"greeting": "hi"})));
 }
 
-/// A client mounted at a path (MACRO-16's `XClient::at`), called through the
-/// trait, goes where its inherent method goes: `host.echo.say`, not `echo.say`.
+/// A client mounted at a path (MACRO-16's `XClient::at`) goes where its
+/// path says: `host.echo.say`, not `echo.say`. (RETURNS-47: there is no
+/// trait to call it through any more; its inherent method is the call.)
 #[test]
-fn a_mounted_client_through_the_trait_keeps_its_path() {
+fn a_mounted_client_keeps_its_path() {
     let at = EchoClient::<MemoryTransport>::METHOD_SAY.at("host.echo");
     let t = Arc::new(MemoryTransport::new().script_events(at, &[EchoEvent::Said { text: "x".into() }]));
     let client = EchoClient::at(t, "host.echo");
     let inherent = futures::executor::block_on(client.say("x".into()).try_collect::<Vec<_>>()).unwrap();
     assert_eq!(inherent, vec![EchoEvent::Said { text: "x".into() }]);
-    let through: Vec<EchoEvent> = futures::executor::block_on(Echo::say(&client, "x".into()).collect());
-    assert_eq!(through, vec![EchoEvent::Said { text: "x".into() }]);
 }

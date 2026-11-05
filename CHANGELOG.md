@@ -78,6 +78,102 @@ RETURNS-46, after 0.8.0: breaking, so the next release is 0.9.0.
     for `XClient<T>`, `Default`.
   - `MemoryTransport::params_of` takes `impl Borrow<MethodRef>`.
 
+### RETURNS-47: no suffix forced, a trait only when named, `impl Trait for Type`
+
+Owner, 2026-11-04 (option 2), reversing MACRO-13's `always` and superseding
+RETURNS-43. Breaking.
+
+#### Added
+
+- `#[plexus_macros::activation] impl Tickets` — a type not named
+  `…Activation`, nothing in the attribute — is a whole declaration: namespace
+  `tickets`, client `TicketsClient`. MACRO-13 refused it.
+- `#[plexus_macros::activation] impl forge::Forge for GitHub`: a trait
+  written by hand, served. The trait names the namespace (`forge`) and the
+  client (`ForgeClient<T>`, emitted beside the impl); the type names nothing.
+  Every `async fn` on `&self` is a wire method, any of RETURNS-8's forms,
+  called as `<GitHub as forge::Forge>::m`. The trait needs no object safety
+  to be served: rustc checks the concrete futures for `Send`. A method
+  reaches its caller through the call's context
+  (`plexus_core::call::caller()`). Under `auth = "required"` the dispatch
+  refuses an anonymous caller — or a call outside any context — before the
+  body of every method not `public`, out of band and typed
+  (`Unauthenticated`), exactly as a `#[from_auth]` parameter does.
+  `#[plexus_macros::from_auth(self.access.verify)]` on the method is
+  `#[from_auth]`'s form for a trait impl: the verifier runs on the signed-in
+  caller before the body, its error the call's typed refusal by the route a
+  `#[from_auth]` resolver's takes (MACRO-14), its value the body's through
+  `plexus_core::call::verified::<User>()`. It has no direct JSON-RPC methods
+  (only `{ns}.call`, where the context is). Refused, by name: `trait = "…"`
+  beside it, a bodiless method, `#[child]` (GRAFT-1's), and a method-level
+  `#[from_auth]` on an inherent impl.
+- A trait-impl activation can be a child: where its client is named
+  otherwise than its type (`impl Trait for Type`, `trait = "…"`), the type's
+  name is an alias of the client (`pub type TypeClient<T, L = Root> =
+  TraitClient<T, L>`), which a parent's `#[child]` names. The alias is a new
+  name in the impl's module: a type of the user's own there named
+  `{Type}Client` clashes with it (E0428). The macro cannot see the module
+  (only the impl's tokens), so it cannot detect the clash and skip the alias;
+  rename the user's type, or the activation's.
+
+#### Changed
+
+- **No trait unless named.** `impl FooActivation` emits no `trait Foo` any
+  more; `trait = "Foo"` emits it (implemented by the activation, as before),
+  and a bodiless contract is still its trait. A bare `trait` key is refused
+  ("a trait is emitted only when named"). What to do: add `trait = "Foo"`
+  where the trait is used.
+- **The client implements no trait.** Its methods answer
+  `Result<T, ClientError>` (one item) or the `{Ns}{Method}Stream` alias
+  (many), as their inherent methods did; nothing asks an item type for
+  `FromClientError`, so `-> u64`, `-> bool`, `-> Vec<T>` compile. A client
+  can no longer be a `dyn Foo` or served as a proxy with
+  `FooClient::new(t).server()`: write the implementation that calls it, and
+  says its failures as you want them (`tests/macro13_contract_tests.rs`,
+  `Proxy`).
+- `reach: Reach` is read with `current_reach()?` (plexus-core's, now
+  fallible): outside a call the method is refused, never handed everywhere.
+- The deprecation warning on an activation written before MACRO-13 (a type
+  not named `…Activation` that says its `namespace`) says to drop
+  `namespace`, or to name the type `…Activation` to keep it as an override —
+  not that the suffix is needed.
+
+#### Migration: what breaks, and what to do
+
+- **hyperforge's driver** (on 0.8 by path when it moves): `DriverClient` no
+  longer implements `Driver`, so `driver/tests/contract.rs` stops compiling
+  in four places — `through_the_client` (`Box<dyn Driver>` of a client),
+  `a_client_served_again_is_a_proxy_to_the_driver`
+  (`DriverClient::new(remote).server()`), `built_in_served_and_remote_are_one_type_to_hyperforge`
+  (`Arc<dyn Driver>` of a client) and the WebSocket test's
+  `Box<dyn Driver>`. The fix is a `RemoteDriver<T>(DriverClient<T>)` in
+  `hyperforge-driver` implementing `Driver` by calling the client and saying
+  a failure as `DriverEvent::error(…)` (the shape of
+  `tests/macro13_contract_tests.rs`'s `Proxy`), served with
+  `RemoteDriver(client).server()`; and `driver/src/lib.rs:11`'s table row
+  `DriverClient<T>: Driver` becomes `DriverClient<T>` (answers `Result`s)
+  plus `RemoteDriver<T>: Driver`. `trait Driver` itself stays: the
+  activation is bodiless, so the contract is its trait.
+- **An activation that used its emitted trait** (`impl FooActivation`, no
+  `trait = …`): add `trait = "Foo"`.
+- **The asymmetry left in place:** a type not named `…Activation` *with*
+  `namespace = "…"` still expands as before MACRO-13 (only `#[method]`s on
+  the wire, no client unless `client`, its warning), while the same type
+  *without* `namespace` is the new form. So `impl Tickets` cannot keep a
+  namespace other than `tickets` and take the new form; name it
+  `TicketsActivation` to keep `namespace` as an override. It goes when a
+  later release refuses the old form.
+
+#### Removed
+
+- plexus-client: `into_events`, `error_events`, `trait_one`,
+  `trait_one_with_input`, `trait_many`, `trait_progress`,
+  `trait_result_progress`, `owned_call`, `owned_call_raw`,
+  `owned_call_raw_with_input` — the client's half of the trait, nothing else
+  used them. `FromClientError` stays (other code implements it) and is
+  required by nothing; `BoxStream`, `BoxFuture`, `MaybeSend` stay.
+- The fixtures' `from_client_error!` blocks.
+
 ## [0.8.0]
 
 plexus-macros 0.8.0 and plexus-client 0.8.0, released with plexus-core 0.8.0:

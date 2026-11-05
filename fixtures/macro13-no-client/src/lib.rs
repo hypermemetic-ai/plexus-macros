@@ -1,6 +1,7 @@
 //! MACRO-13 fixture — no `plexus-client` in the manifest, so no client: the
-//! crate builds (a client would not resolve here), and the trait still
-//! stands, its streams futures' `BoxStream`.
+//! crate builds (a client would not resolve here), and a named trait still
+//! stands (RETURNS-47: `trait = "Echo"`, a trait only when named), its
+//! streams futures' `BoxStream`.
 
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ pub enum EchoEvent {
 pub struct EchoActivation;
 
 /// Echo things back.
-#[plexus_macros::activation]
+#[plexus_macros::activation(trait = "Echo")]
 impl EchoActivation {
     /// Say a thing back.
     pub async fn say(&self, text: String) -> impl Stream<Item = EchoEvent> + Send + 'static {

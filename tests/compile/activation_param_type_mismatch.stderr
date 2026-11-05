@@ -1,4 +1,4 @@
-warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_TestHub`: plexus-macros (MACRO-13): `TestHub` does not end in `Activation`, so no trait is emitted for it and its client is `TestHubClient`. Rename it `TestHubActivation` (or write `trait = "…"`); then `namespace`, `client`, `crate_path`, `server_cfg` and `#[method]` may all go. A later release refuses it.
+warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_TestHub`: plexus-macros (MACRO-13, RETURNS-47): `TestHub` says its `namespace`, so it expands as before MACRO-13 (only `#[method]`s on the wire, the client on the `client` flag). Remove `namespace` — `impl TestHub` is named by itself: namespace `test_hub`, client `TestHubClient` — or name the type `TestHubActivation` to keep `namespace` as an override; then `client`, `crate_path`, `server_cfg` and `#[method]` may go too. A later release refuses it.
   --> tests/compile/activation_param_type_mismatch.rs:17:6
    |
 17 | impl TestHub {

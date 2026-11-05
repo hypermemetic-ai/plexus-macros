@@ -635,13 +635,14 @@ const MAX_DESCRIPTION_WORDS: usize = 15;
 
 /// Parsed attributes for #[hub_methods]
 pub struct HubMethodsAttrs {
-    /// `namespace = "..."`. MACRO-13: optional — when absent, the stem of
-    /// `impl FooActivation` (or the trait's name) in snake_case.
+    /// `namespace = "..."`. MACRO-13: optional — when absent, the type's
+    /// name (`impl Foo`, the stem of `impl FooActivation`) or the trait's
+    /// name in snake_case.
     pub namespace: Option<String>,
     /// MACRO-13: `trait = "Bar"` — names the activation's trait (and its
     /// client, and absent `namespace` its namespace) whatever the type is
-    /// called. Without it the trait is named from the stem of
-    /// `impl FooActivation`; it is always emitted.
+    /// called. RETURNS-47: without it no trait is emitted (but for a
+    /// contract, which is its trait).
     pub trait_attr: Option<syn::LitStr>,
     /// Span of the `trait` key, for diagnostics.
     pub trait_span: Option<proc_macro2::Span>,
@@ -967,12 +968,12 @@ impl Parse for HubMethodsAttrs {
                             hub = true;
                             hub_span = Some(path.span());
                         } else if path.is_ident(TRAIT_KEY) {
-                            // MACRO-13 (`always`): the trait is emitted for
-                            // every activation; a bare `trait` asks nothing.
+                            // RETURNS-47: a trait only when named; a bare
+                            // `trait` names none.
                             return Err(syn::Error::new(
                                 path.span(),
-                                "the trait is always emitted, named from `impl FooActivation`'s \
-                                 stem; write `trait = \"Name\"` to name it otherwise",
+                                "a trait is emitted only when named: write `trait = \"Name\"` \
+                                 (or write the trait by hand and `impl Name for YourType`)",
                             ));
                         } else if path.is_ident("client") {
                             // MACRO-2: also emit the typed client.
@@ -1894,6 +1895,16 @@ pub struct MethodInfo {
     /// hands it `current_reach()` (the gate's answer); stripped from the
     /// RPC params like `auth`.
     pub takes_reach: bool,
+    /// RETURNS-47: on `impl Trait for Type`, the verifier written on the
+    /// method (`#[plexus_macros::from_auth(self.access.verify)]`): run on
+    /// the call's signed-in caller before the body, its error the call's
+    /// typed refusal, its value kept for `plexus_core::call::verified`.
+    pub verifier: Option<syn::Expr>,
+    /// RETURNS-47: on `impl Trait for Type`, the dispatch reads the caller
+    /// from the call's context and refuses one not signed in, before the
+    /// body, out of band (`auth = "required"` on a method not `public`, or
+    /// any method with a verifier).
+    pub caller_required: bool,
 }
 
 /// AUTH-3: the doc comment's text beyond `description`: the comment with a
@@ -2261,6 +2272,8 @@ impl MethodInfo {
             examples,
             values,
             takes_reach,
+            verifier: None,
+            caller_required: false,
         })
     }
 }

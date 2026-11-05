@@ -7,7 +7,7 @@ error[E0425]: cannot find type `SessionChildClient` in this scope
 27 | pub struct SessionChild {
    | ----------------------- similarly named struct `SessionChild` defined here
 
-warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_SessionChild`: plexus-macros (MACRO-13): `SessionChild` does not end in `Activation`, so no trait is emitted for it and its client is `SessionChildClient`. Rename it `SessionChildActivation` (or write `trait = "…"`); then `namespace`, `client`, `crate_path`, `server_cfg` and `#[method]` may all go. A later release refuses it.
+warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_SessionChild`: plexus-macros (MACRO-13, RETURNS-47): `SessionChild` says its `namespace`, so it expands as before MACRO-13 (only `#[method]`s on the wire, the client on the `client` flag). Remove `namespace` — `impl SessionChild` is named by itself: namespace `session_child`, client `SessionChildClient` — or name the type `SessionChildActivation` to keep `namespace` as an override; then `client`, `crate_path`, `server_cfg` and `#[method]` may go too. A later release refuses it.
   --> tests/compile/returns46_dynamic_child_without_client.rs:33:6
    |
 33 | impl SessionChild {

@@ -1,12 +1,11 @@
-//! RETURNS-36 (review #8, the owner's rule of 2026-10-16): the activation's
-//! trait is always emitted, each method in it declaring that method's own
-//! return type. `trait Conformance` is implemented by the activation and by
-//! its client, so anything served can be called through it — all six forms.
+//! RETURNS-36 (review #8): the activation's trait declares each method's own
+//! return type — all six forms. RETURNS-47: a trait only when named
+//! (`trait = "Conformance"` here), implemented by the activation; the client
+//! implements no trait (its six forms, as `Result`s, are `tests/client.rs`'s).
 
 use conformance::*;
 use futures::StreamExt;
 use plexus_client::{Note, Progress};
-use plexus_core::plexus::InProcessTransport;
 
 fn through(c: &dyn Conformance) -> &dyn Conformance {
     c
@@ -32,10 +31,4 @@ async fn all_six(c: &dyn Conformance) {
 #[tokio::test]
 async fn the_activation_is_its_trait() {
     all_six(through(&ConformanceActivation)).await;
-}
-
-#[tokio::test]
-async fn its_client_is_its_trait() {
-    let client = ConformanceClient::new(InProcessTransport::new(ConformanceActivation));
-    all_six(through(&client)).await;
 }

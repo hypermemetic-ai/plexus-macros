@@ -50,17 +50,27 @@ pub fn generate(
     roles: &[(String, Vec<String>)],
     // MACRO-31: under `typed_params` a key no parameter claims is refused.
     typed_params: bool,
+    // RETURNS-47: the trait of `impl Trait for Type`; its methods are called
+    // through it (`<Self as Trait>::m(self, …)`), whose path need not be in
+    // scope where the expansion lands.
+    trait_impl: Option<&syn::Path>,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
     let rpc_server_name = format_ident!("{}RpcServer", struct_name);
     let method_names: Vec<&str> = methods.iter().map(|m| m.method_name.as_str()).collect();
 
-    let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type, deps, typed_params);
+    let dispatch_arms = generate_dispatch_arms(methods, namespace, crate_path, request_type, deps, typed_params, trait_impl);
     let help_arms = generate_help_arms(methods);
-    let has_public_rpc_methods = methods.iter().any(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none());
+    // RETURNS-47: `impl Trait for Type` has no direct JSON-RPC methods —
+    // they carry no call context (a trait method reaches its caller only
+    // through it), and their server trait's methods, named as the trait's,
+    // would make a call by method syntax ambiguous beside it. Every call goes
+    // through the service's `{ns}.call`.
+    let has_public_rpc_methods = trait_impl.is_none()
+        && methods.iter().any(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none());
     let rpc_trait_methods = generate_rpc_trait_methods(methods, deps);
-    let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path, deps);
+    let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path, deps, trait_impl);
 
     // Conditionally generate resolve_handle method
     let resolve_handle_impl = if resolve_handle {
@@ -970,8 +980,15 @@ fn generate_rpc_impl_methods(
     namespace: &str,
     crate_path: &syn::Path,
     deps: &syn::Ident,
+    trait_impl: Option<&syn::Path>,
 ) -> Vec<TokenStream> {
     use crate::parse::BidirType;
+    // RETURNS-47: an inherent method by the type's path, a trait's through
+    // the trait.
+    let recv = match trait_impl {
+        None => quote! { #struct_name },
+        Some(t) => quote! { <Self as #t> },
+    };
 
     methods
         .iter()
@@ -995,7 +1012,7 @@ fn generate_rpc_impl_methods(
             // Generate bidirectional channel setup and method call based on bidir type
             let (bidir_setup, method_call) = match &m.bidirectional {
                 BidirType::None => {
-                    (quote! {}, quote! { #struct_name::#method_name(self, #(#param_names),*).await })
+                    (quote! {}, quote! { #recv::#method_name(self, #(#param_names),*).await })
                 }
                 BidirType::Standard => {
                     (
@@ -1011,7 +1028,7 @@ fn generate_rpc_impl_methods(
                                 #crate_path::plexus::PlexusContext::hash(),
                             ));
                         },
-                        quote! { #struct_name::#method_name(self, &ctx, #(#param_names),*).await }
+                        quote! { #recv::#method_name(self, &ctx, #(#param_names),*).await }
                     )
                 }
                 BidirType::Custom { request, response } => {
@@ -1030,7 +1047,7 @@ fn generate_rpc_impl_methods(
                                 #crate_path::plexus::PlexusContext::hash(),
                             ));
                         },
-                        quote! { #struct_name::#method_name(self, &ctx, #(#param_names),*).await }
+                        quote! { #recv::#method_name(self, &ctx, #(#param_names),*).await }
                     )
                 }
             };
@@ -1080,8 +1097,15 @@ fn generate_dispatch_arms(
     request_type: Option<&syn::Type>,
     deps: &syn::Ident,
     typed_params: bool,
+    trait_impl: Option<&syn::Path>,
 ) -> Vec<TokenStream> {
     use crate::parse::BidirType;
+    // RETURNS-47: how the dispatch calls a method — by method syntax on an
+    // inherent impl, through the trait on `impl Trait for Type`.
+    let invoke = |fn_name: &syn::Ident, args: TokenStream| match trait_impl {
+        None => quote! { self.#fn_name(#args) },
+        Some(t) => quote! { <Self as #t>::#fn_name(self, #args) },
+    };
 
     methods
         .iter()
@@ -1155,40 +1179,32 @@ fn generate_dispatch_arms(
             // found one autoref step before the blanket `Display` impl on
             // `&__PlexusResolverErr<E>`, so no existing resolver changes.
             let resolver_bindings: Vec<proc_macro2::TokenStream> = m.auth_resolvers.iter().map(|r| {
-                let name = &r.param_name;
-                let expr = &r.resolver_expr;
-                quote! {
-                    let #name = match #expr(&auth_ctx).await {
-                        ::std::result::Result::Ok(v) => v,
-                        ::std::result::Result::Err(e) => {
-                            #[allow(dead_code)]
-                            struct __PlexusResolverErr<E>(::std::cell::Cell<::std::option::Option<E>>);
-                            #[allow(dead_code)]
-                            trait __PlexusResolverTyped {
-                                fn __plexus_error(&self) -> #crate_path::plexus::PlexusError;
-                            }
-                            impl __PlexusResolverTyped for __PlexusResolverErr<#crate_path::plexus::PlexusError> {
-                                fn __plexus_error(&self) -> #crate_path::plexus::PlexusError {
-                                    self.0.take().expect("resolver error taken once")
-                                }
-                            }
-                            #[allow(dead_code)]
-                            trait __PlexusResolverDisplay {
-                                fn __plexus_error(&self) -> #crate_path::plexus::PlexusError;
-                            }
-                            impl<E: ::std::fmt::Display> __PlexusResolverDisplay for &__PlexusResolverErr<E> {
-                                fn __plexus_error(&self) -> #crate_path::plexus::PlexusError {
-                                    #crate_path::plexus::PlexusError::ExecutionError(
-                                        self.0.take().expect("resolver error taken once").to_string(),
-                                    )
-                                }
-                            }
-                            let __err = __PlexusResolverErr(::std::cell::Cell::new(::std::option::Option::Some(e)));
-                            return ::std::result::Result::Err((&__err).__plexus_error());
-                        }
-                    };
-                }
+                resolve_typed(&r.param_name, &r.resolver_expr, crate_path)
             }).collect();
+
+            // RETURNS-47: a trait-impl method that needs its caller reads it
+            // from the call's context — outside one, or anonymous, refused
+            // here, before the body, typed, as `auth.ok_or(Unauthenticated)`
+            // refuses for `#[from_auth]` — and runs its verifier as a
+            // `#[from_auth]` resolver runs (the same typed error route),
+            // keeping the value for `plexus_core::call::verified`.
+            let caller_gate = if m.caller_required {
+                let verify = m.verifier.as_ref().map(|expr| {
+                    let name = format_ident!("__plexus_verified");
+                    let bind = resolve_typed(&name, expr, crate_path);
+                    quote! {
+                        #bind
+                        #crate_path::call::__keep_verified(#name)?;
+                    }
+                });
+                quote! {
+                    let __plexus_caller = #crate_path::call::caller()?;
+                    let auth_ctx = __plexus_caller.signed_in()?;
+                    #verify
+                }
+            } else {
+                quote! {}
+            };
 
             // Determine whether to skip activation-level request extraction.
             // `request = ()` on a method means: bypass extraction even if the activation
@@ -1246,10 +1262,12 @@ fn generate_dispatch_arms(
             };
 
             // AUTH-2: `reach: Reach` — the gate's answer for this call, read
-            // from the dispatch's task-local scope (everywhere when no gate
-            // decided it). Passed first, or right after `auth`.
+            // from the call's context (RETURNS-47: everywhere only when the
+            // dispatch said so, a service with no gate; outside a call the
+            // method is refused, never handed everything). Passed first, or
+            // right after `auth`.
             let reach_binding = if m.takes_reach {
-                quote! { let __plexus_reach = #crate_path::plexus::current_reach(); }
+                quote! { let __plexus_reach = #crate_path::plexus::current_reach()?; }
             } else {
                 quote! {}
             };
@@ -1274,6 +1292,8 @@ fn generate_dispatch_arms(
                 quote! { #reach_arg #(#param_names),* }
             };
 
+            let call = invoke(fn_name, method_params.clone());
+
             // RETURNS-8: the wrapper that matches the method's signature
             // form turns its return value into frames.
             let wrapped = wrap_return(m, quote! { __ret }, &content_type, namespace, crate_path);
@@ -1286,11 +1306,12 @@ fn generate_dispatch_arms(
                             #auth_injection
                             #activation_extraction
                             #(#activation_param_bindings)*
+                            #caller_gate
                             #(#resolver_bindings)*
                             #param_extraction
                             #reach_binding
                             #input_open
-                            let __ret = self.#fn_name(#method_params).await;
+                            let __ret = #call.await;
                             Ok(#wrapped)
                         }
                     }
@@ -1302,6 +1323,7 @@ fn generate_dispatch_arms(
                     } else {
                         quote! { &ctx, #reach_arg #(#param_names),* }
                     };
+                    let call_bidir = invoke(fn_name, bidir_params.clone());
 
                     // StandardBidirChannel - use wrap_stream_with_bidir
                     quote! {
@@ -1309,6 +1331,7 @@ fn generate_dispatch_arms(
                             #auth_injection
                             #activation_extraction
                             #(#activation_param_bindings)*
+                            #caller_gate
                             #(#resolver_bindings)*
                             #param_extraction
                             #reach_binding
@@ -1320,7 +1343,7 @@ fn generate_dispatch_arms(
                             >(#content_type, vec![#namespace.into()]);
 
                             // Call the method with the bidir channel
-                            let __ret = self.#fn_name(#bidir_params).await;
+                            let __ret = #call_bidir.await;
 
                             // Wrap the method's output and merge with bidir requests
                             let wrapped_user = #wrapped;
@@ -1335,6 +1358,7 @@ fn generate_dispatch_arms(
                     } else {
                         quote! { &ctx, #reach_arg #(#param_names),* }
                     };
+                    let call_bidir = invoke(fn_name, bidir_params.clone());
 
                     // Custom BidirChannel - use wrap_stream_with_bidir with custom types
                     let req_ty: syn::Type = syn::parse_str(request).unwrap_or_else(|_| syn::parse_quote!(()));
@@ -1344,6 +1368,7 @@ fn generate_dispatch_arms(
                             #auth_injection
                             #activation_extraction
                             #(#activation_param_bindings)*
+                            #caller_gate
                             #(#resolver_bindings)*
                             #param_extraction
                             #reach_binding
@@ -1355,7 +1380,7 @@ fn generate_dispatch_arms(
                             >(#content_type, vec![#namespace.into()]);
 
                             // Call the method with the bidir channel
-                            let __ret = self.#fn_name(#bidir_params).await;
+                            let __ret = #call_bidir.await;
 
                             // Wrap the method's output and merge with bidir requests
                             let wrapped_user = #wrapped;
@@ -1612,4 +1637,43 @@ fn generate_help_arms(methods: &[MethodInfo]) -> Vec<TokenStream> {
             quote! { #name => Some(#desc.to_string()), }
         })
         .collect()
+}
+
+/// MACRO-14: bind `name` to what the resolver `expr` answers for
+/// `&auth_ctx`, its error converted, not stringified: a `PlexusError` (a
+/// typed `Forbidden` / `Unauthenticated`) passes through unchanged, any other
+/// `Display` error is `ExecutionError(e.to_string())`. RETURNS-47: the route a
+/// trait-impl method's verifier takes too.
+fn resolve_typed(name: &syn::Ident, expr: &syn::Expr, crate_path: &syn::Path) -> TokenStream {
+    quote! {
+        let #name = match #expr(&auth_ctx).await {
+            ::std::result::Result::Ok(v) => v,
+            ::std::result::Result::Err(e) => {
+                #[allow(dead_code)]
+                struct __PlexusResolverErr<E>(::std::cell::Cell<::std::option::Option<E>>);
+                #[allow(dead_code)]
+                trait __PlexusResolverTyped {
+                    fn __plexus_error(&self) -> #crate_path::plexus::PlexusError;
+                }
+                impl __PlexusResolverTyped for __PlexusResolverErr<#crate_path::plexus::PlexusError> {
+                    fn __plexus_error(&self) -> #crate_path::plexus::PlexusError {
+                        self.0.take().expect("resolver error taken once")
+                    }
+                }
+                #[allow(dead_code)]
+                trait __PlexusResolverDisplay {
+                    fn __plexus_error(&self) -> #crate_path::plexus::PlexusError;
+                }
+                impl<E: ::std::fmt::Display> __PlexusResolverDisplay for &__PlexusResolverErr<E> {
+                    fn __plexus_error(&self) -> #crate_path::plexus::PlexusError {
+                        #crate_path::plexus::PlexusError::ExecutionError(
+                            self.0.take().expect("resolver error taken once").to_string(),
+                        )
+                    }
+                }
+                let __err = __PlexusResolverErr(::std::cell::Cell::new(::std::option::Option::Some(e)));
+                return ::std::result::Result::Err((&__err).__plexus_error());
+            }
+        };
+    }
 }

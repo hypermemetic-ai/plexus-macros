@@ -1,4 +1,4 @@
-error: the trait is always emitted, named from `impl FooActivation`'s stem; write `trait = "Name"` to name it otherwise
+error: a trait is emitted only when named: write `trait = "Name"` (or write the trait by hand and `impl Name for YourType`)
  --> tests/compile/macro13_bare_trait_key.rs:9:29
   |
 9 | #[plexus_macros::activation(trait)]

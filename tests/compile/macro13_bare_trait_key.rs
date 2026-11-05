@@ -1,5 +1,5 @@
-//! MACRO-13 (`always`): the trait is always emitted, so a bare `trait` asks
-//! for nothing; `trait = "Name"` names it.
+//! RETURNS-47: a trait only when named — a bare `trait` names none;
+//! `trait = "Name"` does.
 
 use futures::Stream;
 

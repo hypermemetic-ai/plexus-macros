@@ -20,27 +20,17 @@ pub enum IngestEvent {
     Ingested { count: u32 },
 }
 
-impl plexus_client::FromClientError for IngestEvent {
-    fn from_client_error(error: plexus_client::ClientError) -> Self {
-        panic!("{error}")
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum CountError {
     Client(String),
 }
 
-impl plexus_client::FromClientError for CountError {
-    fn from_client_error(error: plexus_client::ClientError) -> Self {
-        CountError::Client(error.to_string())
-    }
-}
-
 #[derive(Clone)]
 pub struct IngestActivation;
 
-#[plexus_macros::activation(namespace = "ingest", crate_path = "plexus_core")]
+// RETURNS-47: a trait only when named — named, so the trait still takes the
+// input as a boxed stream of its items.
+#[plexus_macros::activation(namespace = "ingest", crate_path = "plexus_core", trait = "Ingest")]
 impl IngestActivation {
     /// Take a run's tokens
     #[plexus_macros::method(input_window = 256, input_max_items = 1000)]
