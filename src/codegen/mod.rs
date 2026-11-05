@@ -273,6 +273,28 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 continue;
             }
 
+            // RETURNS-47: `#[plexus_macros::from_auth(expr)]` on a method of
+            // `impl Trait for Type` — the trait's form of a `#[from_auth]`
+            // parameter, which a trait's signature cannot carry.
+            let verifier_idx = method.attrs.iter().position(|a| {
+                a.path().segments.last().is_some_and(|s| s.ident == "from_auth")
+            });
+            let verifier: Option<syn::Expr> = match verifier_idx {
+                None => None,
+                Some(idx) => {
+                    let attr = method.attrs.remove(idx);
+                    if trait_impl.is_none() {
+                        return Err(syn::Error::new_spanned(
+                            &attr,
+                            "#[from_auth(…)] on a method is the form for `impl Trait for Type`, whose \
+                             signatures cannot carry it; on an inherent method, put it on the parameter \
+                             (`#[from_auth(self.access.verify)] user: User`)",
+                        ));
+                    }
+                    Some(attr.parse_args::<syn::Expr>()?)
+                }
+            };
+
             // Accept both the canonical #[method] / #[plexus_macros::method] and
             // the deprecated #[hub_method] / #[plexus_macros::hub_method] spellings.
             let hub_method_idx = method.attrs.iter().position(|attr| {
@@ -303,7 +325,16 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 // MACRO-13: unmarked, and on the wire by its shape.
                 methods.push(MethodInfo::from_fn(method, None)?);
             } else {
+                if let Some(v) = &verifier {
+                    return Err(syn::Error::new_spanned(
+                        v,
+                        "#[from_auth(…)] on a method that is not on the wire: only a wire method has a caller to verify",
+                    ));
+                }
                 continue;
+            }
+            if let Some(m) = methods.last_mut() {
+                m.verifier = verifier;
             }
 
             {
@@ -720,6 +751,17 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     // emitted into the generated MethodSchema entries (see
     // `method_enum::generate`).
     let effective_auth_posture = args.auth_posture.unwrap_or_default();
+    // RETURNS-47: on `impl Trait for Type` the dispatch reads the caller
+    // from the call's context and refuses one not signed in before the body,
+    // out of band, typed — what a `#[from_auth]` parameter does on an
+    // inherent method — for `auth = "required"` on every method not
+    // `public`, and for every method with a verifier.
+    if trait_impl.is_some() {
+        let required = matches!(effective_auth_posture, crate::parse::AuthPosture::Required);
+        for m in methods.iter_mut() {
+            m.caller_required = m.verifier.is_some() || (required && !m.public);
+        }
+    }
     let mut required_posture_optional_auth_methods: Vec<&crate::parse::MethodInfo> = Vec::new();
     match effective_auth_posture {
         crate::parse::AuthPosture::Required => {

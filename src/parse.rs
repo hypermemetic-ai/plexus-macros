@@ -1895,6 +1895,16 @@ pub struct MethodInfo {
     /// hands it `current_reach()` (the gate's answer); stripped from the
     /// RPC params like `auth`.
     pub takes_reach: bool,
+    /// RETURNS-47: on `impl Trait for Type`, the verifier written on the
+    /// method (`#[plexus_macros::from_auth(self.access.verify)]`): run on
+    /// the call's signed-in caller before the body, its error the call's
+    /// typed refusal, its value kept for `plexus_core::call::verified`.
+    pub verifier: Option<syn::Expr>,
+    /// RETURNS-47: on `impl Trait for Type`, the dispatch reads the caller
+    /// from the call's context and refuses one not signed in, before the
+    /// body, out of band (`auth = "required"` on a method not `public`, or
+    /// any method with a verifier).
+    pub caller_required: bool,
 }
 
 /// AUTH-3: the doc comment's text beyond `description`: the comment with a
@@ -2262,6 +2272,8 @@ impl MethodInfo {
             examples,
             values,
             takes_reach,
+            verifier: None,
+            caller_required: false,
         })
     }
 }

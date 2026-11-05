@@ -604,9 +604,16 @@ fn generate_schema_fn(
 ///   here), the type names nothing, and every `async fn` on `&self` is a
 ///   wire method, called as `<GitHub as forge::Forge>::m`. Its methods reach
 ///   their caller through the call's context, `plexus_core::call::caller()`
-///   (a trait's signature cannot carry `#[from_auth]`); it has no direct
-///   JSON-RPC methods, only the service's `{ns}.call`; `#[child]` in it is
-///   not served yet (GRAFT-1).
+///   (a trait's signature cannot carry `#[from_auth]`). Under `auth =
+///   "required"` the dispatch refuses an anonymous caller (or a call outside
+///   any context) before the body of every method not `public`, out of band
+///   and typed, as `#[from_auth]` does. `#[plexus_macros::from_auth(self.
+///   access.verify)]` on the method is `#[from_auth]`'s form here: the
+///   verifier runs on the signed-in caller before the body, its error the
+///   call's typed refusal by the same route, its value the body's through
+///   `plexus_core::call::verified::<User>()`. It has no direct JSON-RPC
+///   methods, only the service's `{ns}.call`; `#[child]` in it is not served
+///   yet (GRAFT-1).
 /// - **Every public method a wire method.** Every `pub async fn` on `&self`
 ///   returning `impl Stream<Item = E>` is on the wire with no `#[method]`
 ///   (which stays for its overrides, and marks a one-item method); one

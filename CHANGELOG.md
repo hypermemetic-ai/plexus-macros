@@ -95,10 +95,18 @@ RETURNS-43. Breaking.
   called as `<GitHub as forge::Forge>::m`. The trait needs no object safety
   to be served: rustc checks the concrete futures for `Send`. A method
   reaches its caller through the call's context
-  (`plexus_core::call::caller()`), so `auth = "required"` asks no
-  `#[from_auth]` of it. It has no direct JSON-RPC methods (only `{ns}.call`,
-  where the context is). Refused, by name: `trait = "…"` beside it, a
-  bodiless method, `#[child]` (GRAFT-1's).
+  (`plexus_core::call::caller()`). Under `auth = "required"` the dispatch
+  refuses an anonymous caller — or a call outside any context — before the
+  body of every method not `public`, out of band and typed
+  (`Unauthenticated`), exactly as a `#[from_auth]` parameter does.
+  `#[plexus_macros::from_auth(self.access.verify)]` on the method is
+  `#[from_auth]`'s form for a trait impl: the verifier runs on the signed-in
+  caller before the body, its error the call's typed refusal by the route a
+  `#[from_auth]` resolver's takes (MACRO-14), its value the body's through
+  `plexus_core::call::verified::<User>()`. It has no direct JSON-RPC methods
+  (only `{ns}.call`, where the context is). Refused, by name: `trait = "…"`
+  beside it, a bodiless method, `#[child]` (GRAFT-1's), and a method-level
+  `#[from_auth]` on an inherent impl.
 
 #### Changed
 
@@ -121,6 +129,32 @@ RETURNS-43. Breaking.
   not named `…Activation` that says its `namespace`) says to drop
   `namespace`, or to name the type `…Activation` to keep it as an override —
   not that the suffix is needed.
+
+#### Migration: what breaks, and what to do
+
+- **hyperforge's driver** (on 0.8 by path when it moves): `DriverClient` no
+  longer implements `Driver`, so `driver/tests/contract.rs` stops compiling
+  in four places — `through_the_client` (`Box<dyn Driver>` of a client),
+  `a_client_served_again_is_a_proxy_to_the_driver`
+  (`DriverClient::new(remote).server()`), `built_in_served_and_remote_are_one_type_to_hyperforge`
+  (`Arc<dyn Driver>` of a client) and the WebSocket test's
+  `Box<dyn Driver>`. The fix is a `RemoteDriver<T>(DriverClient<T>)` in
+  `hyperforge-driver` implementing `Driver` by calling the client and saying
+  a failure as `DriverEvent::error(…)` (the shape of
+  `tests/macro13_contract_tests.rs`'s `Proxy`), served with
+  `RemoteDriver(client).server()`; and `driver/src/lib.rs:11`'s table row
+  `DriverClient<T>: Driver` becomes `DriverClient<T>` (answers `Result`s)
+  plus `RemoteDriver<T>: Driver`. `trait Driver` itself stays: the
+  activation is bodiless, so the contract is its trait.
+- **An activation that used its emitted trait** (`impl FooActivation`, no
+  `trait = …`): add `trait = "Foo"`.
+- **The asymmetry left in place:** a type not named `…Activation` *with*
+  `namespace = "…"` still expands as before MACRO-13 (only `#[method]`s on
+  the wire, no client unless `client`, its warning), while the same type
+  *without* `namespace` is the new form. So `impl Tickets` cannot keep a
+  namespace other than `tickets` and take the new form; name it
+  `TicketsActivation` to keep `namespace` as an override. It goes when a
+  later release refuses the old form.
 
 #### Removed
 

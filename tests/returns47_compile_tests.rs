@@ -24,4 +24,6 @@ fn returns47_compile_fail() {
     t.compile_fail("tests/compile/returns47_trait_key_on_trait_impl.rs");
     // A bodiless `impl Driver` with no trait named.
     t.compile_fail("tests/compile/returns47_bare_contract_unnamed.rs");
+    // `#[from_auth(…)]` on an inherent method (the parameter's place).
+    t.compile_fail("tests/compile/returns47_method_from_auth_on_inherent.rs");
 }

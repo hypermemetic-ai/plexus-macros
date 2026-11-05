@@ -4,10 +4,10 @@
 //! declared: the macro emits `ContractActivation<D: Contract>`, delegating to
 //! `D`, `impl<D: Contract> Contract for ContractActivation<D>`, and
 //! `Contract::server(self)`. So an implementation is served with
-//! `hub.register(Impl::new().server())`. RETURNS-47: the client implements
+//! `service.register(Impl::new().server())`. RETURNS-47: the client implements
 //! no trait, so a remote one is served here as a proxy by an implementation
 //! that calls the client and says its failures in band, written by hand
-//! (`Proxy`): `hub.register(Proxy(ContractClient::new(t)).server())`.
+//! (`Proxy`): `service.register(Proxy(ContractClient::new(t)).server())`.
 
 use async_stream::stream;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -58,8 +58,8 @@ impl Contract for Impl {
     }
 }
 
-async fn data(hub: &DynamicHub, method: &str, params: Value) -> Vec<Value> {
-    let stream = hub.route(method, params, None).await.expect("routed");
+async fn data(service: &DynamicHub, method: &str, params: Value) -> Vec<Value> {
+    let stream = service.route(method, params, None).await.expect("routed");
     stream
         .filter_map(|item| async move {
             match item {
@@ -72,13 +72,13 @@ async fn data(hub: &DynamicHub, method: &str, params: Value) -> Vec<Value> {
         .await
 }
 
-async fn answers_both(hub: &DynamicHub) {
+async fn answers_both(service: &DynamicHub) {
     assert_eq!(
-        data(hub, "contract.ping", json!({"text": "hi"})).await,
+        data(service, "contract.ping", json!({"text": "hi"})).await,
         vec![json!({"type": "pong", "text": "local:hi"})]
     );
     assert_eq!(
-        data(hub, "contract.add", json!({"a": 2, "b": 40})).await,
+        data(service, "contract.add", json!({"a": 2, "b": 40})).await,
         vec![json!({"type": "sum", "value": 42})]
     );
 }
@@ -89,8 +89,8 @@ async fn an_implementation_is_served_with_server() {
     assert_eq!(activation.namespace(), "contract");
     assert_eq!(activation.methods(), vec!["ping", "add", "schema"]);
     assert_eq!(activation.description(), "A contract: ping and add.");
-    let hub = DynamicHub::new("toy").register(activation);
-    answers_both(&hub).await;
+    let service = DynamicHub::new("toy").register(activation);
+    answers_both(&service).await;
 }
 
 /// A remote implementation, through its client: what the client's own
@@ -131,8 +131,8 @@ impl<T: plexus_client::Transport + Clone + Send + Sync + 'static> Contract for P
 async fn a_client_is_served_as_a_proxy_with_server() {
     let remote = InProcessTransport::new(Impl::new().server());
     let proxy = Proxy(ContractClient::new(remote)).server();
-    let hub = DynamicHub::new("toy").register(proxy);
-    answers_both(&hub).await;
+    let service = DynamicHub::new("toy").register(proxy);
+    answers_both(&service).await;
 }
 
 #[tokio::test]

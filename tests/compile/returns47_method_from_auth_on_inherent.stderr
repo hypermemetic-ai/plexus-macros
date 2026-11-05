@@ -1,0 +1,5 @@
+error: #[from_auth(…)] on a method is the form for `impl Trait for Type`, whose signatures cannot carry it; on an inherent method, put it on the parameter (`#[from_auth(self.access.verify)] user: User`)
+  --> tests/compile/returns47_method_from_auth_on_inherent.rs:17:5
+   |
+17 |     #[plexus_macros::from_auth(self.verify)]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
