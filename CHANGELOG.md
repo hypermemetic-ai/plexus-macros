@@ -5,7 +5,13 @@ This file starts at 0.7.0; earlier changes are in the git history.
 
 ## [Unreleased]
 
-RETURNS-46, after 0.8.0: breaking, so the next release is 0.9.0.
+## [0.9.0] — 2026-11-06
+
+plexus-macros and plexus-client 0.9.0 (PLEXUS-46), released in lockstep with
+plexus-core 0.9.0: the macro emits paths into core without depending on it,
+so they share a minor. Breaking (RETURNS-46, RETURNS-47 below), hence 0.9.0,
+not 0.8.x. Everything in 0.8.1 (PLEXUS-44: every expansion's names resolve
+through the plexus-rpc umbrella) is here too.
 
 ### Added
 
