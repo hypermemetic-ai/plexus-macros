@@ -327,12 +327,22 @@ pub fn generate(
         quote! { #deps::jsonrpsee::core::server::Methods::new() }
     };
 
+    // PLEXUS-44: the server trait jsonrpsee's `#[rpc(server)]` would write,
+    // written here. jsonrpsee's attribute looks itself up in the consumer's
+    // Cargo.toml and fails when `jsonrpsee` is not listed there, which kept it
+    // in every app's manifest; written by this macro it is named through the
+    // shim like every other dependency, and the umbrella is enough.
+    let rpc_server_trait = generate_rpc_server_trait(
+        &rpc_trait_name,
+        &rpc_server_name,
+        &rpc_trait_methods,
+        methods,
+        namespace,
+        deps,
+    );
     let rpc_block = if has_public_rpc_methods {
         quote! {
-            #[#deps::jsonrpsee::proc_macros::rpc(server, namespace = #namespace)]
-            pub trait #rpc_trait_name {
-                #(#rpc_trait_methods)*
-            }
+            #rpc_server_trait
 
             #[#deps::async_trait::async_trait]
             impl #impl_generics #rpc_server_name for #self_ty #where_clause {
@@ -932,17 +942,23 @@ pub fn generate(
     }
 }
 
-fn generate_rpc_trait_methods(methods: &[MethodInfo], deps: &syn::Ident) -> Vec<TokenStream> {
+/// The methods the jsonrpsee server trait carries: those `Activation::call`
+/// need not handle itself.
+fn rpc_methods(methods: &[MethodInfo]) -> impl Iterator<Item = &MethodInfo> {
     methods
         .iter()
         // Auth-requiring methods and methods with activation_params are dispatched through
         // Activation::call() which handles auth injection and request extraction.
         // The jsonrpsee RPC trait cannot carry auth context or raw_ctx.
         .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none())
+}
+
+/// The server trait's method signatures, as jsonrpsee's `#[rpc(server)]`
+/// wrote them from a `#[subscription]`: the sink second.
+fn generate_rpc_trait_methods(methods: &[MethodInfo], deps: &syn::Ident) -> Vec<TokenStream> {
+    rpc_methods(methods)
         .map(|m| {
             let method_name = &m.fn_name;
-            let method_name_str = &m.method_name;
-            let unsubscribe_name = format!("unsubscribe_{}", method_name_str);
             let doc = &m.description;
 
             let params: Vec<TokenStream> = m
@@ -957,11 +973,170 @@ fn generate_rpc_trait_methods(methods: &[MethodInfo], deps: &syn::Ident) -> Vec<
 
             quote! {
                 #[doc = #doc]
-                #[subscription(name = #method_name_str, unsubscribe = #unsubscribe_name, item = #deps::serde_json::Value)]
-                async fn #method_name(&self, #(#params),*) -> #deps::jsonrpsee::core::SubscriptionResult;
+                async fn #method_name(
+                    &self,
+                    subscription_sink: #deps::jsonrpsee::PendingSubscriptionSink,
+                    #(#params),*
+                ) -> #deps::jsonrpsee::core::SubscriptionResult;
             }
         })
         .collect()
+}
+
+/// PLEXUS-44: `{Struct}RpcServer`, token for token what jsonrpsee 0.26's
+/// `#[rpc(server, namespace = "ns")]` rendered for a trait of async
+/// `#[subscription(name = "m", unsubscribe = "unsubscribe_m")]` methods
+/// (`render_server.rs`): the same trait, the same `into_rpc`, the same names
+/// registered (`ns_m`, notifications as `ns_m`, `ns_unsubscribe_m`) and the
+/// same parameter decoding — a JSON object by name (each name also accepted
+/// in snake_case and lowerCamelCase), anything else by position, an
+/// `Option` parameter optional; a parameter that fails to decode rejects the
+/// subscription with jsonrpsee's own error. Only the spelling of the
+/// dependency paths differs: through the shim, so no consumer lists
+/// `jsonrpsee`.
+fn generate_rpc_server_trait(
+    rpc_trait_name: &syn::Ident,
+    rpc_server_name: &syn::Ident,
+    trait_methods: &[TokenStream],
+    methods: &[MethodInfo],
+    namespace: &str,
+    deps: &syn::Ident,
+) -> TokenStream {
+    // A derive's `crate = "..."` resolves module-relatively and cannot see
+    // the shim when the activation is declared in a fn body (see
+    // method_enum.rs), so the decoding struct's serde is named absolutely:
+    // through the umbrella, or through jsonrpsee as jsonrpsee's macro did.
+    let (serde_path, serde_crate) = match crate::codegen::umbrella_crate(proc_macro2::Span::call_site()) {
+        Some(u) => (quote! { ::#u::__deps::serde }, format!("::{}::__deps::serde", u)),
+        None => (
+            quote! { ::jsonrpsee::core::__reexports::serde },
+            "::jsonrpsee::core::__reexports::serde".to_string(),
+        ),
+    };
+    let reexports = quote! { #deps::jsonrpsee::core::__reexports };
+
+    let registrations: Vec<TokenStream> = rpc_methods(methods)
+        .map(|m| {
+            let rust_method_name = &m.fn_name;
+            let sub_name = format!("{}_{}", namespace, m.method_name);
+            let unsub_name = format!("{}_unsubscribe_{}", namespace, m.method_name);
+
+            let error_ret = quote! {
+                #reexports::tokio::spawn(pending.reject(e));
+                return #deps::jsonrpsee::SubscriptionCloseResponse::None;
+            };
+
+            let (params_ident, parsing, params_seq) = if m.params.is_empty() {
+                (quote! { _ }, quote! {}, quote! {})
+            } else {
+                let pats: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
+                let fields = quote! { #(#pats),* };
+
+                let decode_fields = m.params.iter().map(|p| {
+                    let pat = &p.name;
+                    let ty = &p.ty;
+                    let is_option = is_option(ty);
+                    let next = if is_option { quote!(optional_next) } else { quote!(next) };
+                    quote! {
+                        let #pat: #ty = match seq.#next() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                #reexports::log_fail_parse(stringify!(#pat), stringify!(#ty), &e, #is_option);
+                                #error_ret
+                            }
+                        };
+                    }
+                });
+
+                let generics: Vec<syn::Ident> = (0..m.params.len()).map(|n| format_ident!("G{}", n)).collect();
+                let object_fields = m.params.iter().zip(generics.iter()).map(|(p, g)| {
+                    let pat = &p.name;
+                    let name = p.name.to_string();
+                    let snake = heck::ToSnakeCase::to_snake_case(name.as_str());
+                    let camel = heck::ToLowerCamelCase::to_lower_camel_case(name.as_str());
+                    quote! {
+                        #[serde(alias = #snake, alias = #camel)]
+                        #[serde(rename = #name)]
+                        #pat: #g,
+                    }
+                });
+                let destruct = pats.iter().map(|p| quote! { parsed.#p });
+                let types = m.params.iter().map(|p| &p.ty);
+
+                let parsing = quote! {
+                    let (#fields) = if params.is_object() {
+                        #[derive(#serde_path::Deserialize)]
+                        #[serde(crate = #serde_crate)]
+                        struct ParamsObject<#(#generics,)*> {
+                            #(#object_fields)*
+                        }
+
+                        let parsed: ParamsObject<#(#types,)*> = match params.parse() {
+                            Ok(p) => p,
+                            Err(e) => {
+                                #reexports::log_fail_parse_as_object(&e);
+                                #error_ret
+                            }
+                        };
+
+                        (#(#destruct),*)
+                    } else {
+                        let mut seq = params.sequence();
+                        #(#decode_fields)*
+                        (#fields)
+                    };
+                };
+                (quote! { params }, parsing, quote! { #fields })
+            };
+
+            quote! {{
+                let _res = rpc.register_subscription(
+                    #sub_name,
+                    #sub_name,
+                    #unsub_name,
+                    |#params_ident, pending, context, _| async move {
+                        #parsing
+                        #deps::jsonrpsee::IntoSubscriptionCloseResponse::into_response(
+                            context.as_ref().#rust_method_name(pending, #params_seq).await,
+                        )
+                    },
+                );
+                #[cfg(debug_assertions)]
+                if _res.is_err() {
+                    #reexports::panic_fail_register();
+                }
+            }}
+        })
+        .collect();
+
+    let doc = format!("Server trait implementation for the `{}` RPC API.", rpc_trait_name);
+    quote! {
+        #[#deps::async_trait::async_trait]
+        #[doc = #doc]
+        pub trait #rpc_server_name: Sized + Send + Sync + 'static {
+            #(#trait_methods)*
+
+            #[doc = "Collects all the methods and subscriptions defined in the trait and adds them into a single `RpcModule`."]
+            fn into_rpc(self) -> #deps::jsonrpsee::RpcModule<Self> {
+                let mut rpc = #deps::jsonrpsee::RpcModule::new(self);
+                #(#registrations)*
+                rpc
+            }
+        }
+    }
+}
+
+/// `Option<..>` as jsonrpsee's macro recognised it: a last segment `Option`.
+fn is_option(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(path) = ty {
+        let mut it = path.path.segments.iter().peekable();
+        while let Some(seg) = it.next() {
+            if seg.ident == "Option" && it.peek().is_none() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn generate_rpc_impl_methods(

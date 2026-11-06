@@ -78,6 +78,38 @@ RETURNS-46, after 0.8.0: breaking, so the next release is 0.9.0.
     for `XClient<T>`, `Default`.
   - `MemoryTransport::params_of` takes `impl Borrow<MethodRef>`.
 
+## [0.8.1]
+
+PLEXUS-44, from the 0.8.0 tag: additive. An app that depends only on the
+`plexus-rpc` umbrella (0.8.0) builds every expansion; nothing changes for an
+app that lists the crates itself.
+
+### Changed
+
+- The jsonrpsee server trait (`{Struct}RpcServer`) is written by this macro
+  instead of by jsonrpsee's `#[rpc(server)]`, token for token what that
+  attribute rendered for the activation's subscriptions: the same trait and
+  `into_rpc`, the same registered names (`ns_m`, `ns_unsubscribe_m`), the
+  same parameter decoding (an object by name, each name also in snake_case
+  and lowerCamelCase; otherwise by position; an `Option` optional) and the
+  same invalid-params rejection. jsonrpsee's attribute looks `jsonrpsee` up
+  in the consumer's Cargo.toml, which kept it in every app's manifest; its
+  paths now go through the expansion's dependency shim like every other.
+  New dependency: `heck` 0.5 (already in the tree through jsonrpsee).
+
+### Fixed
+
+- The generated client and `#[derive(plexus_macros::Deserialize)]` find
+  plexus-client through the umbrella (`::plexus_rpc::client`) when the
+  consumer does not list `plexus-client`.
+- `#[derive(Credentials)]` names plexus-auth-core as the consumer has it
+  (rename-respecting), else through the umbrella (`::plexus_rpc::auth_core`),
+  instead of a hardcoded `::plexus_auth_core`.
+- `#[derive(HandleEnum)]`: `to_handle` uses `crate_path` like the rest of
+  the expansion (it hardcoded `plexus_core::Handle`); without `crate_path`,
+  an umbrella-only consumer gets `::plexus_rpc::core`, a renamed plexus-core
+  its name, everyone else `plexus_core` as before.
+
 ## [0.8.0]
 
 plexus-macros 0.8.0 and plexus-client 0.8.0, released with plexus-core 0.8.0:
