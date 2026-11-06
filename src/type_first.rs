@@ -243,12 +243,17 @@ fn client_path(span: Span) -> syn::Result<TokenStream2> {
             let name = syn::Ident::new(&name, span);
             Ok(quote! { ::#name })
         }
-        Err(e) => Err(syn::Error::new(
-            span,
-            format!(
-                "`plexus_macros::Deserialize` reads through plexus-client's runtime, and plexus-client is not a \
-                 dependency ({e}): add `plexus-client` to Cargo.toml"
-            ),
-        )),
+        // PLEXUS-44: an umbrella-only consumer reaches plexus-client
+        // through the plexus-rpc umbrella's `client` re-export.
+        Err(e) => match crate::codegen::umbrella_crate(span) {
+            Some(umbrella) => Ok(quote! { ::#umbrella::client }),
+            None => Err(syn::Error::new(
+                span,
+                format!(
+                    "`plexus_macros::Deserialize` reads through plexus-client's runtime, and plexus-client is not a \
+                     dependency ({e}): add `plexus-client` (or the `plexus-rpc` umbrella) to Cargo.toml"
+                ),
+            )),
+        },
     }
 }

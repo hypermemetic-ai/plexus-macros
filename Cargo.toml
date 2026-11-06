@@ -33,7 +33,7 @@ members = [
 
 [package]
 name = "plexus-macros"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 license = "MIT"
 description = "Procedural macros for Plexus RPC activations"
@@ -54,6 +54,10 @@ uuid = { version = "1.0", features = ["v5"] }
 # SYNAPSE-13: an `example(params = r#"{…}"#)` is checked to be a JSON object
 # naming the method's params at expansion time.
 serde_json = "1.0"
+# PLEXUS-44: the server trait's by-name parameters accept the snake_case and
+# lowerCamelCase spellings jsonrpsee's `#[rpc]` accepted, spelled by the same
+# crate (0.5, jsonrpsee-proc-macros 0.26's).
+heck = "0.5"
 
 [features]
 # Enables the no-op JsonSchema proc_macro_derive, used by plexus-schemars-compat

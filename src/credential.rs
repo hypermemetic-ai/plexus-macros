@@ -694,6 +694,13 @@ fn expand_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
     // safe form. Users with a renamed `plexus_auth_core` dep will need an
     // alias here in a follow-up; current workspace consumers all use the
     // canonical name.
+    //
+    // PLEXUS-44: resolved like the activation's credentials wiring — the
+    // consumer's `plexus-auth-core` (rename-respecting), else the
+    // `plexus-rpc` umbrella's `auth_core` re-export, else the historical
+    // `::plexus_auth_core`.
+    let auth_core: syn::Path = crate::codegen::resolve_auth_core_path(proc_macro2::Span::call_site())
+        .unwrap_or_else(|| syn::parse_quote!(::plexus_auth_core));
     Ok(quote! {
         /// Macro-emitted credential field registry. One entry per
         /// `#[credential(...)]`-annotated field on this type, in stable
@@ -731,11 +738,11 @@ fn expand_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
         // specialized inherent over the fallback trait impl on
         // `&CredentialsRegistryProbe<T>`.
         #[allow(non_snake_case, dead_code)]
-        impl #impl_generics ::plexus_auth_core::HasCredentialMarkers
+        impl #impl_generics #auth_core::HasCredentialMarkers
             for #type_ident #ty_generics #where_clause
         {
-            fn credential_markers() -> &'static [::plexus_auth_core::CredentialFieldMarker] {
-                static __PLEXUS_MARKER_SLICE: ::std::sync::OnceLock<::std::vec::Vec<::plexus_auth_core::CredentialFieldMarker>> =
+            fn credential_markers() -> &'static [#auth_core::CredentialFieldMarker] {
+                static __PLEXUS_MARKER_SLICE: ::std::sync::OnceLock<::std::vec::Vec<#auth_core::CredentialFieldMarker>> =
                     ::std::sync::OnceLock::new();
                 __PLEXUS_MARKER_SLICE
                     .get_or_init(|| #registry_fn_name())

@@ -53,8 +53,9 @@ struct HandleEnumAttrs {
     plugin_id_type: Option<String>,
     /// Semantic version for handles (e.g., "1.0.0")
     version: String,
-    /// Base crate path for imports (default: "plexus_core")
-    crate_path: String,
+    /// Base crate path for imports (default: "plexus_core"; PLEXUS-44: the
+    /// `plexus-rpc` umbrella's `core` when the consumer depends only on it)
+    crate_path: Option<String>,
 }
 
 impl Parse for HandleEnumAttrs {
@@ -62,7 +63,7 @@ impl Parse for HandleEnumAttrs {
         let mut plugin_id = None;
         let mut plugin_id_type = None;
         let mut version = None;
-        let mut crate_path = "plexus_core".to_string();
+        let mut crate_path = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -79,7 +80,7 @@ impl Parse for HandleEnumAttrs {
                         } else if path.is_ident("version") {
                             version = Some(s.value());
                         } else if path.is_ident("crate_path") {
-                            crate_path = s.value();
+                            crate_path = Some(s.value());
                         }
                     }
                 }
@@ -183,12 +184,34 @@ struct VariantInfo {
     resolution: Option<ResolutionInfo>,
 }
 
+/// The default `crate_path`: `plexus_core` as it always was when the
+/// consumer depends on plexus-core (or is it), and — PLEXUS-44 — the
+/// `plexus-rpc` umbrella's `core` re-export when the consumer depends only on
+/// the umbrella.
+fn default_crate_path() -> syn::Path {
+    use proc_macro_crate::{crate_name, FoundCrate};
+    match crate_name("plexus-core") {
+        Ok(FoundCrate::Name(name)) if name != "plexus_core" => {
+            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            syn::parse_quote!(::#ident)
+        }
+        Ok(_) => syn::parse_quote!(plexus_core),
+        Err(_) => match crate::codegen::umbrella_crate(proc_macro2::Span::call_site()) {
+            Some(umbrella) => syn::parse_quote!(::#umbrella::core),
+            None => syn::parse_quote!(plexus_core),
+        },
+    }
+}
+
 fn derive_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
     let enum_name = &input.ident;
 
     // Extract enum-level #[handle(...)] attributes
     let enum_attrs = extract_enum_attrs(&input)?;
-    let crate_path: syn::Path = syn::parse_str(&enum_attrs.crate_path)?;
+    let crate_path: syn::Path = match &enum_attrs.crate_path {
+        Some(explicit) => syn::parse_str(explicit)?,
+        None => default_crate_path(),
+    };
 
     // Resolve the plugin_id expression used in codegen.
     //
@@ -261,7 +284,7 @@ fn derive_impl(input: DeriveInput) -> syn::Result<TokenStream2> {
     }
 
     // Generate to_handle() match arms
-    let to_handle_arms = generate_to_handle_arms(&variants, &plugin_id_expr, version);
+    let to_handle_arms = generate_to_handle_arms(&variants, &plugin_id_expr, version, &crate_path);
 
     // Generate TryFrom match arms
     let try_from_arms = generate_try_from_arms(&variants, &crate_path);
@@ -402,6 +425,7 @@ fn generate_to_handle_arms(
     variants: &[VariantInfo],
     plugin_id_expr: &TokenStream2,
     version: &str,
+    crate_path: &syn::Path,
 ) -> Vec<TokenStream2> {
     variants
         .iter()
@@ -413,7 +437,7 @@ fn generate_to_handle_arms(
                 // Unit-like variant with #[handle]
                 quote! {
                     Self::#variant_name => {
-                        plexus_core::Handle::new(#plugin_id_expr, #version, #method)
+                        #crate_path::Handle::new(#plugin_id_expr, #version, #method)
                     }
                 }
             } else {
@@ -430,7 +454,7 @@ fn generate_to_handle_arms(
 
                 quote! {
                     Self::#variant_name { #(#field_names),* } => {
-                        plexus_core::Handle::new(#plugin_id_expr, #version, #method)
+                        #crate_path::Handle::new(#plugin_id_expr, #version, #method)
                             .with_meta(vec![#(#field_clones),*])
                     }
                 }

@@ -144,17 +144,21 @@ pub(crate) fn resolve_client_path(err_span: Span) -> syn::Result<syn::Path> {
             let ident = syn::Ident::new(&name, err_span);
             Ok(syn::parse_quote!(::#ident))
         }
-        // The plexus-rpc umbrella does not re-export plexus-client yet; when
-        // it does, this is where `::<umbrella>::client` goes.
-        Err(e) => Err(syn::Error::new(
-            err_span,
-            format!(
-                "#[plexus_macros::activation(client)] could not locate the \
-                 `plexus-client` dependency in Cargo.toml ({e}). The generated \
-                 client links against it. Add `plexus-client` as a dependency, \
-                 or remove the `client` flag."
-            ),
-        )),
+        // PLEXUS-44: the plexus-rpc umbrella re-exports plexus-client as
+        // `client`, so an umbrella-only consumer gets its client through it.
+        Err(e) => match crate::codegen::umbrella_crate(err_span) {
+            Some(umbrella) => Ok(syn::parse_quote!(::#umbrella::client)),
+            None => Err(syn::Error::new(
+                err_span,
+                format!(
+                    "#[plexus_macros::activation(client)] could not locate the \
+                     `plexus-client` dependency in Cargo.toml ({e}). The generated \
+                     client links against it. Add `plexus-client` (or the \
+                     `plexus-rpc` umbrella) as a dependency, or remove the \
+                     `client` flag."
+                ),
+            )),
+        },
     }
 }
 
