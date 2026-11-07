@@ -3,18 +3,18 @@
     "children": [
       {
         "description": "Items, by id",
-        "hash": "b71c44fef5ed8702",
+        "hash": "db2313aa4b33a372",
         "namespace": "alpha"
       },
       {
         "description": "Items, by query",
-        "hash": "8b89f28bb64ae238",
+        "hash": "d3625bf425462646",
         "namespace": "beta"
       }
     ],
-    "children_hash": "bb38497bca8f7051",
+    "children_hash": "c4ef00dd08588638",
     "description": "Central routing and introspection",
-    "hash": "b9cb19f278d531a3",
+    "hash": "1b4a13fc6ac96e95",
     "methods": [
       {
         "bidirectional": false,
@@ -787,7 +787,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "irsvc.schema",
-        "hash": "55afc285cb4634f0",
+        "hash": "15413be74d1eff37",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -1318,6 +1318,17 @@
                 {
                   "description": "Method gates a dynamic child keyed by its argument.",
                   "properties": {
+                    "child": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PluginSchema"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`)."
+                    },
                     "kind": {
                       "const": "dynamic_child",
                       "type": "string"
@@ -1786,20 +1797,20 @@
       }
     ],
     "namespace": "irsvc",
-    "self_hash": "8be57f5d55edf465",
+    "self_hash": "470e085a8876ba16",
     "version": "1.0.0"
   },
   "alpha": {
     "children": [
       {
         "description": "Item tools, one level down.",
-        "hash": "9771dbc5c7882134",
+        "hash": "7b1b5aca363ca0a3",
         "namespace": "gamma"
       }
     ],
-    "children_hash": "a14b4b9c1586472e",
+    "children_hash": "c0a1bd8bfae87c47",
     "description": "Items, by id",
-    "hash": "b71c44fef5ed8702",
+    "hash": "db2313aa4b33a372",
     "methods": [
       {
         "bidirectional": false,
@@ -2429,7 +2440,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "alpha.schema",
-        "hash": "b83743a99746fd0d",
+        "hash": "0e4a797c4687a2b9",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -2960,6 +2971,17 @@
                 {
                   "description": "Method gates a dynamic child keyed by its argument.",
                   "properties": {
+                    "child": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PluginSchema"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`)."
+                    },
                     "kind": {
                       "const": "dynamic_child",
                       "type": "string"
@@ -3454,12 +3476,12 @@
         "alpha.watch"
       ]
     },
-    "self_hash": "3dfdf10705e6f7da",
+    "self_hash": "b9b981a3fbcc9fe6",
     "version": "1.0.0"
   },
   "alpha.gamma": {
     "description": "Item tools",
-    "hash": "9771dbc5c7882134",
+    "hash": "7b1b5aca363ca0a3",
     "methods": [
       {
         "bidirectional": false,
@@ -3718,7 +3740,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "gamma.schema",
-        "hash": "fddb759e4420fc84",
+        "hash": "6342b25a5fd10145",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -4249,6 +4271,17 @@
                 {
                   "description": "Method gates a dynamic child keyed by its argument.",
                   "properties": {
+                    "child": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PluginSchema"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`)."
+                    },
                     "kind": {
                       "const": "dynamic_child",
                       "type": "string"
@@ -4717,12 +4750,12 @@
       }
     ],
     "namespace": "gamma",
-    "self_hash": "7584016f7078e4da",
+    "self_hash": "23db5e7feef9d87e",
     "version": "1.0.0"
   },
   "beta": {
     "description": "Items, by query",
-    "hash": "8b89f28bb64ae238",
+    "hash": "d3625bf425462646",
     "methods": [
       {
         "bidirectional": false,
@@ -5254,7 +5287,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "beta.schema",
-        "hash": "c1b1ee1e5f37c412",
+        "hash": "1586673b38485a6c",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -5785,6 +5818,17 @@
                 {
                   "description": "Method gates a dynamic child keyed by its argument.",
                   "properties": {
+                    "child": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PluginSchema"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`)."
+                    },
                     "kind": {
                       "const": "dynamic_child",
                       "type": "string"
@@ -6253,7 +6297,7 @@
       }
     ],
     "namespace": "beta",
-    "self_hash": "728bb80dea197847",
+    "self_hash": "f66dd5b56a5ce920",
     "version": "1.0.0"
   }
 }

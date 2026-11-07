@@ -464,7 +464,12 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
 
     // AUTH-3: the activation's default roles, validated against its methods
     // and flattened to grants (`<namespace>.<method>`).
-    let declared_roles = resolve_roles(&args.roles, &methods, &namespace)?;
+    let slot_names: Vec<String> = child_methods
+        .iter()
+        .filter(|c| matches!(c.kind, crate::parse::ChildMethodKind::Dynamic))
+        .map(|c| c.fn_name.to_string())
+        .collect();
+    let declared_roles = resolve_roles(&args.roles, &methods, &namespace, &slot_names)?;
 
     // REQ-10: validate per-method request overrides against the activation's
     // `required = [...]` lock list. If the activation has any required fields
@@ -1027,6 +1032,7 @@ fn resolve_roles(
     decls: &[crate::parse::RoleDecl],
     methods: &[MethodInfo],
     namespace: &str,
+    slots: &[String],
 ) -> syn::Result<Vec<(String, Vec<String>)>> {
     use crate::parse::RoleEntry;
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
@@ -1049,6 +1055,32 @@ fn resolve_roles(
         };
         for entry in &decl.entries {
             match entry {
+                // NEST-5: a slot grant — `"{planet}.info"` or
+                // `"<namespace>.{planet}.info"`, `{planet}` a dynamic
+                // `#[child]` of this activation — taken as the slot's grant
+                // (`<namespace>.{planet}.info`; an untyped slot whole,
+                // `<namespace>.{planet}`).
+                RoleEntry::Method(lit) if lit.value().contains('{') => {
+                    let v = lit.value();
+                    let rel = v.strip_prefix(&format!("{namespace}.")).unwrap_or(&v).to_string();
+                    let slot = rel
+                        .strip_prefix('{')
+                        .and_then(|r| r.split_once('}'))
+                        .map(|(s, _)| s.to_string());
+                    match slot {
+                        Some(slot) if slots.contains(&slot) => push(format!("{namespace}.{rel}"), &mut grants),
+                        _ => {
+                            return Err(syn::Error::new(
+                                lit.span(),
+                                format!(
+                                    "role `{name}` lists \"{v}\", a slot grant whose slot is not a dynamic \
+                                     #[child] of this activation; its slots are: {}",
+                                    if slots.is_empty() { "(none)".to_string() } else { slots.join(", ") }
+                                ),
+                            ))
+                        }
+                    }
+                }
                 RoleEntry::Method(lit) => {
                     let m = lit.value();
                     if !methods.iter().any(|mi| mi.method_name == m) {

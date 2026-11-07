@@ -1,6 +1,6 @@
 {
   "irBackend": "clashsvc",
-  "irHash": "7072cd66eeccebf4",
+  "irHash": "64ae4f64ffa8d2b4",
   "irMetadata": null,
   "irMethods": {
     ".call": {
@@ -199,14 +199,14 @@
   },
   "irPluginHashes": {
     "": {
-      "phiChildrenHash": "7072cd66eeccebf4",
-      "phiHash": "7072cd66eeccebf4",
-      "phiSelfHash": "7072cd66eeccebf4"
+      "phiChildrenHash": "64ae4f64ffa8d2b4",
+      "phiHash": "64ae4f64ffa8d2b4",
+      "phiSelfHash": "64ae4f64ffa8d2b4"
     },
     "clash": {
-      "phiChildrenHash": "baaa5bc391166fdf",
-      "phiHash": "baaa5bc391166fdf",
-      "phiSelfHash": "baaa5bc391166fdf"
+      "phiChildrenHash": "afe210f27a39f4d3",
+      "phiHash": "afe210f27a39f4d3",
+      "phiSelfHash": "afe210f27a39f4d3"
     }
   },
   "irPluginRequests": null,
@@ -1241,6 +1241,22 @@
           {
             "vdDescription": "Method gates a dynamic child keyed by its argument.",
             "vdFields": [
+              {
+                "fdDefault": null,
+                "fdDescription": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`).",
+                "fdName": "child",
+                "fdRequired": false,
+                "fdType": {
+                  "contents": {
+                    "contents": {
+                      "qnLocalName": "PluginSchema",
+                      "qnNamespace": ""
+                    },
+                    "tag": "RefNamed"
+                  },
+                  "tag": "RefOptional"
+                }
+              },
               {
                 "fdDefault": null,
                 "fdDescription": "Optional sibling method that lists available keys.",

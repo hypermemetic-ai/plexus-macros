@@ -3,13 +3,13 @@
     "children": [
       {
         "description": "Two shapes under one title",
-        "hash": "baaa5bc391166fdf",
+        "hash": "afe210f27a39f4d3",
         "namespace": "clash"
       }
     ],
-    "children_hash": "7fa9e90d0a6d91d4",
+    "children_hash": "9eea167a0c6452af",
     "description": "Central routing and introspection",
-    "hash": "7072cd66eeccebf4",
+    "hash": "64ae4f64ffa8d2b4",
     "methods": [
       {
         "bidirectional": false,
@@ -782,7 +782,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "clashsvc.schema",
-        "hash": "55afc285cb4634f0",
+        "hash": "15413be74d1eff37",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -1313,6 +1313,17 @@
                 {
                   "description": "Method gates a dynamic child keyed by its argument.",
                   "properties": {
+                    "child": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PluginSchema"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`)."
+                    },
                     "kind": {
                       "const": "dynamic_child",
                       "type": "string"
@@ -1781,12 +1792,12 @@
       }
     ],
     "namespace": "clashsvc",
-    "self_hash": "8be57f5d55edf465",
+    "self_hash": "470e085a8876ba16",
     "version": "1.0.0"
   },
   "clash": {
     "description": "Two shapes under one title",
-    "hash": "baaa5bc391166fdf",
+    "hash": "afe210f27a39f4d3",
     "methods": [
       {
         "bidirectional": false,
@@ -1853,7 +1864,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "clash.schema",
-        "hash": "8edce53ccef8628b",
+        "hash": "8e39d285ef57550e",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -2384,6 +2395,17 @@
                 {
                   "description": "Method gates a dynamic child keyed by its argument.",
                   "properties": {
+                    "child": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/PluginSchema"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`)."
+                    },
                     "kind": {
                       "const": "dynamic_child",
                       "type": "string"
@@ -2852,7 +2874,7 @@
       }
     ],
     "namespace": "clash",
-    "self_hash": "73ae3b4451946b79",
+    "self_hash": "05cbc8ccb3a41f0c",
     "version": "1.0.0"
   }
 }

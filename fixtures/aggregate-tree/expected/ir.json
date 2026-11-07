@@ -345,19 +345,19 @@
   },
   "irPluginHashes": {
     "tree": {
-      "phiChildrenHash": "4078c214c9321227",
-      "phiHash": "4078c214c9321227",
-      "phiSelfHash": "4078c214c9321227"
+      "phiChildrenHash": "400b6e611a5575dd",
+      "phiHash": "400b6e611a5575dd",
+      "phiSelfHash": "400b6e611a5575dd"
     },
     "tree.branch": {
-      "phiChildrenHash": "f0e03f012cbb54e1",
-      "phiHash": "f0e03f012cbb54e1",
-      "phiSelfHash": "f0e03f012cbb54e1"
+      "phiChildrenHash": "76b674bba8807383",
+      "phiHash": "76b674bba8807383",
+      "phiSelfHash": "76b674bba8807383"
     },
     "tree.branch.leaf": {
-      "phiChildrenHash": "e9328e764dedf24c",
-      "phiHash": "e9328e764dedf24c",
-      "phiSelfHash": "e9328e764dedf24c"
+      "phiChildrenHash": "7033ad6cd733bdcb",
+      "phiHash": "7033ad6cd733bdcb",
+      "phiSelfHash": "7033ad6cd733bdcb"
     }
   },
   "irPluginRequests": null,
@@ -1020,6 +1020,22 @@
           {
             "vdDescription": "Method gates a dynamic child keyed by its argument.",
             "vdFields": [
+              {
+                "fdDefault": null,
+                "fdDescription": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`).",
+                "fdName": "child",
+                "fdRequired": false,
+                "fdType": {
+                  "contents": {
+                    "contents": {
+                      "qnLocalName": "PluginSchema",
+                      "qnNamespace": "tree"
+                    },
+                    "tag": "RefNamed"
+                  },
+                  "tag": "RefOptional"
+                }
+              },
               {
                 "fdDefault": null,
                 "fdDescription": "Optional sibling method that lists available keys.",

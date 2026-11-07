@@ -5,6 +5,14 @@ This file starts at 0.7.0; earlier changes are in the git history.
 
 ## [Unreleased]
 
+NEST-5: a dynamic `#[child]`'s role carries its slot type — the child type's
+schema (`Activation::slot_schema`, emitted for every activation), chosen by
+autoref so a child that is no macro activation stays untyped; a type that
+names itself is untyped at its repeat. `roles(...)` takes a slot grant
+(`"{planet}.info"` or `"solar.{planet}.info"`, `{planet}` a dynamic child of
+the activation). Every fixture whose schema carries `MethodRole`'s moved
+(regenerated; the IR goldens by synapse's `ir3-test`).
+
 ## [0.9.0] — 2026-11-06
 
 plexus-macros and plexus-client 0.9.0 (PLEXUS-46), released in lockstep with

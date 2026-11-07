@@ -581,6 +581,9 @@ pub fn generate(
 
             /// Internal: compute method schemas (called once, then cached)
             fn compute_method_schemas() -> Vec<#crate_path::plexus::MethodSchema> {
+                // NEST-5: while this enum's schemas are computed, a slot whose
+                // type is this one again is published untyped, not recursed.
+                let __plexus_building = #crate_path::plexus::slots::building(::std::any::type_name::<Self>());
                 let method_names: &[&str] = &[#(#method_names),*];
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
                 let http_methods: Vec<#crate_path::plexus::schema::HttpMethod> = vec![#(#http_methods),*];
@@ -960,10 +963,19 @@ fn child_schema_entry(child: &ChildMethodInfo, crate_path: &syn::Path) -> TokenS
                 }
                 None => quote! { ::std::option::Option::None },
             };
+            // NEST-5: the slot's type — the child type's own schema
+            // (`Option<Planet>`: `Planet`'s), unless `#[child(opaque)]` or
+            // the type is no activation the macro wrote (a hand-written
+            // router), which leaves the slot untyped.
+            let child_expr = match (child.opaque, option_inner(&child.return_ty)) {
+                (false, Some(inner)) => slot_type_expr(inner, crate_path),
+                _ => quote! { ::std::option::Option::None },
+            };
             quote! {
                 #crate_path::plexus::MethodRole::DynamicChild {
                     list_method: #list_expr,
                     search_method: #search_expr,
+                    child: #child_expr,
                 }
             }
         }
@@ -1018,4 +1030,47 @@ pub fn is_option_type(ty: &syn::Type) -> bool {
 /// `credentials` field stays empty.
 fn effective_credential_probe_type(m: &MethodInfo) -> Option<Type> {
     Some(m.ok_ty.clone())
+}
+
+/// NEST-5: `T` of `Option<T>` (the last path segment named `Option`).
+pub(crate) fn option_inner(ty: &syn::Type) -> Option<&syn::Type> {
+    let syn::Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return None };
+    match args.args.first()? {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    }
+}
+
+/// NEST-5: the slot type of a child of type `inner`, as an expression:
+/// `slot_type::<inner>()` when `inner` is an `Activation`, else `None` —
+/// chosen by autoref (a concrete type here), so a hand-written router that
+/// is no activation still compiles, as an untyped slot.
+pub(crate) fn slot_type_expr(inner: &syn::Type, crate_path: &syn::Path) -> TokenStream {
+    quote! {
+        {
+            struct __PlexusSlotProbe<__T>(::core::marker::PhantomData<__T>);
+            trait __PlexusSlotTyped {
+                fn __plexus_slot(&self) -> ::std::option::Option<::std::boxed::Box<#crate_path::plexus::PluginSchema>>;
+            }
+            impl<__T: #crate_path::plexus::Activation> __PlexusSlotTyped for __PlexusSlotProbe<__T> {
+                fn __plexus_slot(&self) -> ::std::option::Option<::std::boxed::Box<#crate_path::plexus::PluginSchema>> {
+                    #crate_path::plexus::slots::slot_type::<__T>()
+                }
+            }
+            trait __PlexusSlotUntyped {
+                fn __plexus_slot(&self) -> ::std::option::Option<::std::boxed::Box<#crate_path::plexus::PluginSchema>>;
+            }
+            impl<__T> __PlexusSlotUntyped for &__PlexusSlotProbe<__T> {
+                fn __plexus_slot(&self) -> ::std::option::Option<::std::boxed::Box<#crate_path::plexus::PluginSchema>> {
+                    ::std::option::Option::None
+                }
+            }
+            (&__PlexusSlotProbe::<#inner>(::core::marker::PhantomData)).__plexus_slot()
+        }
+    }
 }

@@ -219,6 +219,21 @@ pub fn generate(
         deprecation_inject
     };
 
+    // NEST-5: the slot type's roles, as `roles(...)` declared them.
+    let slot_roles_inject = {
+        let role_names: Vec<&str> = roles.iter().map(|(n, _)| n.as_str()).collect();
+        let role_grants: Vec<Vec<&str>> =
+            roles.iter().map(|(_, g)| g.iter().map(String::as_str).collect()).collect();
+        quote! {
+            #(
+                __plugin_schema.roles.insert(
+                    ::std::string::String::from(#role_names),
+                    ::std::vec![#(::std::string::String::from(#role_grants)),*],
+                );
+            )*
+        }
+    };
+
     let plugin_schema_body = match (hub, long_description) {
         (true, Some(long_desc)) => {
             // Hub with long description
@@ -943,6 +958,21 @@ pub fn generate(
 
             fn plugin_schema(&self) -> #crate_path::plexus::PluginSchema {
                 #plugin_schema_body
+            }
+
+            // NEST-5: the schema without an instance — a parent's slot type.
+            fn slot_schema() -> ::std::option::Option<#crate_path::plexus::PluginSchema>
+            where
+                Self: ::core::marker::Sized,
+            {
+                let mut __plugin_schema = #crate_path::plexus::PluginSchema::leaf(
+                    #namespace,
+                    #version_expr,
+                    #description,
+                    #enum_name::method_schemas(),
+                );
+                #slot_roles_inject
+                ::std::option::Option::Some(__plugin_schema)
             }
 
             #activation_static_children_impl
