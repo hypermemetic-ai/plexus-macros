@@ -397,7 +397,7 @@ pub fn generate(
             .collect();
         let dynamic_child: Option<&ChildMethodInfo> = child_methods
             .iter()
-            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic));
+            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic) && c.peer.is_none());
 
         let static_names: Vec<String> =
             static_children.iter().map(|c| c.fn_name.to_string()).collect();
@@ -431,7 +431,10 @@ pub fn generate(
             quote! { _ => None, }
         };
 
-        if static_children.is_empty() {
+        if static_children.is_empty() && dynamic_child.is_none() {
+            // NEST-7: only peer slots (routed by `peer_child` below).
+            quote! { None }
+        } else if static_children.is_empty() {
             // Pure-dynamic dispatch: no match needed.
             let fn_name = &dynamic_child.unwrap().fn_name;
             let await_tok = if dynamic_child.unwrap().is_async {
@@ -468,6 +471,99 @@ pub fn generate(
                 _ => None,
             }
         }
+    };
+
+    // NEST-7: `#[peer]` slots, each reached by its name
+    // (`host.integration.github.repos`). Routing asks `peer_child`, which
+    // answers a static child and the dynamic `#[child]` as `get_child`
+    // would, and for a slot's name a `PeerSlot`: its children are the peers
+    // the slot's function returns (a typed one checked against the slot's
+    // interface), each failure the caller's typed error item.
+    let peer_slots: Vec<&ChildMethodInfo> = child_methods.iter().filter(|c| c.peer.is_some()).collect();
+    let (get_child_body, peer_child_impl) = if peer_slots.is_empty() {
+        (get_child_body, quote! {})
+    } else {
+        let statics: Vec<&ChildMethodInfo> = child_methods.iter().filter(|c| matches!(c.kind, ChildMethodKind::Static)).collect();
+        let static_names: Vec<String> = statics.iter().map(|c| c.fn_name.to_string()).collect();
+        let static_fns: Vec<&syn::Ident> = statics.iter().map(|c| &c.fn_name).collect();
+        let slot_names: Vec<String> = peer_slots.iter().map(|c| c.fn_name.to_string()).collect();
+        let slot_arms: Vec<TokenStream> = peer_slots
+            .iter()
+            .map(|c| {
+                let fn_name = &c.fn_name;
+                let name = fn_name.to_string();
+                let interface = crate::codegen::peer::interface_expr(c.peer.as_ref().unwrap(), crate_path);
+                let with_list = match &c.list_fn {
+                    Some(list) => {
+                        let await_tok = if c.list_is_async { quote! { .await } } else { quote! {} };
+                        quote! {
+                            .with_list({
+                                let __this = ::core::clone::Clone::clone(self);
+                                ::std::sync::Arc::new(move || {
+                                    let __this = ::core::clone::Clone::clone(&__this);
+                                    ::std::boxed::Box::pin(async move {
+                                        let __names = __this.#list()#await_tok;
+                                        #deps::futures::StreamExt::collect::<::std::vec::Vec<::std::string::String>>(__names).await
+                                    })
+                                })
+                            })
+                        }
+                    }
+                    None => quote! {},
+                };
+                quote! {
+                    {
+                        let __this = ::core::clone::Clone::clone(self);
+                        let __find: #crate_path::plexus::peer::FindPeer = ::std::sync::Arc::new(move |__name: ::std::string::String| {
+                            let __this = ::core::clone::Clone::clone(&__this);
+                            ::std::boxed::Box::pin(async move {
+                                __this.#fn_name(&__name).await.map(|__p| {
+                                    let __p: ::std::boxed::Box<dyn #crate_path::plexus::peer::Peer> = __p;
+                                    __p
+                                })
+                            })
+                        });
+                        ::core::result::Result::Ok(::core::option::Option::Some(::std::boxed::Box::new(
+                            #crate_path::plexus::peer::PeerSlot::new(#name, #interface, __find)#with_list,
+                        ) as Box<dyn #crate_path::plexus::ChildRouter>))
+                    }
+                }
+            })
+            .collect();
+        let dynamic_arm = match child_methods.iter().find(|c| matches!(c.kind, ChildMethodKind::Dynamic) && c.peer.is_none()) {
+            Some(d) => {
+                let fn_name = &d.fn_name;
+                let await_tok = if d.is_async { quote! { .await } } else { quote! {} };
+                quote! {
+                    _ => ::core::result::Result::Ok(self.#fn_name(_name)#await_tok.map(|c| Box::new(c) as Box<dyn #crate_path::plexus::ChildRouter>)),
+                }
+            }
+            None => quote! { _ => ::core::result::Result::Ok(::core::option::Option::None), },
+        };
+        (
+            quote! {
+                <Self as #crate_path::plexus::ChildRouter>::peer_child(self, _name).await.ok().flatten()
+            },
+            quote! {
+                async fn peer_child(
+                    &self,
+                    _name: &str,
+                ) -> ::core::result::Result<
+                    ::core::option::Option<Box<dyn #crate_path::plexus::ChildRouter>>,
+                    #crate_path::plexus::peer::PeerError,
+                > {
+                    match _name {
+                        #(
+                            #static_names => ::core::result::Result::Ok(::core::option::Option::Some(
+                                Box::new(self.#static_fns()) as Box<dyn #crate_path::plexus::ChildRouter>,
+                            )),
+                        )*
+                        #( #slot_names => #slot_arms, )*
+                        #dynamic_arm
+                    }
+                }
+            },
+        )
     };
 
     // CHILD-4: compute capabilities + list/search overrides.
@@ -626,7 +722,7 @@ pub fn generate(
             .collect();
         let default_arm = match child_methods
             .iter()
-            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic))
+            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic) && c.peer.is_none())
             .and_then(|c| c.forward)
         {
             Some(f) => {
@@ -718,6 +814,8 @@ pub fn generate(
                 async fn get_child(&self, _name: &str) -> Option<Box<dyn #crate_path::plexus::ChildRouter>> {
                     #get_child_body
                 }
+
+                #peer_child_impl
 
                 // CHILD-3/4: opt-in capability flags. Static children always
                 // yield LIST; `list = "..."` / `search = "..."` opt in to the
@@ -823,6 +921,36 @@ pub fn generate(
                 }
             })
             .collect();
+        // NEST-7: each `#[peer]` slot is a child by its own name
+        // (`host.integration`), whose schema lists the slot's names.
+        let peer_entries: Vec<TokenStream> = child_methods
+            .iter()
+            .filter(|c| c.peer.is_some())
+            .map(|c| {
+                let name = c.fn_name.to_string();
+                let desc = &c.description;
+                // The slot's own hash (its interface's, and its name), never
+                // a peer's: a navigator checks for cycles by hash.
+                let hash = match c.peer.as_ref().unwrap() {
+                    crate::codegen::peer::PeerShape::Typed(path) => quote! {
+                        #crate_path::plexus::content_hash::hash16(
+                            ::std::format!("slot:{}:{}", #name, <dyn #path as #crate_path::plexus::peer::Contract>::interface().hash).as_bytes(),
+                        )
+                    },
+                    crate::codegen::peer::PeerShape::Untyped => quote! {
+                        #crate_path::plexus::content_hash::hash16(::std::format!("slot:{}", #name).as_bytes())
+                    },
+                };
+                quote! {
+                    #crate_path::plexus::ChildSummary {
+                        namespace: ::std::string::String::from(#name),
+                        description: ::std::string::String::from(#desc),
+                        hash: #hash,
+                    }
+                }
+            })
+            .collect();
+        let entries: Vec<TokenStream> = entries.into_iter().chain(peer_entries).collect();
         quote! {
             /// Auto-generated child summary list from `#[plexus_macros::child]`
             /// static methods, each with its child's schema hash. Dynamic
@@ -932,6 +1060,7 @@ pub fn generate(
                                         m.role,
                                         #crate_path::plexus::MethodRole::StaticChild
                                             | #crate_path::plexus::MethodRole::DynamicChild { .. }
+                                            | #crate_path::plexus::MethodRole::Peer { .. }
                                     )
                             }) {
                                 let result = #crate_path::plexus::SchemaResult::Method(m.clone());

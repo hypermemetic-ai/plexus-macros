@@ -271,6 +271,25 @@ pub fn hub_method(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Used standalone (outside an `#[activation]` block) this attribute is a
 /// no-op that returns the function unchanged.
+/// NEST-7: an activation returned by name — a peer, in this process or
+/// across the network, typed by a contract's peer trait or untyped:
+///
+/// ```ignore
+/// #[plexus_macros::peer(list = "integrations")]
+/// async fn integration(&self, name: &str) -> Result<Box<dyn forge::ForgePeer>, PeerError> { … }
+/// #[plexus_macros::peer(list = "dendrites", search = "find")]
+/// async fn dendrite(&self, name: &str) -> Result<Box<dyn Peer>, PeerError> { … }
+/// ```
+///
+/// Inside `#[plexus_macros::activation]` the slot's role is
+/// `MethodRole::Peer { interface }`, routing calls it (a typed peer checked
+/// against the slot's interface first) and a failure is its typed error
+/// item. Outside it this attribute does nothing.
+#[proc_macro_attribute]
+pub fn peer(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 #[proc_macro_attribute]
 pub fn child(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Outside of #[plexus_macros::activation] this attribute does nothing;

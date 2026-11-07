@@ -963,6 +963,17 @@ fn child_schema_entry(child: &ChildMethodInfo, crate_path: &syn::Path) -> TokenS
                 }
                 None => quote! { ::std::option::Option::None },
             };
+            // NEST-7: a peer slot — its interface, or none (untyped).
+            if let Some(shape) = &child.peer {
+                let interface = crate::codegen::peer::interface_expr(shape, crate_path);
+                quote! {
+                    #crate_path::plexus::MethodRole::Peer {
+                        list_method: #list_expr,
+                        search_method: #search_expr,
+                        interface: #interface,
+                    }
+                }
+            } else {
             // NEST-5: the slot's type — the child type's own schema
             // (`Option<Planet>`: `Planet`'s), unless `#[child(opaque)]` or
             // the type is no activation the macro wrote (a hand-written
@@ -977,6 +988,7 @@ fn child_schema_entry(child: &ChildMethodInfo, crate_path: &syn::Path) -> TokenS
                     search_method: #search_expr,
                     child: #child_expr,
                 }
+            }
             }
         }
     };

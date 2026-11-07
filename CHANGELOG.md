@@ -5,6 +5,17 @@ This file starts at 0.7.0; earlier changes are in the git history.
 
 ## [Unreleased]
 
+NEST-7: `#[plexus_macros::peer(list = …, search = …)] async fn x(&self, name:
+&str) -> Result<Box<dyn I>, PeerError>` — a typed peer slot (`I` a contract's
+peer trait) or an untyped one (`Peer`); several per activation, beside a
+dynamic `#[child]`. Its role is `MethodRole::Peer`, routing answers it through
+`peer_child` (a `PeerSlot`, whose schema lists the `list` sibling's names),
+and the parent's `children` names the slot. A contract every method of which
+answers one `Result<T, E>` also gets `trait {Trait}Peer: {Trait} + Peer`, its
+`Contract` (interface and stamp), `{Trait}Client::stamp()`,
+`{Trait}Client::peer(transport)`, and `{Trait}` + `Peer` for
+`{Trait}Client<PeerTransport<T>>`; each `E` must be `From<PeerError>`.
+
 NEST-5: a dynamic `#[child]`'s role carries its slot type — the child type's
 schema (`Activation::slot_schema`, emitted for every activation), chosen by
 autoref so a child that is no macro activation stays untyped; a type that

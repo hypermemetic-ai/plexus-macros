@@ -1151,6 +1151,12 @@ pub struct ChildMethodInfo {
     /// `Option<Child>` for a dynamic one. The client codegen names the
     /// child's generated client from it.
     pub return_ty: syn::Type,
+    /// NEST-7: `#[plexus_macros::peer]` — an activation returned by name,
+    /// `Result<Box<dyn I>, PeerError>`: typed by `I`, or untyped (`Peer`).
+    pub peer: Option<crate::codegen::peer::PeerShape>,
+    /// NEST-7: for a peer slot with `list = "…"`, whether that sibling is
+    /// `async` (set by the activation driver, which sees the siblings).
+    pub list_is_async: bool,
 }
 
 impl ChildMethodInfo {
@@ -1229,6 +1235,24 @@ impl ChildMethodInfo {
             }
         };
 
+        // NEST-7: a `#[peer]` is a dynamic slot whose function answers
+        // `Result<Box<dyn I>, PeerError>`, awaited; it has no generated
+        // client accessor (the peer's own client is its interface's).
+        let is_peer = method.attrs.iter().any(|a| a.path().segments.last().is_some_and(|s| s.ident == "peer"));
+        let (peer, opaque) = if is_peer {
+            if !matches!(kind, ChildMethodKind::Dynamic) || !is_async {
+                return Err(syn::Error::new_spanned(
+                    &method.sig,
+                    "a #[plexus_macros::peer] method is `async fn NAME(&self, name: &str) -> \
+                     Result<Box<dyn I>, PeerError>`",
+                ));
+            }
+            let shape = crate::codegen::peer::peer_shape(&return_ty).map_err(|why| syn::Error::new_spanned(&return_ty, why))?;
+            (Some(shape), true)
+        } else {
+            (None, opaque)
+        };
+
         Ok(ChildMethodInfo {
             fn_name,
             description,
@@ -1240,6 +1264,8 @@ impl ChildMethodInfo {
             deprecation,
             forward,
             return_ty,
+            peer,
+            list_is_async: false,
         })
     }
 }
@@ -1265,7 +1291,7 @@ fn parse_child_attr_args(
     for attr in attrs {
         let path = attr.path();
         let last = path.segments.last().map(|s| s.ident.to_string());
-        if !matches!(last.as_deref(), Some("child")) {
+        if !matches!(last.as_deref(), Some("child") | Some("peer")) {
             continue;
         }
 
@@ -1789,7 +1815,7 @@ pub fn has_child_attr(method: &ImplItemFn) -> bool {
         let path = a.path();
         path.segments
             .last()
-            .map(|s| s.ident == "child")
+            .map(|s| s.ident == "child" || s.ident == "peer")
             .unwrap_or(false)
     })
 }

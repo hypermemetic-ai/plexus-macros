@@ -3,13 +3,13 @@
     "children": [
       {
         "description": "Two shapes under one title",
-        "hash": "afe210f27a39f4d3",
+        "hash": "a66c6acf83549839",
         "namespace": "clash"
       }
     ],
-    "children_hash": "9eea167a0c6452af",
+    "children_hash": "9eada6ebc2796be3",
     "description": "Central routing and introspection",
-    "hash": "64ae4f64ffa8d2b4",
+    "hash": "ec18e7b3a51f27e6",
     "methods": [
       {
         "bidirectional": false,
@@ -782,7 +782,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "clashsvc.schema",
-        "hash": "15413be74d1eff37",
+        "hash": "57435bb758a06b57",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -1250,6 +1250,49 @@
                 }
               ]
             },
+            "Interface": {
+              "description": "A peer's shape, named and content-addressed: what `<ns>.ir` answers for\nit, its hash, and each method's own hash. Two interfaces with one hash\nserve one shape (descriptions, grants and the name aside).",
+              "properties": {
+                "hash": {
+                  "description": "The shape's hash: of every method's own hash, by name.",
+                  "type": "string"
+                },
+                "ir": {
+                  "description": "The IR of the shape (IR 3.0, as `<ns>.ir` writes it).",
+                  "type": [
+                    "null",
+                    "boolean",
+                    "number",
+                    "string",
+                    "array",
+                    "object"
+                  ]
+                },
+                "methods": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "default": {},
+                  "description": "Each method's own hash, by name ([`Interface::method_hash`]).",
+                  "type": "object"
+                },
+                "name": {
+                  "description": "The interface's name: a contract's namespace (`\"forge\"`), or the\npeer's own.",
+                  "type": "string"
+                },
+                "schema": {
+                  "$ref": "#/$defs/PluginSchema",
+                  "description": "The schema the interface was read from: what a gate indexes for a\ntyped slot (its methods' grants, targets and roles)."
+                }
+              },
+              "required": [
+                "name",
+                "hash",
+                "ir",
+                "schema"
+              ],
+              "type": "object"
+            },
             "MethodExample": {
               "description": "SYNAPSE-13: one worked call of a method — the params it sends and a note\nsaying what it does (`#[plexus_macros::method(example(note = \"…\", params\n= r#\"{…}\"#))]`).",
               "properties": {
@@ -1282,7 +1325,7 @@
               "type": "string"
             },
             "MethodRole": {
-              "description": "Describes how a method participates in the activation graph.\n\nEvery method on a plugin is exactly one of three kinds:\n\n- `Rpc` — a regular RPC endpoint (the default).\n- `StaticChild` — the method returns a child activation by a static name\n  (no lookup argument). Used by `#[child]`-annotated methods on hubs.\n- `DynamicChild { .. }` — the method gates a dynamic child keyed by its\n  argument. `list_method` optionally names a sibling method that enumerates\n  available keys, and `search_method` optionally names a sibling method\n  that searches keys.\n\nThis tag is consumed by downstream tooling (synapse, synapse-cc,\nintrospection clients) to reconstruct the child graph without a separate\nside-table. Today's macros emit `MethodRole::Rpc` for every method; IR-3\npopulates child roles from `#[child]` annotations.\n\n# Wire back-compat\n\nAdded in IR-2. Serde defaults to `Rpc` for pre-IR schemas.\n`#[non_exhaustive]` reserves space for future variants without breaking\ndownstream match arms.",
+              "description": "Describes how a method participates in the activation graph: `rpc`,\n`static_child` (a child by its own name; `peer` set for a slot of peers,\nreached as `<slot>.<name>`, `interface` the slot's type), or\n`dynamic_child` (a child found by name at call time; `child` its slot's\ntype).",
               "oneOf": [
                 {
                   "description": "Method is an RPC endpoint (the default for ordinary methods).",
@@ -1298,11 +1341,40 @@
                   "type": "object"
                 },
                 {
-                  "description": "Method returns a child activation by static name (no lookup arg).",
+                  "description": "Method returns a child activation by static name (no lookup arg) —\nor, marked `peer`, a slot of peers by name.",
                   "properties": {
+                    "interface": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/Interface"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "NEST-7: a typed peer slot's interface."
+                    },
                     "kind": {
                       "const": "static_child",
                       "type": "string"
+                    },
+                    "list_method": {
+                      "description": "NEST-7: a peer slot's sibling method that lists its names.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "peer": {
+                      "description": "NEST-7: the child is a slot of peers (`#[plexus_macros::peer]`).",
+                      "type": "boolean"
+                    },
+                    "search_method": {
+                      "description": "NEST-7: a peer slot's sibling method that searches its names.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -1322,7 +1394,7 @@
                           "type": "null"
                         }
                       ],
-                      "description": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`)."
+                      "description": "NEST-5: the slot's type, for a typed dynamic child."
                     },
                     "kind": {
                       "const": "dynamic_child",
@@ -1792,12 +1864,12 @@
       }
     ],
     "namespace": "clashsvc",
-    "self_hash": "470e085a8876ba16",
+    "self_hash": "377983c65f471a4c",
     "version": "1.0.0"
   },
   "clash": {
     "description": "Two shapes under one title",
-    "hash": "afe210f27a39f4d3",
+    "hash": "a66c6acf83549839",
     "methods": [
       {
         "bidirectional": false,
@@ -1864,7 +1936,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "clash.schema",
-        "hash": "8e39d285ef57550e",
+        "hash": "21aa0252aa9bcf73",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -2332,6 +2404,49 @@
                 }
               ]
             },
+            "Interface": {
+              "description": "A peer's shape, named and content-addressed: what `<ns>.ir` answers for\nit, its hash, and each method's own hash. Two interfaces with one hash\nserve one shape (descriptions, grants and the name aside).",
+              "properties": {
+                "hash": {
+                  "description": "The shape's hash: of every method's own hash, by name.",
+                  "type": "string"
+                },
+                "ir": {
+                  "description": "The IR of the shape (IR 3.0, as `<ns>.ir` writes it).",
+                  "type": [
+                    "null",
+                    "boolean",
+                    "number",
+                    "string",
+                    "array",
+                    "object"
+                  ]
+                },
+                "methods": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "default": {},
+                  "description": "Each method's own hash, by name ([`Interface::method_hash`]).",
+                  "type": "object"
+                },
+                "name": {
+                  "description": "The interface's name: a contract's namespace (`\"forge\"`), or the\npeer's own.",
+                  "type": "string"
+                },
+                "schema": {
+                  "$ref": "#/$defs/PluginSchema",
+                  "description": "The schema the interface was read from: what a gate indexes for a\ntyped slot (its methods' grants, targets and roles)."
+                }
+              },
+              "required": [
+                "name",
+                "hash",
+                "ir",
+                "schema"
+              ],
+              "type": "object"
+            },
             "MethodExample": {
               "description": "SYNAPSE-13: one worked call of a method — the params it sends and a note\nsaying what it does (`#[plexus_macros::method(example(note = \"…\", params\n= r#\"{…}\"#))]`).",
               "properties": {
@@ -2364,7 +2479,7 @@
               "type": "string"
             },
             "MethodRole": {
-              "description": "Describes how a method participates in the activation graph.\n\nEvery method on a plugin is exactly one of three kinds:\n\n- `Rpc` — a regular RPC endpoint (the default).\n- `StaticChild` — the method returns a child activation by a static name\n  (no lookup argument). Used by `#[child]`-annotated methods on hubs.\n- `DynamicChild { .. }` — the method gates a dynamic child keyed by its\n  argument. `list_method` optionally names a sibling method that enumerates\n  available keys, and `search_method` optionally names a sibling method\n  that searches keys.\n\nThis tag is consumed by downstream tooling (synapse, synapse-cc,\nintrospection clients) to reconstruct the child graph without a separate\nside-table. Today's macros emit `MethodRole::Rpc` for every method; IR-3\npopulates child roles from `#[child]` annotations.\n\n# Wire back-compat\n\nAdded in IR-2. Serde defaults to `Rpc` for pre-IR schemas.\n`#[non_exhaustive]` reserves space for future variants without breaking\ndownstream match arms.",
+              "description": "Describes how a method participates in the activation graph: `rpc`,\n`static_child` (a child by its own name; `peer` set for a slot of peers,\nreached as `<slot>.<name>`, `interface` the slot's type), or\n`dynamic_child` (a child found by name at call time; `child` its slot's\ntype).",
               "oneOf": [
                 {
                   "description": "Method is an RPC endpoint (the default for ordinary methods).",
@@ -2380,11 +2495,40 @@
                   "type": "object"
                 },
                 {
-                  "description": "Method returns a child activation by static name (no lookup arg).",
+                  "description": "Method returns a child activation by static name (no lookup arg) —\nor, marked `peer`, a slot of peers by name.",
                   "properties": {
+                    "interface": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/Interface"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "NEST-7: a typed peer slot's interface."
+                    },
                     "kind": {
                       "const": "static_child",
                       "type": "string"
+                    },
+                    "list_method": {
+                      "description": "NEST-7: a peer slot's sibling method that lists its names.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "peer": {
+                      "description": "NEST-7: the child is a slot of peers (`#[plexus_macros::peer]`).",
+                      "type": "boolean"
+                    },
+                    "search_method": {
+                      "description": "NEST-7: a peer slot's sibling method that searches its names.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
@@ -2404,7 +2548,7 @@
                           "type": "null"
                         }
                       ],
-                      "description": "NEST-5: the slot's type — the schema every instance in the slot\nserves (`fn item(&self, name: &str) -> Option<Item>`: `Item`'s).\nAbsent for an untyped slot (`#[child(opaque)]`, a hand-written\nrouter), which the gate admits whole (`tickets.{item}`)."
+                      "description": "NEST-5: the slot's type, for a typed dynamic child."
                     },
                     "kind": {
                       "const": "dynamic_child",
@@ -2874,7 +3018,7 @@
       }
     ],
     "namespace": "clash",
-    "self_hash": "05cbc8ccb3a41f0c",
+    "self_hash": "770651dab0cc8cf8",
     "version": "1.0.0"
   }
 }
