@@ -2,13 +2,13 @@
   "namespace": "conformance",
   "version": "0.7.0",
   "description": "Conformance fixture: one method per signature form",
-  "self_hash": "80625ec62825115d",
-  "hash": "6366d200573f4db0",
+  "self_hash": "b69a219b027b4507",
+  "hash": "65a9cc374cca00f9",
   "methods": [
     {
       "name": "ping",
       "description": "Always answers pong.",
-      "hash": "5607c05985784c5b",
+      "hash": "1b842b4ff1aa44e8",
       "returns": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Pong",
@@ -24,7 +24,6 @@
         ]
       },
       "cardinality": "one",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -34,7 +33,7 @@
     {
       "name": "lookup",
       "description": "The thing with this id; the id \"missing\" is not found.",
-      "hash": "7e88885848017f26",
+      "hash": "0113ac64cdfc484c",
       "params": {
         "type": "object",
         "properties": {
@@ -73,12 +72,12 @@
           {
             "type": "object",
             "properties": {
+              "id": {
+                "type": "string"
+              },
               "type": {
                 "type": "string",
                 "const": "not_found"
-              },
-              "id": {
-                "type": "string"
               }
             },
             "required": [
@@ -89,7 +88,6 @@
         ]
       },
       "cardinality": "one",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -99,7 +97,7 @@
     {
       "name": "count",
       "description": "Ticks from 1 up to `to`.",
-      "hash": "c2205a95212b201e",
+      "hash": "4806f9d647b08a63",
       "params": {
         "type": "object",
         "properties": {
@@ -131,7 +129,6 @@
         ]
       },
       "cardinality": "many",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -141,7 +138,7 @@
     {
       "name": "scan",
       "description": "The rows whose key starts with `prefix`, in key order.",
-      "hash": "7c771077f75f3fb1",
+      "hash": "b1172eb1e00db543",
       "params": {
         "type": "object",
         "properties": {
@@ -176,12 +173,12 @@
           {
             "type": "object",
             "properties": {
+              "key": {
+                "type": "string"
+              },
               "type": {
                 "type": "string",
                 "const": "unreadable"
-              },
-              "key": {
-                "type": "string"
               }
             },
             "required": [
@@ -192,7 +189,6 @@
         ]
       },
       "cardinality": "many",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -202,7 +198,7 @@
     {
       "name": "load",
       "description": "Loads `n` batches, reporting each, then says how many items it loaded.",
-      "hash": "8dc2a70c4db3e43c",
+      "hash": "17702b5f53937aef",
       "params": {
         "type": "object",
         "properties": {
@@ -241,19 +237,19 @@
           {
             "type": "object",
             "properties": {
-              "type": {
-                "type": "string",
-                "const": "too_many"
+              "max": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
               },
               "n": {
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
               },
-              "max": {
-                "type": "integer",
-                "format": "uint32",
-                "minimum": 0
+              "type": {
+                "type": "string",
+                "const": "too_many"
               }
             },
             "required": [
@@ -272,10 +268,6 @@
           {
             "type": "object",
             "properties": {
-              "type": {
-                "type": "string",
-                "const": "batch"
-              },
               "done": {
                 "type": "integer",
                 "format": "uint32",
@@ -285,6 +277,10 @@
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "const": "batch"
               }
             },
             "required": [
@@ -296,7 +292,6 @@
         ]
       },
       "cardinality": "many",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -306,7 +301,7 @@
     {
       "name": "warm",
       "description": "Warms the cache, noting its progress, then says how many entries it holds.",
-      "hash": "be36cb7d2d5e634b",
+      "hash": "db7b905d5c90830f",
       "returns": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Warmed",
@@ -347,7 +342,6 @@
         ]
       },
       "cardinality": "many",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -357,7 +351,7 @@
     {
       "name": "schema",
       "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
-      "hash": "3eab65ba52cb0e82",
+      "hash": "93bbec09bbedf2aa",
       "params": {
         "type": "object",
         "properties": {
@@ -385,339 +379,111 @@
           }
         ],
         "$defs": {
-          "PluginSchema": {
-            "description": "A plugin's schema with methods and child summaries.\n\nChildren are represented as summaries (namespace, description, hash) rather\nthan full recursive schemas. This enables lazy traversal - clients can fetch\nchild schemas individually via `{namespace}.schema`.\n\n- Leaf plugins have `children = None`\n- Hub plugins have `children = Some([ChildSummary, ...])`",
-            "type": "object",
-            "properties": {
-              "namespace": {
-                "description": "The plugin's namespace (e.g., \"echo\", \"plexus\")",
-                "type": "string"
-              },
-              "version": {
-                "description": "The plugin's version (e.g., \"1.0.0\")",
-                "type": "string"
-              },
-              "description": {
-                "description": "Short description of the plugin (max 15 words)",
-                "type": "string"
-              },
-              "long_description": {
-                "description": "Detailed description of the plugin (optional)",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "self_hash": {
-                "description": "Hash of ONLY this plugin's methods (ignores children): of each\nmethod's `hash`, so it changes whenever any method's schema changes",
-                "type": "string"
-              },
-              "children_hash": {
-                "description": "Hash of ONLY child plugin hashes (None for leaf plugins)\nChanges when any child's hash changes (recursively)",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "hash": {
-                "description": "Composite hash = hash(self_hash + children_hash)\nUse this if you want a single hash for the entire subtree",
-                "type": "string"
-              },
-              "methods": {
-                "description": "Methods exposed by this plugin",
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/MethodSchema"
-                }
-              },
-              "children": {
-                "description": "Child plugin summaries (None = leaf plugin, Some = hub plugin)\n\n# Deprecated (IR-4)\n\nThis side-table is deterministically derived from the method list's\n`MethodRole` tags (one `ChildSummary` per non-`Rpc` method). It stays\non the wire for back-compat during the 0.5 transition window and is\nslated for removal in 0.6.\n\nConsumers reading child metadata should switch to iterating\n`methods` and filtering by `role != MethodRole::Rpc`. The name field\non each `MethodSchema` is the child's namespace.",
-                "type": [
-                  "array",
-                  "null"
-                ],
-                "items": {
-                  "$ref": "#/$defs/ChildSummary"
-                },
-                "deprecated": true
-              },
-              "request": {
-                "description": "JSON Schema for the HTTP request type this activation extracts from incoming connections.\n\nPresent when the activation declares `request = MyRequest` in `#[plexus::activation(...)]`.\nThe schema includes `x-plexus-source` extension fields on each property describing\nwhere each field is sourced from (cookie, header, query param, peer address, etc.).\n\nClients can use this to understand what request data the activation expects and\nto generate appropriate authentication/context documentation.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "deprecation": {
-                "description": "If set, this whole activation is deprecated.\n\nAdded in IR-5. Defaults to `None` via `#[serde(default)]` so pre-IR\nschemas deserialize cleanly.\n\nPopulated by the `#[deprecated(...)]` attribute on the `impl\nActivation for Foo` block (IR-5).",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/DeprecationInfo"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "roles": {
-                "description": "AUTH-3: this activation's default roles — role name → the grants it\nlists (`<activation>.<method>`, role inclusion already flattened), as\ndeclared by `#[plexus_macros::activation(roles(...))]`. `admin` is\nbuilt in and never listed. Empty (and absent on the wire) when the\nactivation declares none.",
+          "AttachmentSite": {
+            "description": "Where the credential is attached on the wire when sent on subsequent\ncalls. The framework's client-side replay machinery reads this to build\nthe outbound request.",
+            "oneOf": [
+              {
+                "description": "HTTP header. e.g. `Authorization: <scheme><value>`.",
                 "type": "object",
-                "additionalProperties": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              },
-              "view": {
-                "description": "AUTH-4: which view of a gated hub this schema answers from —\n`anonymous` (only the door: the public methods) or `caller` (the\nmethods the caller holds). Absent from every schema a hub without a\ngate answers, so those stay byte-identical.",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/ViewKind"
+                "properties": {
+                  "name": {
+                    "description": "The header name (e.g. `authorization`).",
+                    "$ref": "#/$defs/HeaderName"
                   },
-                  {
-                    "type": "null"
+                  "site": {
+                    "type": "string",
+                    "const": "header"
                   }
+                },
+                "required": [
+                  "site",
+                  "name"
+                ]
+              },
+              {
+                "description": "HTTP cookie. e.g. `Cookie: plexus_session=<value>`.",
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "description": "The cookie name (e.g. `plexus_session`).",
+                    "$ref": "#/$defs/CookieName"
+                  },
+                  "site": {
+                    "type": "string",
+                    "const": "cookie"
+                  }
+                },
+                "required": [
+                  "site",
+                  "name"
+                ]
+              },
+              {
+                "description": "First-frame WS auth: included as a parameter to a setup method.",
+                "type": "object",
+                "properties": {
+                  "param": {
+                    "description": "The parameter on that setup call where the credential is passed.",
+                    "$ref": "#/$defs/ParamName"
+                  },
+                  "setup_method": {
+                    "description": "The method that the client calls first on the WS connection.",
+                    "$ref": "#/$defs/MethodPath"
+                  },
+                  "site": {
+                    "type": "string",
+                    "const": "first_frame"
+                  }
+                },
+                "required": [
+                  "site",
+                  "setup_method",
+                  "param"
+                ]
+              },
+              {
+                "description": "In-RPC parameter: each call receives this credential as a named\nparameter on the inbound activation. Used for backends without HTTP\ncookie/header support (e.g., pure stdio).",
+                "type": "object",
+                "properties": {
+                  "param": {
+                    "description": "The parameter name on every credential-requiring method.",
+                    "$ref": "#/$defs/ParamName"
+                  },
+                  "site": {
+                    "type": "string",
+                    "const": "in_rpc_param"
+                  }
+                },
+                "required": [
+                  "site",
+                  "param"
                 ]
               }
-            },
-            "required": [
-              "namespace",
-              "version",
-              "description",
-              "self_hash",
-              "hash",
-              "methods"
             ]
           },
-          "MethodSchema": {
-            "description": "Schema for a single method exposed by a plugin",
-            "type": "object",
-            "properties": {
-              "name": {
-                "description": "Method name (e.g., \"echo\", \"check\")",
-                "type": "string"
+          "AuthPosture": {
+            "description": "Declared auth-enforcement posture of the activation a method belongs to.\n\nMirrors `plexus-macros`' RED-6 `auth = \"required\" | \"optional\" | \"mixed\" |\n\"none\"` activation attribute, which until R-1/R-2 (the ROLES+AP merged\nwave) was parsed and compile-enforced but never emitted — invisible to\nevery downstream IR consumer (synapse, hub-codegen, generated clients).\n\nSemantics (compile-time enforcement lives in plexus-macros; this is the\nescaped declaration):\n\n- `Required` — every method is auth-gated (`#[from_auth]`) or explicitly\n  `public`.\n- `Optional` — no enforcement; auth may be asymmetric across methods.\n- `Mixed` — like `Optional`, but the asymmetry is explicitly acknowledged.\n- `None` — affirmatively public activation; no method takes auth.\n\n# Wire back-compat\n\nAdded in R-2 (joint AP-1). Pre-existing readers tolerate the field's\nabsence (`auth_posture` is omitted on the wire when the activation never\ndeclared a posture) and pre-existing IRs that omit the field decode\ncleanly via `#[serde(default)]` on the field site. `#[non_exhaustive]`\nreserves space for future postures without breaking downstream match arms.",
+            "oneOf": [
+              {
+                "description": "Every method is auth-gated or explicitly public.",
+                "type": "string",
+                "const": "required"
               },
-              "description": {
-                "description": "Human-readable description of what this method does",
-                "type": "string"
+              {
+                "description": "No enforcement; auth may be asymmetric across methods.",
+                "type": "string",
+                "const": "optional"
               },
-              "hash": {
-                "description": "Content hash of this method's schema (for cache invalidation): 16\nlowercase hex, SHA-256 of every other field as canonical JSON, so it\nchanges whenever anything a client is generated from changes",
-                "type": "string"
+              {
+                "description": "Asymmetric auth, explicitly acknowledged.",
+                "type": "string",
+                "const": "mixed"
               },
-              "params": {
-                "description": "JSON Schema for the method's parameters (None if no params)",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "returns": {
-                "description": "JSON Schema for the method's item type `T` — what one success carries.\n\nAlways present: every method has a return type. For a `Result<T, E>`\nor `Progress<T, P>` item it is `T` alone — `E` and `P` have fields of\ntheir own. [`MethodSchema::new`] starts it at the empty schema `{}`\n(any value) until [`MethodSchema::with_returns`] sets it.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "error": {
-                "description": "JSON Schema for the method's error type `E` — what the activation says\nwhen it says no (`-> Result<T, E>`). Absent from the wire when the\nmethod is infallible.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "progress": {
-                "description": "JSON Schema for the method's progress type `P` (an item of\n`Progress<T, P>`), carried by progress frames. Absent from the wire\nwhen the method reports no progress.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "cardinality": {
-                "description": "Whether the method yields one item or many — `\"one\"` / `\"many\"`.\n\nRequired on the wire: a schema that does not state its cardinality is\nnot a 0.7 schema, and guessing would reintroduce the disagreement this\nfield exists to end.",
-                "$ref": "#/$defs/Cardinality"
-              },
-              "bidirectional": {
-                "description": "Whether this method supports bidirectional communication\n\nWhen true, the server can send requests to the client during method execution\nand wait for responses (e.g., confirmations, prompts, selections).",
-                "type": "boolean",
-                "default": false
-              },
-              "http_method": {
-                "description": "HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)\n\nThis field is used by the HTTP gateway to determine which HTTP method\nto use when exposing this method as a REST endpoint. Defaults to POST\nfor backward compatibility.\n\n- GET: Idempotent read operations (no side effects)\n- POST: Create operations or non-idempotent actions (default)\n- PUT: Replace/update operations (idempotent)\n- DELETE: Remove operations (idempotent)\n- PATCH: Partial update operations",
-                "$ref": "#/$defs/HttpMethod",
-                "default": "POST"
-              },
-              "request_type": {
-                "description": "JSON Schema for the request type sent from server to client\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nrequests the server may send during method execution.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "response_type": {
-                "description": "JSON Schema for the response type sent from client to server\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nresponses the client should send in reply to server requests.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "role": {
-                "description": "How this method participates in the activation graph.\n\nAdded in IR-2. Defaults to `MethodRole::Rpc` via `#[serde(default)]`\nso pre-IR schemas deserialize cleanly.\n\nPopulated by the `#[plexus::method]` / `#[child]` macros (IR-3).",
-                "$ref": "#/$defs/MethodRole",
-                "default": {
-                  "kind": "rpc"
-                }
-              },
-              "deprecation": {
-                "description": "If set, this method is deprecated.\n\nAdded in IR-2. Defaults to `None` via `#[serde(default)]` so pre-IR\nschemas deserialize cleanly.\n\nPopulated by the `#[deprecated(...)]` attribute on the underlying\nmethod (IR-5).",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/DeprecationInfo"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "params_meta": {
-                "description": "Per-parameter metadata (currently just deprecation).\n\nAdded in IR-5. Defaults to an empty vec via `#[serde(default)]` so\npre-IR schemas deserialize cleanly. Only parameters that carry\nmetadata appear in this list — absence means \"no metadata\" for that\nparameter, not a bug.\n\nPopulated by the `#[deprecated(...)]` attribute on individual\nparameters (IR-5).",
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/ParamSchema"
-                }
-              },
-              "credentials": {
-                "description": "Credential-bearing fields in this method's return type.\n\nOne entry per `#[plexus::credential(...)]`-annotated field on the\nreturn-type struct/enum, in stable declaration order. Empty when\nthe return type contains no credentials.\n\nAdded in `AUTHZ-CRED-CORE-3`. Defaults to an empty vec via\n`#[serde(default)]` so pre-IR schemas deserialize cleanly. The\n`skip_serializing_if = \"Vec::is_empty\"` clause keeps the wire JSON\nshape unchanged for methods with no credential-bearing fields\n(back-compat per the ticket's \"Wire-format back-compat\" table).\n\nPopulated at schema-build time from the `CredentialFieldMarker`\nregistry emitted by `#[derive(Credentials)]` (`AUTHZ-CRED-MACRO-1`).",
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/CredentialFieldDecl"
-                }
-              },
-              "requires_credential": {
-                "description": "What credential this method requires on input (if any).\n\nDerived implicitly from the method's scope tagging and the\ncredential-graph linkage at schema-build time (per\n`AUTHZ-CRED-CORE-3` §\"Implicit derivation\"):\n\n- `scope = \"...\"` → `RequiredCredential::from_method_scope(scope)`.\n- `public` method → `None` (the absence of this field).\n- target of `refresh_via`/`revoke_via` of another credential →\n  `RequiredCredential::from_refresh_revoke_target(kind, scopes)`.\n\nAdded in `AUTHZ-CRED-CORE-3`. Defaults to `None` via\n`#[serde(default)]` so pre-IR schemas deserialize cleanly. The\n`skip_serializing_if = \"Option::is_none\"` clause keeps the wire JSON\nshape unchanged for public methods and methods with no scope-derived\nrequirement.",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/RequiredCredential"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "auth_posture": {
-                "description": "Declared auth posture of the activation this method belongs to.\n\nPopulated by `#[plexus_macros::activation(auth = \"...\")]` (R-1) —\nstamped onto every RPC method of the activation. `None` means the\nactivation never declared a posture (pre-R-1 emissions and\nposture-silent activations are byte-identical on the wire).\n\nAdded in R-2 (joint AP-1). Defaults to `None` via `#[serde(default)]`\nso pre-R IRs decode cleanly; `skip_serializing_if` keeps the wire\nshape unchanged when unset.",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/AuthPosture"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "public": {
-                "description": "Whether this method is explicitly public — exempt from the\ndefault-deny gate (AUTHZ-CORE-2's `#[plexus::method(public)]`).\n\n`public` and a populated `requires_credential` are mutually exclusive\nby construction: the macro rejects `public` + `scope = \"...\"` at\ncompile time.\n\nAdded in R-2. Defaults to `false` via `#[serde(default)]` so pre-R\nIRs decode cleanly; `skip_serializing_if` keeps the wire shape\nunchanged for non-public methods (i.e., every pre-R method).",
-                "type": "boolean"
-              },
-              "grant": {
-                "description": "AUTH-3: the grant this method is — `<activation>.<method>`, inherent\n(AUTH-1: \"every method should be its own grant\"). The macro emits it\nfor every method; `None` only on a hand-built or pre-AUTH schema, and\na gate then takes the method's dotted path.\n\nOptional on the wire (`serde(default)`, skipped when unset) so older\nschemas and clients parse unchanged.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "target": {
-                "description": "AUTH-3: the param that locates what this call acts on\n(`#[plexus_macros::method(target = \"id\")]`). A gate resolves its\nvalue to the scopes it lives in and asks for the grant there; a\nmethod without one is allowed where the grant is held anywhere and\nanswers only from there.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "long_description": {
-                "description": "AUTH-3: the method's `///` doc comment, when it says more than\n`description` (the macro used to drop it whenever `description =\n\"...\"` was given).",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "held_on": {
-                "description": "AUTH-4: in a caller's view of a gated hub, where the caller holds this\nmethod's grant (`[\"MENGER\"]`, `[\"*\"]`), within its session's ceiling.\nAbsent outside a caller's view (and on a public method the caller\nholds nowhere).",
-                "type": [
-                  "array",
-                  "null"
-                ],
-                "items": {
-                  "type": "string"
-                }
-              },
-              "group": {
-                "description": "SYNAPSE-13: the method's group in a listing (`\"read\"`, `\"write\"`, …)\n— one group, like an OpenAPI operation's first tag. Clients list the\nmethods of a group together and alphabetically within it.\n\nOptional on the wire (`serde(default)`, skipped when unset) so older\nschemas and clients parse unchanged.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "answer_by": {
-                "description": "BIDIR-8: who may answer a question this method asks mid-call\n(`#[method(answer_by = \"person\" | \"grant:<g>\")]`; BIDIR-1\n`answerer`). Absent for the default, `caller` — the call's own\nconnection — so a method without the attribute is byte-identical.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "examples": {
-                "description": "SYNAPSE-13: worked calls of this method, each its params object and a\nnote saying what it does — OpenAPI's `examples`. A client renders them\nas command lines (`synapse … --id MENGER-40 --status Coding`).\n\nOptional on the wire (`serde(default)`, skipped when empty).",
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/MethodExample"
-                }
-              },
-              "input": {
-                "description": "SYNAPSE-CC-9: reserved for BIDIR-6 — the JSON Schema of the items a\nclient streams *in* to this method (`Input<T>`). Always `None` until\nBIDIR-6 fills it; absent from the wire while `None`, so a schema\nwithout it is byte-identical to 0.6.1's.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
+              {
+                "description": "Affirmatively public activation; no method takes auth.",
+                "type": "string",
+                "const": "none"
               }
-            },
-            "required": [
-              "name",
-              "description",
-              "hash",
-              "returns",
-              "cardinality"
             ]
           },
           "Cardinality": {
@@ -735,223 +501,32 @@
               }
             ]
           },
-          "HttpMethod": {
-            "description": "HTTP method for REST endpoint routing",
-            "oneOf": [
-              {
-                "description": "GET: Idempotent read operations with no side effects",
-                "type": "string",
-                "const": "GET"
-              },
-              {
-                "description": "POST: Create operations or non-idempotent actions (default)",
-                "type": "string",
-                "const": "POST"
-              },
-              {
-                "description": "PUT: Replace/update operations (idempotent)",
-                "type": "string",
-                "const": "PUT"
-              },
-              {
-                "description": "DELETE: Remove operations (idempotent)",
-                "type": "string",
-                "const": "DELETE"
-              },
-              {
-                "description": "PATCH: Partial update operations",
-                "type": "string",
-                "const": "PATCH"
-              }
-            ]
-          },
-          "MethodRole": {
-            "description": "Describes how a method participates in the activation graph: `rpc`,\n`static_child` (a child by its own name; `peer` set for a slot of peers,\nreached as `<slot>.<name>`, `interface` the slot's type), or\n`dynamic_child` (a child found by name at call time; `child` its slot's\ntype).",
-            "oneOf": [
-              {
-                "description": "Method is an RPC endpoint (the default for ordinary methods).",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "rpc"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "description": "Method returns a child activation by static name (no lookup arg) —\nor, marked `peer`, a slot of peers by name.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "static_child"
-                  },
-                  "peer": {
-                    "description": "NEST-7: the child is a slot of peers (`#[plexus_macros::peer]`).",
-                    "type": "boolean"
-                  },
-                  "list_method": {
-                    "description": "NEST-7: a peer slot's sibling method that lists its names.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "search_method": {
-                    "description": "NEST-7: a peer slot's sibling method that searches its names.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "interface": {
-                    "description": "NEST-7: a typed peer slot's interface.",
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/Interface"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "description": "Method gates a dynamic child keyed by its argument.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "dynamic_child"
-                  },
-                  "list_method": {
-                    "description": "Optional sibling method that lists available keys.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "search_method": {
-                    "description": "Optional sibling method that searches available keys.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "child": {
-                    "description": "NEST-5: the slot's type, for a typed dynamic child.",
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/PluginSchema"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              }
-            ]
-          },
-          "Interface": {
-            "description": "A peer's shape, named and content-addressed: what `<ns>.ir` answers for\nit, its hash, and each method's own hash. Two interfaces with one hash\nserve one shape (descriptions, grants and the name aside).",
+          "ChildSummary": {
+            "description": "Summary of a child plugin",
             "type": "object",
             "properties": {
-              "name": {
-                "description": "The interface's name: a contract's namespace (`\"forge\"`), or the\npeer's own.",
+              "description": {
+                "description": "Human-readable description",
                 "type": "string"
               },
               "hash": {
-                "description": "The shape's hash: of every method's own hash, by name.",
+                "description": "Content hash for cache invalidation",
                 "type": "string"
               },
-              "ir": {
-                "description": "The IR of the shape (IR 3.0, as `<ns>.ir` writes it).",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "methods": {
-                "description": "Each method's own hash, by name ([`Interface::method_hash`]).",
-                "type": "object",
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "default": {}
-              },
-              "schema": {
-                "description": "The schema the interface was read from: what a gate indexes for a\ntyped slot (its methods' grants, targets and roles).",
-                "$ref": "#/$defs/PluginSchema"
+              "namespace": {
+                "description": "The child's namespace",
+                "type": "string"
               }
             },
             "required": [
-              "name",
-              "hash",
-              "ir",
-              "schema"
+              "namespace",
+              "description",
+              "hash"
             ]
           },
-          "DeprecationInfo": {
-            "description": "Structured deprecation metadata attached to a `MethodSchema`.\n\nDownstream consumers (CLI help, docs generators, IDEs) use these fields\nto surface migration guidance to users.\n\n# Example\n\n```\nuse plexus_core::DeprecationInfo;\n\nlet info = DeprecationInfo {\n    since: \"0.5\".into(),\n    removed_in: \"0.6\".into(),\n    message: \"Use `new_method` instead.\".into(),\n};\n```",
-            "type": "object",
-            "properties": {
-              "since": {
-                "description": "The plexus-core version at which deprecation began (e.g., `\"0.5\"`).",
-                "type": "string"
-              },
-              "removed_in": {
-                "description": "The plexus-core version planned for removal (e.g., `\"0.6\"`).\n\nNot binding — serves as a consumer-visible hint.",
-                "type": "string"
-              },
-              "message": {
-                "description": "Human-readable migration guidance.",
-                "type": "string"
-              }
-            },
-            "required": [
-              "since",
-              "removed_in",
-              "message"
-            ]
-          },
-          "ParamSchema": {
-            "description": "Per-parameter metadata for a method's parameters.\n\n`MethodSchema.params` already carries the fine-grained JSON Schema for the\ncombined parameter object. `ParamSchema` carries orthogonal, parameter-\nscoped metadata that doesn't fit on a JSON Schema node — currently just\ndeprecation info (IR-5).\n\nThe `name` field matches the parameter identifier in the method signature\nso consumers can correlate entries against the `params` JSON Schema's\n`properties` map.\n\nAdded in IR-5. Defaults to an empty list on `MethodSchema` so pre-IR\nschemas deserialize cleanly.",
-            "type": "object",
-            "properties": {
-              "name": {
-                "description": "Parameter name, matching the identifier in the method signature.",
-                "type": "string"
-              },
-              "deprecation": {
-                "description": "If set, this parameter is deprecated.\n\nPopulated by `#[deprecated(...)]` (+ optional\n`#[plexus_macros::removed_in(\"...\")]`) on the parameter in the\nmethod signature (IR-5).",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/DeprecationInfo"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "name"
-            ]
+          "CookieName": {
+            "description": "A cookie name (e.g. `\"plexus_session\"`). RFC 6265 token-set validation.\n\nPer AUTHZ-S01-output §1. RFC 6265 defines `cookie-name = token` and `token`\nfrom RFC 7230 §3.2.6: any VCHAR except CTLs, separators, and the\ndelimiters listed in RFC 7230.",
+            "type": "string"
           },
           "CredentialFieldDecl": {
             "description": "One entry per credential-bearing field in a method's return type.\n\nPinned by `AUTHZ-CRED-S01-output.md` §4 and `AUTHZ-CRED-CORE-3` §\"Required\nbehavior\". Projected onto `MethodSchema.credentials` at schema-build time\nfrom the `CredentialFieldMarker` registry the `#[derive(Credentials)]` macro\nemits per credential-bearing type (`AUTHZ-CRED-MACRO-1`).\n\n# Field path semantics (Tier B Q-IR-1)\n\n`field_path` is the JSON-object path to the credential field within the\nmethod's return type. v1 always uses object-field paths (one segment per\nfield name walked); array indices and JSON Pointer syntax are intentionally\nexcluded because credentials always live on object fields in v1, never\ninside array elements.\n\nExample: for a return type\n`struct LoginResult { session: Credential<String> }`, the field path is\n`[\"session\"]`. For a nested case\n`struct LoginResult { auth: AuthBundle }` where `AuthBundle` itself\ndeclares a `#[plexus::credential(..)]` field `token: Credential<String>`,\nthe field path is `[\"auth\", \"token\"]`.\n\n# Variant tagging\n\n`variant_tag` is `Some(tag)` when the method's return type is an enum and\nthe credential lives on a single variant. The tag matches the variant\nidentifier as the macro registry records it (e.g. `\"Issued\"` for the\n`LoginEvent::Issued` variant). `None` means the return type is a struct,\nor the credential appears on every variant of the enum (rare).\n\n# Wire back-compat\n\nAdded in `AUTHZ-CRED-CORE-3`. Pre-existing readers tolerate `credentials:\n[]` (the default on `MethodSchema` when no credentials are declared) and\npre-existing IRs that omit the field altogether decode cleanly via\n`#[serde(default)]` on the field site.",
@@ -964,16 +539,16 @@
                   "type": "string"
                 }
               },
+              "metadata": {
+                "description": "The credential's metadata (kind, attach site, scheme, scopes, expiry,\nrefresh/revoke hints, issuer, sensitivity). Carried verbatim so\nconsumers embed identical storage-and-attach logic to the runtime.",
+                "$ref": "#/$defs/CredentialMetadata"
+              },
               "variant_tag": {
                 "description": "Variant tag when the return type is an enum and the credential lives\non a single variant. `None` for structs.",
                 "type": [
                   "string",
                   "null"
                 ]
-              },
-              "metadata": {
-                "description": "The credential's metadata (kind, attach site, scheme, scopes, expiry,\nrefresh/revoke hints, issuer, sensitivity). Carried verbatim so\nconsumers embed identical storage-and-attach logic to the runtime.",
-                "$ref": "#/$defs/CredentialMetadata"
               }
             },
             "required": [
@@ -981,81 +556,22 @@
               "metadata"
             ]
           },
-          "CredentialMetadata": {
-            "description": "What this credential is and how to attach it on subsequent calls.\n\nEvery metadata field is a typed newtype, never a bare string. The\n[`CredentialMetadata::sensitive`] field is always `true`; it exists on the\nstruct so the metadata is the single source of truth for the redaction\npipeline (AUTHZ-PRIVACY-1).\n\nMetadata is **fixed at mint time**: a `Credential<T>` exposes its metadata\nvia [`Credential::metadata`], but there is no mutable accessor.",
+          "CredentialIssuer": {
+            "description": "Identity of the issuing party: the Origin the credential was issued from\nand the method that issued it. Drives the named-session auto-naming\nalgorithm (AUTHZ-CRED-S01-output §5) and ties the credential to its\nlineage in audit.",
             "type": "object",
             "properties": {
-              "kind": {
-                "description": "What kind of credential this is. Tags storage decisions and drives\nselection.",
-                "$ref": "#/$defs/CredentialKind"
+              "method": {
+                "description": "Method whose return type carries this credential field.",
+                "$ref": "#/$defs/MethodPath"
               },
-              "attach_as": {
-                "description": "Where the credential is attached on the wire when sent on subsequent\ncalls.",
-                "$ref": "#/$defs/AttachmentSite"
-              },
-              "scheme": {
-                "description": "Optional prefix prepended to the value at attach time (e.g.,\n`\"Bearer \"` for `Authorization: Bearer <token>`). Stored in the\nmetadata so the client doesn't have to guess.",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/CredentialScheme"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "scopes": {
-                "description": "Which scopes this credential authorizes. Empty set means \"scope\ndecision is server-side; client doesn't filter.\"",
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/Scope"
-                }
-              },
-              "expires_at": {
-                "description": "Hard expiry of the credential value, if known at issue time. Used\nfor proactive refresh and for dropping stale stored credentials.",
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "format": "date-time"
-              },
-              "refresh_via": {
-                "description": "Optional refresh hint: if this credential expires, call this method\nto obtain a fresh one. The named-session framework handles the swap;\nactivation code is uninvolved.",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/MethodPath"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "revoke_via": {
-                "description": "Optional revocation hint: calling this method invalidates the\ncredential server-side.",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/MethodPath"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "issuer": {
-                "description": "Identity of the issuing party.",
-                "$ref": "#/$defs/CredentialIssuer"
-              },
-              "sensitive": {
-                "description": "Sensitivity marker for the redaction pipeline (AUTHZ-PRIVACY-1).\nAlways `true`; present for type-system uniformity so any code that\nreads the metadata has a single source of truth.",
-                "type": "boolean"
+              "origin": {
+                "description": "Backend Origin that issued this credential.",
+                "$ref": "#/$defs/Origin"
               }
             },
             "required": [
-              "kind",
-              "attach_as",
-              "scopes",
-              "issuer",
-              "sensitive"
+              "origin",
+              "method"
             ]
           },
           "CredentialKind": {
@@ -1176,133 +692,659 @@
             "description": "Opaque kind name for `CredentialKind::Other`. The framework's\ncompatibility logic treats `Other`-kinded credentials as untagged for\nthe purposes of `requires_credential` matching (per Tier B Q-FLOW-2).",
             "type": "string"
           },
-          "AttachmentSite": {
-            "description": "Where the credential is attached on the wire when sent on subsequent\ncalls. The framework's client-side replay machinery reads this to build\nthe outbound request.",
-            "oneOf": [
-              {
-                "description": "HTTP header. e.g. `Authorization: <scheme><value>`.",
-                "type": "object",
-                "properties": {
-                  "site": {
-                    "type": "string",
-                    "const": "header"
-                  },
-                  "name": {
-                    "description": "The header name (e.g. `authorization`).",
-                    "$ref": "#/$defs/HeaderName"
-                  }
-                },
-                "required": [
-                  "site",
-                  "name"
-                ]
+          "CredentialMetadata": {
+            "description": "What this credential is and how to attach it on subsequent calls.\n\nEvery metadata field is a typed newtype, never a bare string. The\n[`CredentialMetadata::sensitive`] field is always `true`; it exists on the\nstruct so the metadata is the single source of truth for the redaction\npipeline (AUTHZ-PRIVACY-1).\n\nMetadata is **fixed at mint time**: a `Credential<T>` exposes its metadata\nvia [`Credential::metadata`], but there is no mutable accessor.",
+            "type": "object",
+            "properties": {
+              "attach_as": {
+                "description": "Where the credential is attached on the wire when sent on subsequent\ncalls.",
+                "$ref": "#/$defs/AttachmentSite"
               },
-              {
-                "description": "HTTP cookie. e.g. `Cookie: plexus_session=<value>`.",
-                "type": "object",
-                "properties": {
-                  "site": {
-                    "type": "string",
-                    "const": "cookie"
-                  },
-                  "name": {
-                    "description": "The cookie name (e.g. `plexus_session`).",
-                    "$ref": "#/$defs/CookieName"
-                  }
-                },
-                "required": [
-                  "site",
-                  "name"
-                ]
+              "expires_at": {
+                "description": "Hard expiry of the credential value, if known at issue time. Used\nfor proactive refresh and for dropping stale stored credentials.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
               },
-              {
-                "description": "First-frame WS auth: included as a parameter to a setup method.",
-                "type": "object",
-                "properties": {
-                  "site": {
-                    "type": "string",
-                    "const": "first_frame"
-                  },
-                  "setup_method": {
-                    "description": "The method that the client calls first on the WS connection.",
+              "issuer": {
+                "description": "Identity of the issuing party.",
+                "$ref": "#/$defs/CredentialIssuer"
+              },
+              "kind": {
+                "description": "What kind of credential this is. Tags storage decisions and drives\nselection.",
+                "$ref": "#/$defs/CredentialKind"
+              },
+              "refresh_via": {
+                "description": "Optional refresh hint: if this credential expires, call this method\nto obtain a fresh one. The named-session framework handles the swap;\nactivation code is uninvolved.",
+                "anyOf": [
+                  {
                     "$ref": "#/$defs/MethodPath"
                   },
-                  "param": {
-                    "description": "The parameter on that setup call where the credential is passed.",
-                    "$ref": "#/$defs/ParamName"
+                  {
+                    "type": "null"
                   }
-                },
-                "required": [
-                  "site",
-                  "setup_method",
-                  "param"
                 ]
               },
-              {
-                "description": "In-RPC parameter: each call receives this credential as a named\nparameter on the inbound activation. Used for backends without HTTP\ncookie/header support (e.g., pure stdio).",
-                "type": "object",
-                "properties": {
-                  "site": {
-                    "type": "string",
-                    "const": "in_rpc_param"
+              "revoke_via": {
+                "description": "Optional revocation hint: calling this method invalidates the\ncredential server-side.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/MethodPath"
                   },
-                  "param": {
-                    "description": "The parameter name on every credential-requiring method.",
-                    "$ref": "#/$defs/ParamName"
+                  {
+                    "type": "null"
                   }
-                },
-                "required": [
-                  "site",
-                  "param"
                 ]
+              },
+              "scheme": {
+                "description": "Optional prefix prepended to the value at attach time (e.g.,\n`\"Bearer \"` for `Authorization: Bearer <token>`). Stored in the\nmetadata so the client doesn't have to guess.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CredentialScheme"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "scopes": {
+                "description": "Which scopes this credential authorizes. Empty set means \"scope\ndecision is server-side; client doesn't filter.\"",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "sensitive": {
+                "description": "Sensitivity marker for the redaction pipeline (AUTHZ-PRIVACY-1).\nAlways `true`; present for type-system uniformity so any code that\nreads the metadata has a single source of truth.",
+                "type": "boolean"
               }
+            },
+            "required": [
+              "kind",
+              "attach_as",
+              "scopes",
+              "issuer",
+              "sensitive"
+            ]
+          },
+          "CredentialScheme": {
+            "description": "Credential attach-time prefix, e.g. `\"Bearer \"` (trailing space\nincluded). Pinned by AUTHZ-CRED-S01-output §2.",
+            "type": "string"
+          },
+          "DeprecationInfo": {
+            "description": "Structured deprecation metadata attached to a `MethodSchema`.\n\nDownstream consumers (CLI help, docs generators, IDEs) use these fields\nto surface migration guidance to users.\n\n# Example\n\n```\nuse plexus_core::DeprecationInfo;\n\nlet info = DeprecationInfo {\n    since: \"0.5\".into(),\n    removed_in: \"0.6\".into(),\n    message: \"Use `new_method` instead.\".into(),\n};\n```",
+            "type": "object",
+            "properties": {
+              "message": {
+                "description": "Human-readable migration guidance.",
+                "type": "string"
+              },
+              "removed_in": {
+                "description": "The plexus-core version planned for removal (e.g., `\"0.6\"`).\n\nNot binding — serves as a consumer-visible hint.",
+                "type": "string"
+              },
+              "since": {
+                "description": "The plexus-core version at which deprecation began (e.g., `\"0.5\"`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "since",
+              "removed_in",
+              "message"
             ]
           },
           "HeaderName": {
             "description": "An HTTP header name (e.g. `\"Authorization\"`).\n\nStored normalized to lowercase so equality matches the case-insensitive\nHTTP convention. RFC 7230 §3.2 token-set validation applied to the input\nbefore normalization. Per AUTHZ-S01-output §1.",
             "type": "string"
           },
-          "CookieName": {
-            "description": "A cookie name (e.g. `\"plexus_session\"`). RFC 6265 token-set validation.\n\nPer AUTHZ-S01-output §1. RFC 6265 defines `cookie-name = token` and `token`\nfrom RFC 7230 §3.2.6: any VCHAR except CTLs, separators, and the\ndelimiters listed in RFC 7230.",
-            "type": "string"
+          "HttpMethod": {
+            "description": "HTTP method for REST endpoint routing",
+            "oneOf": [
+              {
+                "description": "GET: Idempotent read operations with no side effects",
+                "type": "string",
+                "const": "GET"
+              },
+              {
+                "description": "POST: Create operations or non-idempotent actions (default)",
+                "type": "string",
+                "const": "POST"
+              },
+              {
+                "description": "PUT: Replace/update operations (idempotent)",
+                "type": "string",
+                "const": "PUT"
+              },
+              {
+                "description": "DELETE: Remove operations (idempotent)",
+                "type": "string",
+                "const": "DELETE"
+              },
+              {
+                "description": "PATCH: Partial update operations",
+                "type": "string",
+                "const": "PATCH"
+              }
+            ]
+          },
+          "Interface": {
+            "description": "A peer's shape, named and content-addressed: what `<ns>.ir` answers for\nit, its hash, and each method's own hash. Two interfaces with one hash\nserve one shape (descriptions, grants and the name aside).",
+            "type": "object",
+            "properties": {
+              "hash": {
+                "description": "The shape's hash: of every method's own hash, by name.",
+                "type": "string"
+              },
+              "ir": {
+                "description": "The IR of the shape (IR 3.0, as `<ns>.ir` writes it).",
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "methods": {
+                "description": "Each method's own hash, by name ([`Interface::method_hash`]).",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "name": {
+                "description": "The interface's name: a contract's namespace (`\"forge\"`), or the\npeer's own.",
+                "type": "string"
+              },
+              "schema": {
+                "description": "The schema the interface was read from: what a gate indexes for a\ntyped slot (its methods' grants, targets and roles).",
+                "$ref": "#/$defs/PluginSchema"
+              }
+            },
+            "required": [
+              "name",
+              "hash",
+              "ir",
+              "schema"
+            ]
+          },
+          "MethodExample": {
+            "description": "SYNAPSE-13: one worked call of a method — the params it sends and a note\nsaying what it does (`#[plexus_macros::method(example(note = \"…\", params\n= r#\"{…}\"#))]`).",
+            "type": "object",
+            "properties": {
+              "note": {
+                "description": "What the call does, in a line.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "params": {
+                "description": "The params object, as the method takes it.",
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              }
+            },
+            "required": [
+              "params"
+            ]
           },
           "MethodPath": {
             "description": "A dotted method path like `auth.login` or `cone.send_message`.\n\nWire form: bare string. Validation: must match\n`^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`. At least two segments are required\n(the activation namespace plus the method name).\n\nWildcards are NOT allowed — wildcards belong to `Scope` (AUTHZ-CORE-4).\n\nPer AUTHZ-S01-output §1.",
+            "type": "string"
+          },
+          "MethodRole": {
+            "description": "Describes how a method participates in the activation graph: `rpc`,\n`static_child` (a child by its own name; `peer` set for a slot of peers,\nreached as `<slot>.<name>`, `interface` the slot's type), or\n`dynamic_child` (a child found by name at call time; `child` its slot's\ntype).",
+            "oneOf": [
+              {
+                "description": "Method is an RPC endpoint (the default for ordinary methods).",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "rpc"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Method returns a child activation by static name (no lookup arg) —\nor, marked `peer`, a slot of peers by name.",
+                "type": "object",
+                "properties": {
+                  "interface": {
+                    "description": "NEST-7: a typed peer slot's interface.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Interface"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "static_child"
+                  },
+                  "list_method": {
+                    "description": "NEST-7: a peer slot's sibling method that lists its names.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "peer": {
+                    "description": "NEST-7: the child is a slot of peers (`#[plexus_macros::peer]`).",
+                    "type": "boolean"
+                  },
+                  "search_method": {
+                    "description": "NEST-7: a peer slot's sibling method that searches its names.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Method gates a dynamic child keyed by its argument.",
+                "type": "object",
+                "properties": {
+                  "child": {
+                    "description": "NEST-5: the slot's type, for a typed dynamic child.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/PluginSchema"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "dynamic_child"
+                  },
+                  "list_method": {
+                    "description": "Optional sibling method that lists available keys.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "search_method": {
+                    "description": "Optional sibling method that searches available keys.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "MethodSchema": {
+            "description": "Schema for a single method exposed by a plugin",
+            "type": "object",
+            "properties": {
+              "answer_by": {
+                "description": "BIDIR-8: who may answer a question this method asks mid-call\n(`#[method(answer_by = \"person\" | \"grant:<g>\")]`; BIDIR-1\n`answerer`). Absent for the default, `caller` — the call's own\nconnection — so a method without the attribute is byte-identical.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "asks": {
+                "description": "Whether this method may answer a call with a proposal (a\n`needs_input` item saying what it would do) and act when called again\nwith the proposal's token in its `confirm` parameter. Absent when false.",
+                "type": "boolean"
+              },
+              "auth_posture": {
+                "description": "Declared auth posture of the activation this method belongs to.\n\nPopulated by `#[plexus_macros::activation(auth = \"...\")]` (R-1) —\nstamped onto every RPC method of the activation. `None` means the\nactivation never declared a posture (pre-R-1 emissions and\nposture-silent activations are byte-identical on the wire).\n\nAdded in R-2 (joint AP-1). Defaults to `None` via `#[serde(default)]`\nso pre-R IRs decode cleanly; `skip_serializing_if` keeps the wire\nshape unchanged when unset.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/AuthPosture"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "cardinality": {
+                "description": "Whether the method yields one item or many — `\"one\"` / `\"many\"`.\n\nRequired on the wire: a schema that does not state its cardinality is\nnot a 0.7 schema, and guessing would reintroduce the disagreement this\nfield exists to end.",
+                "$ref": "#/$defs/Cardinality"
+              },
+              "credentials": {
+                "description": "Credential-bearing fields in this method's return type.\n\nOne entry per `#[plexus::credential(...)]`-annotated field on the\nreturn-type struct/enum, in stable declaration order. Empty when\nthe return type contains no credentials.\n\nAdded in `AUTHZ-CRED-CORE-3`. Defaults to an empty vec via\n`#[serde(default)]` so pre-IR schemas deserialize cleanly. The\n`skip_serializing_if = \"Vec::is_empty\"` clause keeps the wire JSON\nshape unchanged for methods with no credential-bearing fields\n(back-compat per the ticket's \"Wire-format back-compat\" table).\n\nPopulated at schema-build time from the `CredentialFieldMarker`\nregistry emitted by `#[derive(Credentials)]` (`AUTHZ-CRED-MACRO-1`).",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/CredentialFieldDecl"
+                }
+              },
+              "deprecation": {
+                "description": "If set, this method is deprecated.\n\nAdded in IR-2. Defaults to `None` via `#[serde(default)]` so pre-IR\nschemas deserialize cleanly.\n\nPopulated by the `#[deprecated(...)]` attribute on the underlying\nmethod (IR-5).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DeprecationInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "description": "Human-readable description of what this method does",
+                "type": "string"
+              },
+              "error": {
+                "description": "JSON Schema for the method's error type `E` — what the activation says\nwhen it says no (`-> Result<T, E>`). Absent from the wire when the\nmethod is infallible.",
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "examples": {
+                "description": "SYNAPSE-13: worked calls of this method, each its params object and a\nnote saying what it does — OpenAPI's `examples`. A client renders them\nas command lines (`synapse … --id MENGER-40 --status Coding`).\n\nOptional on the wire (`serde(default)`, skipped when empty).",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/MethodExample"
+                }
+              },
+              "grant": {
+                "description": "AUTH-3: the grant this method is — `<activation>.<method>`, inherent\n(AUTH-1: \"every method should be its own grant\"). The macro emits it\nfor every method; `None` only on a hand-built or pre-AUTH schema, and\na gate then takes the method's dotted path.\n\nOptional on the wire (`serde(default)`, skipped when unset) so older\nschemas and clients parse unchanged.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "group": {
+                "description": "SYNAPSE-13: the method's group in a listing (`\"read\"`, `\"write\"`, …)\n— one group, like an OpenAPI operation's first tag. Clients list the\nmethods of a group together and alphabetically within it.\n\nOptional on the wire (`serde(default)`, skipped when unset) so older\nschemas and clients parse unchanged.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hash": {
+                "description": "Content hash of this method's schema (for cache invalidation): 16\nlowercase hex, SHA-256 of every other field as canonical JSON, so it\nchanges whenever anything a client is generated from changes",
+                "type": "string"
+              },
+              "held_on": {
+                "description": "AUTH-4: in a caller's view of a gated hub, where the caller holds this\nmethod's grant (`[\"MENGER\"]`, `[\"*\"]`), within its session's ceiling.\nAbsent outside a caller's view (and on a public method the caller\nholds nowhere).",
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "http_method": {
+                "description": "HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)\n\nThis field is used by the HTTP gateway to determine which HTTP method\nto use when exposing this method as a REST endpoint. Defaults to POST\nfor backward compatibility.\n\n- GET: Idempotent read operations (no side effects)\n- POST: Create operations or non-idempotent actions (default)\n- PUT: Replace/update operations (idempotent)\n- DELETE: Remove operations (idempotent)\n- PATCH: Partial update operations",
+                "$ref": "#/$defs/HttpMethod",
+                "default": "POST"
+              },
+              "input": {
+                "description": "SYNAPSE-CC-9: reserved for BIDIR-6 — the JSON Schema of the items a\nclient streams *in* to this method (`Input<T>`). Always `None` until\nBIDIR-6 fills it; absent from the wire while `None`, so a schema\nwithout it is byte-identical to 0.6.1's.",
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "long_description": {
+                "description": "AUTH-3: the method's `///` doc comment, when it says more than\n`description` (the macro used to drop it whenever `description =\n\"...\"` was given).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "Method name (e.g., \"echo\", \"check\")",
+                "type": "string"
+              },
+              "params": {
+                "description": "JSON Schema for the method's parameters (None if no params)",
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "params_meta": {
+                "description": "Per-parameter metadata (currently just deprecation).\n\nAdded in IR-5. Defaults to an empty vec via `#[serde(default)]` so\npre-IR schemas deserialize cleanly. Only parameters that carry\nmetadata appear in this list — absence means \"no metadata\" for that\nparameter, not a bug.\n\nPopulated by the `#[deprecated(...)]` attribute on individual\nparameters (IR-5).",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ParamSchema"
+                }
+              },
+              "progress": {
+                "description": "JSON Schema for the method's progress type `P` (an item of\n`Progress<T, P>`), carried by progress frames. Absent from the wire\nwhen the method reports no progress.",
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "public": {
+                "description": "Whether this method is explicitly public — exempt from the\ndefault-deny gate (AUTHZ-CORE-2's `#[plexus::method(public)]`).\n\n`public` and a populated `requires_credential` are mutually exclusive\nby construction: the macro rejects `public` + `scope = \"...\"` at\ncompile time.\n\nAdded in R-2. Defaults to `false` via `#[serde(default)]` so pre-R\nIRs decode cleanly; `skip_serializing_if` keeps the wire shape\nunchanged for non-public methods (i.e., every pre-R method).",
+                "type": "boolean"
+              },
+              "requires_credential": {
+                "description": "What credential this method requires on input (if any).\n\nDerived implicitly from the method's scope tagging and the\ncredential-graph linkage at schema-build time (per\n`AUTHZ-CRED-CORE-3` §\"Implicit derivation\"):\n\n- `scope = \"...\"` → `RequiredCredential::from_method_scope(scope)`.\n- `public` method → `None` (the absence of this field).\n- target of `refresh_via`/`revoke_via` of another credential →\n  `RequiredCredential::from_refresh_revoke_target(kind, scopes)`.\n\nAdded in `AUTHZ-CRED-CORE-3`. Defaults to `None` via\n`#[serde(default)]` so pre-IR schemas deserialize cleanly. The\n`skip_serializing_if = \"Option::is_none\"` clause keeps the wire JSON\nshape unchanged for public methods and methods with no scope-derived\nrequirement.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RequiredCredential"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "returns": {
+                "description": "JSON Schema for the method's item type `T` — what one success carries.\n\nAlways present: every method has a return type. For a `Result<T, E>`\nor `Progress<T, P>` item it is `T` alone — `E` and `P` have fields of\ntheir own. [`MethodSchema::new`] starts it at the empty schema `{}`\n(any value) until [`MethodSchema::with_returns`] sets it.",
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "role": {
+                "description": "How this method participates in the activation graph.\n\nAdded in IR-2. Defaults to `MethodRole::Rpc` via `#[serde(default)]`\nso pre-IR schemas deserialize cleanly.\n\nPopulated by the `#[plexus::method]` / `#[child]` macros (IR-3).",
+                "$ref": "#/$defs/MethodRole",
+                "default": {
+                  "kind": "rpc"
+                }
+              },
+              "target": {
+                "description": "AUTH-3: the param that locates what this call acts on\n(`#[plexus_macros::method(target = \"id\")]`). A gate resolves its\nvalue to the scopes it lives in and asks for the grant there; a\nmethod without one is allowed where the grant is held anywhere and\nanswers only from there.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "description",
+              "hash",
+              "returns",
+              "cardinality"
+            ]
+          },
+          "Origin": {
+            "description": "Backend Origin identifier (typically a URL like `ws://localhost:4444`).\nLocal stub for the canonical `Origin` newtype pinned by\nCLIENTS-S01-output §1. NOTE: the workspace also has an unrelated\n`plexus_core::types::Origin` (plugin-id + method, not URL-shaped); the\nAUTHZ-CRED design uses the URL-shaped Origin from CLIENTS-S01.",
             "type": "string"
           },
           "ParamName": {
             "description": "Parameter name for in-RPC-parameter and first-frame attachment sites.",
             "type": "string"
           },
-          "CredentialScheme": {
-            "description": "Credential attach-time prefix, e.g. `\"Bearer \"` (trailing space\nincluded). Pinned by AUTHZ-CRED-S01-output §2.",
-            "type": "string"
-          },
-          "Scope": {
-            "description": "Atomic capability identifier, e.g. `cone.send_message`. Canonical\n`Scope` newtype pinned by AUTHZ-S01-output §1. The grammar-validated\nconstructor (`Scope::try_new`), wildcard predicate (`is_wildcard`),\nand segment-bounded matching (`Scope::matches`) live in\n`crate::scope_registry` (AUTHZ-CORE-4). The macro-generated\n`Scope::new` below stays unvalidated for wire-decoded values;\nregistry construction goes through `try_new`.",
-            "type": "string"
-          },
-          "CredentialIssuer": {
-            "description": "Identity of the issuing party: the Origin the credential was issued from\nand the method that issued it. Drives the named-session auto-naming\nalgorithm (AUTHZ-CRED-S01-output §5) and ties the credential to its\nlineage in audit.",
+          "ParamSchema": {
+            "description": "Per-parameter metadata for a method's parameters.\n\n`MethodSchema.params` already carries the fine-grained JSON Schema for the\ncombined parameter object. `ParamSchema` carries orthogonal, parameter-\nscoped metadata that doesn't fit on a JSON Schema node — currently just\ndeprecation info (IR-5).\n\nThe `name` field matches the parameter identifier in the method signature\nso consumers can correlate entries against the `params` JSON Schema's\n`properties` map.\n\nAdded in IR-5. Defaults to an empty list on `MethodSchema` so pre-IR\nschemas deserialize cleanly.",
             "type": "object",
             "properties": {
-              "origin": {
-                "description": "Backend Origin that issued this credential.",
-                "$ref": "#/$defs/Origin"
+              "deprecation": {
+                "description": "If set, this parameter is deprecated.\n\nPopulated by `#[deprecated(...)]` (+ optional\n`#[plexus_macros::removed_in(\"...\")]`) on the parameter in the\nmethod signature (IR-5).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DeprecationInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
-              "method": {
-                "description": "Method whose return type carries this credential field.",
-                "$ref": "#/$defs/MethodPath"
+              "name": {
+                "description": "Parameter name, matching the identifier in the method signature.",
+                "type": "string"
               }
             },
             "required": [
-              "origin",
-              "method"
+              "name"
             ]
           },
-          "Origin": {
-            "description": "Backend Origin identifier (typically a URL like `ws://localhost:4444`).\nLocal stub for the canonical `Origin` newtype pinned by\nCLIENTS-S01-output §1. NOTE: the workspace also has an unrelated\n`plexus_core::types::Origin` (plugin-id + method, not URL-shaped); the\nAUTHZ-CRED design uses the URL-shaped Origin from CLIENTS-S01.",
-            "type": "string"
+          "PluginSchema": {
+            "description": "A plugin's schema with methods and child summaries.\n\nChildren are represented as summaries (namespace, description, hash) rather\nthan full recursive schemas. This enables lazy traversal - clients can fetch\nchild schemas individually via `{namespace}.schema`.\n\n- Leaf plugins have `children = None`\n- Hub plugins have `children = Some([ChildSummary, ...])`",
+            "type": "object",
+            "properties": {
+              "children": {
+                "description": "Child plugin summaries (None = leaf plugin, Some = hub plugin)\n\n# Deprecated (IR-4)\n\nThis side-table is deterministically derived from the method list's\n`MethodRole` tags (one `ChildSummary` per non-`Rpc` method). It stays\non the wire for back-compat during the 0.5 transition window and is\nslated for removal in 0.6.\n\nConsumers reading child metadata should switch to iterating\n`methods` and filtering by `role != MethodRole::Rpc`. The name field\non each `MethodSchema` is the child's namespace.",
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "deprecated": true,
+                "items": {
+                  "$ref": "#/$defs/ChildSummary"
+                }
+              },
+              "children_hash": {
+                "description": "Hash of ONLY child plugin hashes (None for leaf plugins)\nChanges when any child's hash changes (recursively)",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "deprecation": {
+                "description": "If set, this whole activation is deprecated.\n\nAdded in IR-5. Defaults to `None` via `#[serde(default)]` so pre-IR\nschemas deserialize cleanly.\n\nPopulated by the `#[deprecated(...)]` attribute on the `impl\nActivation for Foo` block (IR-5).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/DeprecationInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "description": {
+                "description": "Short description of the plugin (max 15 words)",
+                "type": "string"
+              },
+              "hash": {
+                "description": "Composite hash = hash(self_hash + children_hash)\nUse this if you want a single hash for the entire subtree",
+                "type": "string"
+              },
+              "long_description": {
+                "description": "Detailed description of the plugin (optional)",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "methods": {
+                "description": "Methods exposed by this plugin",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/MethodSchema"
+                }
+              },
+              "namespace": {
+                "description": "The plugin's namespace (e.g., \"echo\", \"plexus\")",
+                "type": "string"
+              },
+              "request": {
+                "description": "JSON Schema for the HTTP request type this activation extracts from incoming connections.\n\nPresent when the activation declares `request = MyRequest` in `#[plexus::activation(...)]`.\nThe schema includes `x-plexus-source` extension fields on each property describing\nwhere each field is sourced from (cookie, header, query param, peer address, etc.).\n\nClients can use this to understand what request data the activation expects and\nto generate appropriate authentication/context documentation.",
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "roles": {
+                "description": "AUTH-3: this activation's default roles — role name → the grants it\nlists (`<activation>.<method>`, role inclusion already flattened), as\ndeclared by `#[plexus_macros::activation(roles(...))]`. `admin` is\nbuilt in and never listed. Empty (and absent on the wire) when the\nactivation declares none.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "self_hash": {
+                "description": "Hash of ONLY this plugin's methods (ignores children): of each\nmethod's `hash`, so it changes whenever any method's schema changes",
+                "type": "string"
+              },
+              "version": {
+                "description": "The plugin's version (e.g., \"1.0.0\")",
+                "type": "string"
+              },
+              "view": {
+                "description": "AUTH-4: which view of a gated hub this schema answers from —\n`anonymous` (only the door: the public methods) or `caller` (the\nmethods the caller holds). Absent from every schema a hub without a\ngate answers, so those stay byte-identical.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ViewKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "namespace",
+              "version",
+              "description",
+              "self_hash",
+              "hash",
+              "methods"
+            ]
           },
           "RequiredCredential": {
             "description": "What a method requires on input — the implicit-derivation projection of\nscope tagging and credential-graph linkage onto a per-method filter.\n\nPinned by `AUTHZ-CRED-S01-output.md` §4 (Q-SELECT-1 resolution: implicit\nderivation from scope tagging plus refresh/revoke linkage) and\n`AUTHZ-CRED-CORE-3` §\"Implicit derivation\". This ticket explicitly does\nNOT add a `#[plexus::method(requires_credential = { .. })]` attribute\nsurface — the proposal from `AUTHZ-CRED-S01-output` §10 is superseded by\nthe implicit-derivation approach pinned here.\n\n# Matching semantics (consumer-side)\n\nA candidate credential matches this `RequiredCredential` iff:\n1. `kind`: if `Some(k)`, the candidate's `CredentialMetadata.kind`\n   matches `k` (or the kind-subsumption table per `AUTHZ-CRED-CORE-1`\n   accepts the substitution; e.g. `OauthAccess <: Bearer`). If `None`,\n   any kind whose scope set matches is acceptable.\n2. `scopes`: each scope in this set must be wildcard-matched by the\n   candidate's `CredentialMetadata.scopes`. The wildcard rules belong to\n   the `Scope` type itself.\n3. `site_hint`: when populated, prefers the candidate whose\n   `CredentialMetadata.attach_as` equals the hint. Advisory only — a\n   candidate without the hint is not rejected.\n\n# Wire back-compat\n\nAdded in `AUTHZ-CRED-CORE-3`. Pre-existing readers tolerate\n`requires_credential: null` (omitted on the wire when `None`) and\npre-existing IRs that omit the field altogether decode cleanly via\n`#[serde(default)]` on the field site.",
@@ -1339,80 +1381,9 @@
               }
             }
           },
-          "AuthPosture": {
-            "description": "Declared auth-enforcement posture of the activation a method belongs to.\n\nMirrors `plexus-macros`' RED-6 `auth = \"required\" | \"optional\" | \"mixed\" |\n\"none\"` activation attribute, which until R-1/R-2 (the ROLES+AP merged\nwave) was parsed and compile-enforced but never emitted — invisible to\nevery downstream IR consumer (synapse, hub-codegen, generated clients).\n\nSemantics (compile-time enforcement lives in plexus-macros; this is the\nescaped declaration):\n\n- `Required` — every method is auth-gated (`#[from_auth]`) or explicitly\n  `public`.\n- `Optional` — no enforcement; auth may be asymmetric across methods.\n- `Mixed` — like `Optional`, but the asymmetry is explicitly acknowledged.\n- `None` — affirmatively public activation; no method takes auth.\n\n# Wire back-compat\n\nAdded in R-2 (joint AP-1). Pre-existing readers tolerate the field's\nabsence (`auth_posture` is omitted on the wire when the activation never\ndeclared a posture) and pre-existing IRs that omit the field decode\ncleanly via `#[serde(default)]` on the field site. `#[non_exhaustive]`\nreserves space for future postures without breaking downstream match arms.",
-            "oneOf": [
-              {
-                "description": "Every method is auth-gated or explicitly public.",
-                "type": "string",
-                "const": "required"
-              },
-              {
-                "description": "No enforcement; auth may be asymmetric across methods.",
-                "type": "string",
-                "const": "optional"
-              },
-              {
-                "description": "Asymmetric auth, explicitly acknowledged.",
-                "type": "string",
-                "const": "mixed"
-              },
-              {
-                "description": "Affirmatively public activation; no method takes auth.",
-                "type": "string",
-                "const": "none"
-              }
-            ]
-          },
-          "MethodExample": {
-            "description": "SYNAPSE-13: one worked call of a method — the params it sends and a note\nsaying what it does (`#[plexus_macros::method(example(note = \"…\", params\n= r#\"{…}\"#))]`).",
-            "type": "object",
-            "properties": {
-              "params": {
-                "description": "The params object, as the method takes it.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
-              "note": {
-                "description": "What the call does, in a line.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "params"
-            ]
-          },
-          "ChildSummary": {
-            "description": "Summary of a child plugin",
-            "type": "object",
-            "properties": {
-              "namespace": {
-                "description": "The child's namespace",
-                "type": "string"
-              },
-              "description": {
-                "description": "Human-readable description",
-                "type": "string"
-              },
-              "hash": {
-                "description": "Content hash for cache invalidation",
-                "type": "string"
-              }
-            },
-            "required": [
-              "namespace",
-              "description",
-              "hash"
-            ]
+          "Scope": {
+            "description": "Atomic capability identifier, e.g. `cone.send_message`. Canonical\n`Scope` newtype pinned by AUTHZ-S01-output §1. The grammar-validated\nconstructor (`Scope::try_new`), wildcard predicate (`is_wildcard`),\nand segment-bounded matching (`Scope::matches`) live in\n`crate::scope_registry` (AUTHZ-CORE-4). The macro-generated\n`Scope::new` below stays unvalidated for wire-decoded values;\nregistry construction goes through `try_new`.",
+            "type": "string"
           },
           "ViewKind": {
             "description": "AUTH-4: the two views of a gated hub. On the wire, `\"anonymous\"` or\n`\"caller\"`.",
@@ -1432,7 +1403,6 @@
         }
       },
       "cardinality": "one",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"

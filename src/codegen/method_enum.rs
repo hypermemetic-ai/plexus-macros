@@ -1,6 +1,6 @@
 //! Generate method enum from hub methods
 
-use crate::parse::{AuthPosture, BidirType, Cardinality, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
+use crate::parse::{AuthPosture, Cardinality, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::Type;
@@ -486,49 +486,14 @@ pub fn generate(
         }
     };
 
-    // Generate bidirectional schema setup calls and their method indices.
-    //
-    // Each entry is a (index, TokenStream) pair where the TokenStream fragment
-    // applies the appropriate `.with_*` builder calls to configure the
-    // MethodSchema for bidirectional communication.
-    //
-    // - BidirType::None     → empty fragment (no-op; skipped via index filter)
-    // - BidirType::Standard → `schema = schema.with_standard_bidirectional();`
-    // - BidirType::Custom   → `schema = schema.with_bidirectional(true)
-    //                           .with_request_type(schemars::schema_for!(Req).into())
-    //                           .with_response_type(schemars::schema_for!(Resp).into());`
-    //
-    // Both `bidir_index` and `bidir_schema_calls` are zipped together in the
-    // generated `match i { #bidir_index => { #bidir_schema_calls } }` block.
-    let (bidir_index, bidir_schema_calls): (Vec<_>, Vec<_>) = methods
+    // ASK-2: the indices of the methods marked `asks`, each said in its
+    // schema (`asks: true`).
+    let asks_index: Vec<proc_macro2::Literal> = methods
         .iter()
         .enumerate()
-        .filter_map(|(idx, m)| {
-            let idx_lit = proc_macro2::Literal::usize_suffixed(idx);
-            match &m.bidirectional {
-                BidirType::None => None,
-                BidirType::Standard => Some((
-                    quote! { #idx_lit },
-                    quote! { schema = schema.with_standard_bidirectional(); },
-                )),
-                BidirType::Custom { request, response } => {
-                    let req_ty: syn::Type = syn::parse_str(request)
-                        .unwrap_or_else(|_| syn::parse_quote!(#deps::serde_json::Value));
-                    let resp_ty: syn::Type = syn::parse_str(response)
-                        .unwrap_or_else(|_| syn::parse_quote!(#deps::serde_json::Value));
-                    Some((
-                        quote! { #idx_lit },
-                        quote! {
-                            schema = schema
-                                .with_bidirectional(true)
-                                .with_request_type(#deps::schemars::schema_for!(#req_ty).into())
-                                .with_response_type(#deps::schemars::schema_for!(#resp_ty).into());
-                        },
-                    ))
-                }
-            }
-        })
-        .unzip();
+        .filter(|(_, m)| m.asks)
+        .map(|(idx, _)| proc_macro2::Literal::usize_suffixed(idx))
+        .collect();
 
     quote! {
         /// Auto-generated method enum for schema extraction
@@ -762,7 +727,7 @@ pub fn generate(
 
                         // R-1: explicit `scope = "..."` requirements →
                         // `requires_credential` (AUTHZ-CORE-2). Compile-time
-                        // per-index match, same shape as the bidir calls.
+                        // per-index match.
                         match i {
                             #(
                                 #authz_scope_index => {
@@ -772,14 +737,11 @@ pub fn generate(
                             _ => {}
                         }
 
-                        // Apply bidirectional schema configuration.
-                        // Uses a compile-time match on the method index so that type-level
-                        // calls like schemars::schema_for!(MyType) work correctly.
-                        // Each arm is generated at macro-expansion time.
+                        // ASK-2: a method marked `asks` says so.
                         match i {
                             #(
-                                #bidir_index => {
-                                    #bidir_schema_calls
+                                #asks_index => {
+                                    schema = schema.with_asks(true);
                                 }
                             )*
                             _ => {}
@@ -813,7 +775,7 @@ pub fn generate(
                         // from the return type's `CredentialFieldMarker`
                         // registry (see `credential_decls_per_method` above).
                         //
-                        // Like `bidir_schema_calls`, this is a per-index
+                        // Like the `asks` match, this is a per-index
                         // compile-time match so that type-level calls (here,
                         // `CredentialsRegistryProbe::<RT>::new()`) resolve at
                         // macro-expansion time against each method's concrete

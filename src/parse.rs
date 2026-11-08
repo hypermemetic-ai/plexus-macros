@@ -49,16 +49,14 @@ pub struct ParsedDeprecation {
     pub message: String,
 }
 
-/// Bidirectional channel type configuration
-#[derive(Debug, Clone)]
-pub enum BidirType {
-    /// Not bidirectional
-    None,
-    /// Use StandardBidirChannel (StandardRequest, StandardResponse)
-    Standard,
-    /// Use custom request/response types
-    Custom { request: String, response: String },
-}
+/// ASK-2: `bidirectional` is gone — the in-call question it declared is
+/// replaced by a proposal the caller answers with a second call.
+pub(crate) const BIDIRECTIONAL_REMOVED: &str =
+    "`bidirectional` is removed (ASK-2): a method no longer asks its caller mid-call. \
+     A method that needs its caller's yes is `#[plexus_macros::method(asks)]`: it takes \
+     `confirm: Option<ConfirmToken>`, answers a call it would act on with a `needs_input` \
+     proposal (`plexus_core::plexus::ask::propose`), and acts when called again with the \
+     proposal's token (`plexus_core::plexus::ask::check`).";
 
 /// Per-method override for the activation-level request type.
 ///
@@ -101,8 +99,8 @@ pub struct HubMethodAttrs {
     pub description: Option<String>,
     /// Parameter descriptions: param_name -> description
     pub param_docs: HashMap<String, String>,
-    /// Bidirectional channel type (from #[hub_method(bidirectional)] or #[hub_method(bidirectional(request = "...", response = "..."))])
-    pub bidirectional: BidirType,
+    /// ASK-2: `asks` — where it was written, when it was.
+    pub asks: Option<proc_macro2::Span>,
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
     /// Stored as string during parsing, converted to enum in code generation
     pub http_method: Option<String>,
@@ -353,7 +351,7 @@ impl Parse for HubMethodAttrs {
         let mut name = None;
         let mut description: Option<String> = None;
         let mut param_docs = HashMap::new();
-        let mut bidirectional = BidirType::None;
+        let mut asks: Option<proc_macro2::Span> = None;
         let mut http_method = None;
         let mut request_override: Option<MethodRequestOverride> = None;
         let mut public = false;
@@ -394,7 +392,10 @@ impl Parse for HubMethodAttrs {
                             // RETURNS-8: cardinality is read from the signature.
                             streaming = Some(path.span());
                         } else if path.is_ident("bidirectional") {
-                            bidirectional = BidirType::Standard;
+                            return Err(syn::Error::new_spanned(&path, BIDIRECTIONAL_REMOVED));
+                        } else if path.is_ident("asks") {
+                            // ASK-2: the method may answer with a proposal.
+                            asks = Some(path.span());
                         } else if path.is_ident("public") {
                             // RED-2: explicit acknowledgment that this method
                             // intentionally bypasses activation-level auth.
@@ -574,36 +575,7 @@ impl Parse for HubMethodAttrs {
                             // contract; there is no shared enum to filter.
                             return Err(syn::Error::new_spanned(&path, RETURNS_REMOVED));
                         } else if path.is_ident("bidirectional") {
-                            // Parse bidirectional(request = "MyReq", response = "MyResp")
-                            let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
-                            let nested = syn::parse::Parser::parse2(parser, tokens.clone())?;
-
-                            let mut request = None;
-                            let mut response = None;
-
-                            for meta in nested {
-                                if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
-                                    if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
-                                        if path.is_ident("request") {
-                                            request = Some(s.value());
-                                        } else if path.is_ident("response") {
-                                            response = Some(s.value());
-                                        }
-                                    }
-                                }
-                            }
-
-                            match (request, response) {
-                                (Some(req), Some(resp)) => {
-                                    bidirectional = BidirType::Custom { request: req, response: resp };
-                                }
-                                _ => {
-                                    return Err(syn::Error::new_spanned(
-                                        &path,
-                                        "bidirectional(...) requires both request and response parameters: bidirectional(request = \"MyReq\", response = \"MyResp\")"
-                                    ));
-                                }
-                            }
+                            return Err(syn::Error::new_spanned(&path, BIDIRECTIONAL_REMOVED));
                         }
                     }
                 }
@@ -623,7 +595,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, bidirectional, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
+        Ok(HubMethodAttrs { name, description, param_docs, asks, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
     }
 }
 
@@ -1850,8 +1822,10 @@ pub struct MethodInfo {
     /// whose `P` is the default `Note`); `None` when the method reports no
     /// progress.
     pub progress_ty: Option<ProgressTy>,
-    /// Bidirectional channel type (from attribute or inferred from parameter type)
-    pub bidirectional: BidirType,
+    /// ASK-2: `#[method(asks)]` — the method may answer with a
+    /// `needs_input` proposal; it declares `confirm: Option<ConfirmToken>`
+    /// (checked) and its item type carries `NeedsInput(NeedsInput)`.
+    pub asks: bool,
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
     /// None defaults to POST
     pub http_method: Option<String>,
@@ -1952,6 +1926,20 @@ pub(crate) fn long_description_from(doc: &str, description: &str) -> Option<Stri
     }
 }
 
+/// ASK-2: is `ty` `Option<…::Name>` (by the inner type's last path segment)?
+fn is_option_of(ty: &Type, name: &str) -> bool {
+    let Type::Path(tp) = ty else { return false };
+    let Some(last) = tp.path.segments.last() else { return false };
+    if last.ident != "Option" {
+        return false;
+    }
+    let PathArguments::AngleBracketed(args) = &last.arguments else { return false };
+    match args.args.first() {
+        Some(GenericArgument::Type(Type::Path(inner))) => inner.path.segments.last().is_some_and(|s| s.ident == name),
+        _ => false,
+    }
+}
+
 /// AUTH-2: is `ty` the framework's `Reach` (by its last path segment, as
 /// `AuthContext` is recognised)?
 fn is_reach_type(ty: &Type) -> bool {
@@ -1997,10 +1985,8 @@ impl MethodInfo {
         let request_override = hub_method_attrs
             .and_then(|a| a.request_override.clone());
 
-        // Get bidirectional from attribute (may be overridden by parameter type inference)
-        let mut bidirectional = hub_method_attrs
-            .map(|a| a.bidirectional.clone())
-            .unwrap_or(BidirType::None);
+        // ASK-2: `asks`, checked against the `confirm` parameter below.
+        let asks = hub_method_attrs.and_then(|a| a.asks);
 
         // Track if method requires auth
         let mut requires_auth = false;
@@ -2082,17 +2068,6 @@ impl MethodInfo {
                             auth_optional = matches!(shape, AuthParamShape::Optional);
                             auth_at = Some(this_index);
                             // Don't include auth in params (it's provided by framework)
-                            continue;
-                        }
-                    }
-
-                    // Check if this is a bidirectional context parameter
-                    // Detect ctx: &BidirChannel<Req, Resp> or ctx: &StandardBidirChannel
-                    if name_str == "ctx" || name_str == "context" {
-                        if let Some(bidir_types) = extract_bidir_channel_types(&pat_type.ty) {
-                            // Infer bidirectional type from parameter
-                            bidirectional = bidir_types;
-                            // Don't include ctx in params (it's provided by framework)
                             continue;
                         }
                     }
@@ -2270,6 +2245,32 @@ impl MethodInfo {
         }
         let group = hub_method_attrs.and_then(|a| a.group.clone());
 
+        // ASK-2: a method marked `asks` takes its proposal's token back as
+        // `confirm: Option<ConfirmToken>` — an ordinary parameter, so it is
+        // in the schema and every client sends it as any other; a `confirm`
+        // of that type on a method not marked `asks` would be a token
+        // nothing proposed.
+        let confirm = params.iter().find(|p: &&ParamInfo| p.name == "confirm");
+        let confirm_ok = confirm.is_some_and(|p| is_option_of(&p.ty, "ConfirmToken"));
+        match (asks, confirm) {
+            (Some(span), _) if !confirm_ok => {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "`{fn_name}` is marked `asks`: it takes its proposal's token back as a parameter \
+                         `confirm: Option<ConfirmToken>` (plexus_core::plexus::ConfirmToken), which it does not declare"
+                    ),
+                ));
+            }
+            (None, Some(p)) if confirm_ok => {
+                return Err(syn::Error::new_spanned(
+                    &p.ty,
+                    format!("`{fn_name}` takes `confirm: Option<ConfirmToken>` but is not marked `asks`: add `#[plexus_macros::method(asks)]`"),
+                ));
+            }
+            _ => {}
+        }
+
         Ok(MethodInfo {
             fn_name,
             method_name,
@@ -2280,7 +2281,7 @@ impl MethodInfo {
             ok_ty,
             err_ty,
             progress_ty,
-            bidirectional,
+            asks: asks.is_some(),
             http_method,
             requires_auth,
             auth_optional,
@@ -2426,96 +2427,6 @@ pub enum AuthParamShape {
     Optional,
 }
 
-/// Extract BidirChannel type parameters from a type like &BidirChannel<Req, Resp>
-/// Handles various forms:
-/// - &BidirChannel<Req, Resp>
-/// - &Arc<BidirChannel<Req, Resp>>
-/// - &StandardBidirChannel
-/// - &Arc<StandardBidirChannel>
-/// Returns BidirType::Custom if custom types found, BidirType::Standard if StandardBidirChannel
-fn extract_bidir_channel_types(ty: &Type) -> Option<BidirType> {
-    // Handle &T
-    let inner_ty = if let Type::Reference(type_ref) = ty {
-        &*type_ref.elem
-    } else {
-        ty
-    };
-
-    if let Type::Path(type_path) = inner_ty {
-        let last_segment = type_path.path.segments.last()?;
-
-        // Check for Arc<...> wrapper
-        if last_segment.ident == "Arc" {
-            if let PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                    // Recursively check the inner type
-                    return extract_bidir_from_path(inner);
-                }
-            }
-            return None;
-        }
-
-        // Check direct type (no Arc)
-        return extract_bidir_from_path(inner_ty);
-    }
-
-    None
-}
-
-/// Extract BidirType from a path type (BidirChannel or StandardBidirChannel)
-fn extract_bidir_from_path(ty: &Type) -> Option<BidirType> {
-    if let Type::Path(type_path) = ty {
-        let last_segment = type_path.path.segments.last()?;
-
-        // Check for StandardBidirChannel (type alias)
-        if last_segment.ident == "StandardBidirChannel" {
-            return Some(BidirType::Standard);
-        }
-
-        // Check for BidirChannel<Req, Resp>
-        if last_segment.ident == "BidirChannel" {
-            if let PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                let args_vec: Vec<_> = args.args.iter().collect();
-                if args_vec.len() == 2 {
-                    // Extract Req and Resp type names
-                    if let (GenericArgument::Type(req_ty), GenericArgument::Type(resp_ty)) =
-                        (args_vec[0], args_vec[1])
-                    {
-                        let req_name = type_to_string(req_ty);
-                        let resp_name = type_to_string(resp_ty);
-
-                        // Check if it's StandardRequest/StandardResponse
-                        if req_name == "StandardRequest" && resp_name == "StandardResponse" {
-                            return Some(BidirType::Standard);
-                        }
-
-                        return Some(BidirType::Custom {
-                            request: req_name,
-                            response: resp_name,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Convert a Type to its string representation (simple path types only)
-fn type_to_string(ty: &Type) -> String {
-    if let Type::Path(type_path) = ty {
-        type_path
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::")
-    } else {
-        format!("{:?}", ty)
-    }
-}
 
 // ============================================================================
 // RETURNS-8: the signature forms
@@ -2935,7 +2846,7 @@ mod tests {
                 m.insert("message".to_string(), "explicit description".to_string());
                 m
             },
-            bidirectional: BidirType::None,
+            asks: None,
             http_method: None,
             request_override: None,
             public: false,

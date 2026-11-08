@@ -21,9 +21,14 @@ async fn ir(service: &plexus_core::plexus::DynamicHub, params: Value) -> Result<
 }
 
 fn same_as(file: &str, served: &Value) {
-    let golden = read(file);
     // synapse's canonical form: keys sorted, two-space indent, a trailing newline
     let mine = plexus_core::plexus::ir::canonical(served);
+    // ASK-2: `IR_FIXTURE_ACCEPT=1` writes it too (plexus-core's IR is held
+    // equal to synapse's: regenerate synapse's golden from the same schemas).
+    if accept() {
+        write(file, &mine);
+    }
+    let golden = read(file);
     assert!(mine == golden, "{file}: the service's IR is not synapse's\n--- service ---\n{mine}");
 }
 

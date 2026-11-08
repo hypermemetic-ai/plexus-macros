@@ -346,24 +346,6 @@ async fn a_data_item_that_does_not_decode_is_a_decode_error_and_ends_the_stream(
     }
 }
 
-#[tokio::test]
-async fn bidirectional_request_items_are_skipped() {
-    let t = MemoryTransport::new().script(
-        COUNT,
-        vec![
-            StreamItem::Request {
-                request_id: "r1".into(),
-                request_data: json!({"prompt": "continue?"}),
-                timeout_ms: 1000,
-            },
-            data(COUNT, json!({"n": 1})),
-            StreamItem::done(),
-        ],
-    );
-    let ticks: Vec<Tick> = count_stream(&t).try_collect().await.unwrap();
-    assert_eq!(ticks, vec![Tick { n: 1 }]);
-}
-
 /// A parameter that will not encode is reported as the stream's one item
 /// and nothing is sent.
 #[tokio::test]

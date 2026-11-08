@@ -546,8 +546,8 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
 
     // MACRO-12: `typed_params` refuses a bare string parameter, on the
     // parameter's own span. `MethodInfo::params` already excludes what the
-    // server injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`,
-    // a bidirectional `ctx`), so those are exempt by construction.
+    // server injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`),
+    // so those are exempt by construction.
     if args.typed_params {
         let mut errors: Option<syn::Error> = None;
         for m in &methods {

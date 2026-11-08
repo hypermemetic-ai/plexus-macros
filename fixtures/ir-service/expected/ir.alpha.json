@@ -4,9 +4,7 @@
   "irMetadata": null,
   "irMethods": {
     "alpha.gamma": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Item tools, one level down.",
       "mdError": null,
@@ -24,9 +22,7 @@
       }
     },
     "alpha.gamma.echo": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The item back.",
       "mdError": null,
@@ -64,9 +60,7 @@
       }
     },
     "alpha.gamma.odd": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "A type the IR reader refuses: a map flattened beside a field.",
       "mdError": null,
@@ -88,9 +82,7 @@
       }
     },
     "alpha.gamma.pick": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "A type the IR reader refuses: an untagged union.",
       "mdError": null,
@@ -120,9 +112,7 @@
       }
     },
     "alpha.gamma.schema": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -163,9 +153,7 @@
       }
     },
     "alpha.get": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The item with this id.\n\nAn id no item has is `not_found`; one that had an item, `gone`.",
       "mdError": {
@@ -210,9 +198,7 @@
       "mdTarget": "id"
     },
     "alpha.list": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "A page of items.",
       "mdError": null,
@@ -253,9 +239,7 @@
       }
     },
     "alpha.paint": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Paint an item.",
       "mdError": null,
@@ -308,9 +292,7 @@
       }
     },
     "alpha.rename": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The items' names.",
       "mdError": null,
@@ -348,9 +330,7 @@
       }
     },
     "alpha.schema": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -391,9 +371,7 @@
       }
     },
     "alpha.watch": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
+      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Every change to the items.",
       "mdError": null,
@@ -417,14 +395,14 @@
   },
   "irPluginHashes": {
     "alpha": {
-      "phiChildrenHash": "88a37864bc4ae2d1",
-      "phiHash": "88a37864bc4ae2d1",
-      "phiSelfHash": "88a37864bc4ae2d1"
+      "phiChildrenHash": "116ca94feacf28e2",
+      "phiHash": "116ca94feacf28e2",
+      "phiSelfHash": "116ca94feacf28e2"
     },
     "alpha.gamma": {
-      "phiChildrenHash": "d946f0f6bec343de",
-      "phiHash": "d946f0f6bec343de",
-      "phiSelfHash": "d946f0f6bec343de"
+      "phiChildrenHash": "07a7fc173f9475bd",
+      "phiHash": "07a7fc173f9475bd",
+      "phiSelfHash": "07a7fc173f9475bd"
     }
   },
   "irPluginRequests": null,
@@ -1506,6 +1484,19 @@
           },
           {
             "fdDefault": null,
+            "fdDescription": "Whether this method may answer a call with a proposal (a\n`needs_input` item saying what it would do) and act when called again\nwith the proposal's token in its `confirm` parameter. Absent when false.",
+            "fdName": "asks",
+            "fdRequired": false,
+            "fdType": {
+              "contents": [
+                "boolean",
+                null
+              ],
+              "tag": "RefPrimitive"
+            }
+          },
+          {
+            "fdDefault": null,
             "fdDescription": "Declared auth posture of the activation this method belongs to.\n\nPopulated by `#[plexus_macros::activation(auth = \"...\")]` (R-1) —\nstamped onto every RPC method of the activation. `None` means the\nactivation never declared a posture (pre-R-1 emissions and\nposture-silent activations are byte-identical on the wire).\n\nAdded in R-2 (joint AP-1). Defaults to `None` via `#[serde(default)]`\nso pre-R IRs decode cleanly; `skip_serializing_if` keeps the wire\nshape unchanged when unset.",
             "fdName": "auth_posture",
             "fdRequired": false,
@@ -1518,19 +1509,6 @@
                 "tag": "RefNamed"
               },
               "tag": "RefOptional"
-            }
-          },
-          {
-            "fdDefault": false,
-            "fdDescription": "Whether this method supports bidirectional communication\n\nWhen true, the server can send requests to the client during method execution\nand wait for responses (e.g., confirmations, prompts, selections).",
-            "fdName": "bidirectional",
-            "fdRequired": false,
-            "fdType": {
-              "contents": [
-                "boolean",
-                null
-              ],
-              "tag": "RefPrimitive"
             }
           },
           {
@@ -1780,15 +1758,6 @@
           },
           {
             "fdDefault": null,
-            "fdDescription": "JSON Schema for the request type sent from server to client\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nrequests the server may send during method execution.",
-            "fdName": "request_type",
-            "fdRequired": false,
-            "fdType": {
-              "tag": "RefJson"
-            }
-          },
-          {
-            "fdDefault": null,
             "fdDescription": "What credential this method requires on input (if any).\n\nDerived implicitly from the method's scope tagging and the\ncredential-graph linkage at schema-build time (per\n`AUTHZ-CRED-CORE-3` §\"Implicit derivation\"):\n\n- `scope = \"...\"` → `RequiredCredential::from_method_scope(scope)`.\n- `public` method → `None` (the absence of this field).\n- target of `refresh_via`/`revoke_via` of another credential →\n  `RequiredCredential::from_refresh_revoke_target(kind, scopes)`.\n\nAdded in `AUTHZ-CRED-CORE-3`. Defaults to `None` via\n`#[serde(default)]` so pre-IR schemas deserialize cleanly. The\n`skip_serializing_if = \"Option::is_none\"` clause keeps the wire JSON\nshape unchanged for public methods and methods with no scope-derived\nrequirement.",
             "fdName": "requires_credential",
             "fdRequired": false,
@@ -1801,15 +1770,6 @@
                 "tag": "RefNamed"
               },
               "tag": "RefOptional"
-            }
-          },
-          {
-            "fdDefault": null,
-            "fdDescription": "JSON Schema for the response type sent from client to server\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nresponses the client should send in reply to server requests.",
-            "fdName": "response_type",
-            "fdRequired": false,
-            "fdType": {
-              "tag": "RefJson"
             }
           },
           {
@@ -2507,5 +2467,5 @@
       "tdNamespace": "alpha.gamma"
     }
   },
-  "irVersion": "3.0"
+  "irVersion": "3.1"
 }

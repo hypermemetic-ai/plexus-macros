@@ -409,8 +409,6 @@ pub(crate) fn injected(m: &MethodInfo) -> Option<&'static str> {
         Some("an `auth` parameter")
     } else if m.takes_reach {
         Some("a `reach` parameter")
-    } else if !matches!(m.bidirectional, crate::parse::BidirType::None) {
-        Some("a bidirectional `ctx` parameter")
     } else {
         None
     }

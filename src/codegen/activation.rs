@@ -1119,7 +1119,9 @@ fn rpc_methods(methods: &[MethodInfo]) -> impl Iterator<Item = &MethodInfo> {
         // Auth-requiring methods and methods with activation_params are dispatched through
         // Activation::call() which handles auth injection and request extraction.
         // The jsonrpsee RPC trait cannot carry auth context or raw_ctx.
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none())
+        // ASK-2: and an `asks` method, whose proposal is sealed for the call's
+        // caller, which only `Activation::call` runs inside.
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none() && !m.asks)
 }
 
 /// The server trait's method signatures, as jsonrpsee's `#[rpc(server)]`
@@ -1316,7 +1318,6 @@ fn generate_rpc_impl_methods(
     deps: &syn::Ident,
     trait_impl: Option<&syn::Path>,
 ) -> Vec<TokenStream> {
-    use crate::parse::BidirType;
     // RETURNS-47: an inherent method by the type's path, a trait's through
     // the trait.
     let recv = match trait_impl {
@@ -1327,7 +1328,9 @@ fn generate_rpc_impl_methods(
     methods
         .iter()
         // Skip auth-requiring methods and activation_param methods — they route through Activation::call()
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none())
+        // ASK-2: and an `asks` method, whose proposal is sealed for the call's
+        // caller, which only `Activation::call` runs inside.
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none() && !m.asks)
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -1343,48 +1346,7 @@ fn generate_rpc_impl_methods(
                 })
                 .collect();
 
-            // Generate bidirectional channel setup and method call based on bidir type
-            let (bidir_setup, method_call) = match &m.bidirectional {
-                BidirType::None => {
-                    (quote! {}, quote! { #recv::#method_name(self, #(#param_names),*).await })
-                }
-                BidirType::Standard => {
-                    (
-                        quote! {
-                            let (tx, _rx) = #deps::tokio::sync::mpsc::channel(32);
-                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
-                                #crate_path::plexus::StandardRequest,
-                                #crate_path::plexus::StandardResponse,
-                            >::new(
-                                tx,
-                                false,
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ));
-                        },
-                        quote! { #recv::#method_name(self, &ctx, #(#param_names),*).await }
-                    )
-                }
-                BidirType::Custom { request, response } => {
-                    let req_ty: syn::Type = syn::parse_str(request).unwrap_or_else(|_| syn::parse_quote!(()));
-                    let resp_ty: syn::Type = syn::parse_str(response).unwrap_or_else(|_| syn::parse_quote!(()));
-                    (
-                        quote! {
-                            let (tx, _rx) = #deps::tokio::sync::mpsc::channel(32);
-                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
-                                #req_ty,
-                                #resp_ty,
-                            >::new(
-                                tx,
-                                false,
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ));
-                        },
-                        quote! { #recv::#method_name(self, &ctx, #(#param_names),*).await }
-                    )
-                }
-            };
+            let method_call = quote! { #recv::#method_name(self, #(#param_names),*).await };
 
             // RETURNS-8: the same per-form wrapper as `Activation::call`, so
             // both paths send the same frames.
@@ -1400,7 +1362,6 @@ fn generate_rpc_impl_methods(
                     use #deps::futures::StreamExt;
 
                     let sink = pending.accept().await?;
-                    #bidir_setup
                     let __ret = #method_call;
                     let wrapped = #wrapped;
 
@@ -1433,7 +1394,6 @@ fn generate_dispatch_arms(
     typed_params: bool,
     trait_impl: Option<&syn::Path>,
 ) -> Vec<TokenStream> {
-    use crate::parse::BidirType;
     // RETURNS-47: how the dispatch calls a method — by method syntax on an
     // inherent impl, through the trait on `impl Trait for Type`.
     let invoke = |fn_name: &syn::Ident, args: TokenStream| match trait_impl {
@@ -1632,95 +1592,38 @@ fn generate_dispatch_arms(
             // form turns its return value into frames.
             let wrapped = wrap_return(m, quote! { __ret }, &content_type, namespace, crate_path);
 
-            // Generate code based on bidirectional type
-            match &m.bidirectional {
-                BidirType::None => {
+            // ASK-2: an `asks` method runs as its path (`<ns>.<method>`), the
+            // body and the stream it answers, so `ask::propose` and
+            // `ask::check` seal for it; its item type must carry the
+            // proposal as `NeedsInput(NeedsInput)`.
+            let (run, answer) = if m.asks {
+                let ok_ty = &m.ok_ty;
+                let check = quote::quote_spanned! { fn_name.span() =>
+                    let _: fn(#crate_path::plexus::ask::NeedsInput) -> #ok_ty = <#ok_ty>::NeedsInput;
+                };
+                (
                     quote! {
-                        #method_name => {
-                            #auth_injection
-                            #activation_extraction
-                            #(#activation_param_bindings)*
-                            #caller_gate
-                            #(#resolver_bindings)*
-                            #param_extraction
-                            #reach_binding
-                            #input_open
-                            let __ret = #call.await;
-                            Ok(#wrapped)
-                        }
-                    }
-                }
-                BidirType::Standard => {
-                    // Build param list for bidir - ctx comes first, then auth if needed, then regular params
-                    let bidir_params = if m.requires_auth {
-                        quote! { &ctx, auth_ctx, #reach_arg #(#param_names),* }
-                    } else {
-                        quote! { &ctx, #reach_arg #(#param_names),* }
-                    };
-                    let call_bidir = invoke(fn_name, bidir_params.clone());
+                        #check
+                        let __ret = #crate_path::plexus::ask::asking(#content_type, #call).await;
+                    },
+                    quote! { Ok(#crate_path::plexus::ask::asking_stream(#content_type, #wrapped)) },
+                )
+            } else {
+                (quote! { let __ret = #call.await; }, quote! { Ok(#wrapped) })
+            };
 
-                    // StandardBidirChannel - use wrap_stream_with_bidir
-                    quote! {
-                        #method_name => {
-                            #auth_injection
-                            #activation_extraction
-                            #(#activation_param_bindings)*
-                            #caller_gate
-                            #(#resolver_bindings)*
-                            #param_extraction
-                            #reach_binding
-                            #input_open
-                            // Create bidir channel and wrap stream together
-                            let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
-                                #crate_path::plexus::StandardRequest,
-                                #crate_path::plexus::StandardResponse,
-                            >(#content_type, vec![#namespace.into()]);
-
-                            // Call the method with the bidir channel
-                            let __ret = #call_bidir.await;
-
-                            // Wrap the method's output and merge with bidir requests
-                            let wrapped_user = #wrapped;
-                            Ok(wrap_fn(wrapped_user))
-                        }
-                    }
-                }
-                BidirType::Custom { request, response } => {
-                    // Build param list for bidir - ctx comes first, then auth if needed, then regular params
-                    let bidir_params = if m.requires_auth {
-                        quote! { &ctx, auth_ctx, #reach_arg #(#param_names),* }
-                    } else {
-                        quote! { &ctx, #reach_arg #(#param_names),* }
-                    };
-                    let call_bidir = invoke(fn_name, bidir_params.clone());
-
-                    // Custom BidirChannel - use wrap_stream_with_bidir with custom types
-                    let req_ty: syn::Type = syn::parse_str(request).unwrap_or_else(|_| syn::parse_quote!(()));
-                    let resp_ty: syn::Type = syn::parse_str(response).unwrap_or_else(|_| syn::parse_quote!(()));
-                    quote! {
-                        #method_name => {
-                            #auth_injection
-                            #activation_extraction
-                            #(#activation_param_bindings)*
-                            #caller_gate
-                            #(#resolver_bindings)*
-                            #param_extraction
-                            #reach_binding
-                            #input_open
-                            // Create bidir channel and wrap stream together
-                            let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
-                                #req_ty,
-                                #resp_ty,
-                            >(#content_type, vec![#namespace.into()]);
-
-                            // Call the method with the bidir channel
-                            let __ret = #call_bidir.await;
-
-                            // Wrap the method's output and merge with bidir requests
-                            let wrapped_user = #wrapped;
-                            Ok(wrap_fn(wrapped_user))
-                        }
-                    }
+            quote! {
+                #method_name => {
+                    #auth_injection
+                    #activation_extraction
+                    #(#activation_param_bindings)*
+                    #caller_gate
+                    #(#resolver_bindings)*
+                    #param_extraction
+                    #reach_binding
+                    #input_open
+                    #run
+                    #answer
                 }
             }
         })
@@ -1758,8 +1661,7 @@ fn input_ceiling(i: &crate::parse::InputInfo, crate_path: &syn::Path) -> TokenSt
 /// is looked at: `null`, a bare value and `{}` reach the extraction as
 /// before, and keys inside a parameter's value are its type's to judge.
 /// `m.params` holds the wire parameters alone — what the server injects
-/// (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`, a bidirectional
-/// `ctx`) is never a key.
+/// (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`) is never a key.
 fn generate_unknown_key_check(m: &MethodInfo, content_type: &str, crate_path: &syn::Path, deps: &syn::Ident) -> TokenStream {
     let mut known: Vec<String> = m.params.iter().map(|p| p.name.to_string()).collect();
     known.sort();

@@ -9,8 +9,8 @@
 //! sorted. `unknown field` is the words synapse reads to know its cached
 //! schema is stale (it re-reads it and runs the call again), so they are
 //! there verbatim. `null`, `{}` and the bare-value shortcut are answered as
-//! before (`null` to a method of many parameters stays `expected object`); what the server injects (`#[from_auth]`, `auth`, `reach`, a
-//! bidirectional `ctx`) is no wire parameter and no key. An activation
+//! before (`null` to a method of many parameters stays `expected object`); what the server injects (`#[from_auth]`, `auth`, `reach`) is
+//! no wire parameter and no key. An activation
 //! without `typed_params` is unchanged.
 
 use futures::stream::Stream;

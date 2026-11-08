@@ -191,7 +191,7 @@ A single realistic activation that exercises every macro in the crate. Every att
 use async_stream::stream;
 use futures::Stream;
 use plexus_macros::{HandleEnum, PlexusRequest};
-use plexus_core::plexus::bidirectional::StandardBidirChannel;
+use plexus_core::plexus::ask::{self, ConfirmToken, NeedsInput, Proposal};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -332,19 +332,24 @@ impl Counter {
         stream! { yield "ok".into(); }
     }
 
-    // -- E. Bidirectional channel (streaming by convention) --
+    // -- E. A method that proposes (`asks`, ASK-2; plexus-wire spec/08) --
     //
-    // The `ctx: &Arc<StandardBidirChannel>` argument is recognised by
-    // the macro and not exposed as a param in the schema. For custom
-    // request/response types, use
-    // `bidirectional(request = "MyReq", response = "MyResp")`.
-    /// Interactive prompt over a bidirectional channel.
-    #[plexus_macros::method(bidirectional)]
-    async fn prompt(&self, ctx: &Arc<StandardBidirChannel>)
-        -> impl Stream<Item = String> + Send + 'static
+    // It answers a call it would act on with a `needs_input` proposal and
+    // acts when called again with the token in `confirm` — an ordinary
+    // parameter. Its item type carries `NeedsInput(NeedsInput)`:
+    // `enum ResetEvent { NeedsInput(NeedsInput), Reset }`, `type`-tagged.
+    /// Reset the counter, once the caller has seen what would go.
+    #[plexus_macros::method(asks)]
+    async fn reset(&self, confirm: Option<ConfirmToken>)
+        -> impl Stream<Item = ResetEvent> + Send + 'static
     {
-        let _ = ctx;
-        stream! { yield "prompted".into(); }
+        let plan = serde_json::json!({ "value": 0 }); // what would change, and the store version read
+        stream! {
+            match ask::check(confirm.as_ref(), &plan) {
+                Ok(()) => yield ResetEvent::Reset,
+                Err(_) => yield ResetEvent::NeedsInput(ask::propose(&plan, Proposal::new("reset the counter"))),
+            }
+        }
     }
 
     // -- F. Request-struct field injection via `#[activation_param]` --
@@ -616,7 +621,7 @@ impl forge::Forge for GitHub { /* every `async fn` on `&self` is on the wire */ 
 | rule | |
 |---|---|
 | the name | `impl Foo` names itself; `impl FooActivation` its stem `Foo`; `impl Trait for Type` the trait. Namespace: the name in snake_case (`TicketsApi` → `tickets_api`); `namespace = "…"` overrides it. An activation written before MACRO-13 — a type not named `…Activation` that says its `namespace` — expands as it did (only `#[method]`s on the wire, the client on the `client` flag), with a deprecation warning |
-| a trait only when named | `trait = "Bar"` emits `trait Bar` (and names the client `BarClient` and, absent `namespace`, the namespace `bar`), each method under its own return type, boxed: `-> T` / `-> Result<T, E>` as `BoxFuture<'static, …>`, a stream form as `BoxStream<'static, item>` (RETURNS-36); the activation implements it, by cloning itself into each stream — unless a method takes what the server injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`, a bidirectional `ctx`). Without `trait = …` no trait is emitted (RETURNS-47, reversing MACRO-13's `always`) |
+| a trait only when named | `trait = "Bar"` emits `trait Bar` (and names the client `BarClient` and, absent `namespace`, the namespace `bar`), each method under its own return type, boxed: `-> T` / `-> Result<T, E>` as `BoxFuture<'static, …>`, a stream form as `BoxStream<'static, item>` (RETURNS-36); the activation implements it, by cloning itself into each stream — unless a method takes what the server injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`). Without `trait = …` no trait is emitted (RETURNS-47, reversing MACRO-13's `always`) |
 | `impl Trait for Type` | every `async fn` on `&self` is a wire method, called as `<Type as Trait>::m`; the trait needs no object safety to be served. Its methods reach their caller through the call's context, `plexus_core::call::caller()` (a trait's signature cannot carry `#[from_auth]`). Under `auth = "required"` the dispatch refuses an anonymous caller before the body of every method not `public`, out of band and typed, as `#[from_auth]` does; `#[plexus_macros::from_auth(self.access.verify)]` on the method runs the verifier before the body (its error the call's typed refusal, its value the body's: `plexus_core::call::verified::<User>()`). It has no direct JSON-RPC methods, only `{ns}.call`. `trait = "…"` beside it, a bodiless method and `#[child]` are refused |
 | wire methods | every `pub async fn` on `&self` returning `impl Stream<Item = E>`, no `#[method]` needed (it stays for its overrides, and marks a one-item method); a `pub async fn` on `&self` returning anything else unmarked is a compile error; `methods = marked` restores the `#[method]`-only rule |
 | the client | emitted whenever the crate depends on `plexus-client`, no flag (`client` is accepted with a deprecation warning). It implements no trait: a one-item method answers `Result<T, ClientError>`, a many-item one its `{Ns}{Method}Stream`; no item type needs `FromClientError`, so `-> u64`, `-> bool`, `-> Vec<T>` are methods like any other (RETURNS-47, superseding RETURNS-43) |
@@ -972,7 +977,7 @@ Attached to methods inside an `#[activation]` impl. Marks the method as an RPC e
 |---|---|---|---|
 | `description = "..."` | string | first `///` doc-comment block (CHILD-5) | Explicit arg wins over doc comments. |
 | `name = "..."` | string | method identifier | Override the RPC name without renaming the Rust fn. |
-| `bidirectional` | flag | _(off)_ | Method uses `StandardBidirChannel`. Use `bidirectional(request = "...", response = "...")` for custom types. |
+| `asks` | flag | _(off)_ | ASK-2 (plexus-wire spec/08): the method may answer with a `needs_input` proposal and acts when called again with its token. It declares `confirm: Option<ConfirmToken>` (an ordinary, optional parameter) and its item type a `NeedsInput(NeedsInput)` variant — each a compile error naming it otherwise. The schema says `asks: true`. The body seals and checks with `plexus_core::plexus::ask::{propose, check}`. `bidirectional` (the in-call question it replaced) is a compile error naming `asks`. |
 | `http_method = "..."` | string | _(none)_ | One of `GET\|POST\|PUT\|DELETE\|PATCH`. Hint for REST generators. |
 | `params(name = "doc", ...)` | key/value list | _(empty)_ | Per-parameter descriptions. Less common now that field-level `///` extraction works; retained for cases where parameters have no natural Rust doc site. |
 | `group = "..."` | string | _(none)_ | SYNAPSE-13: the method's group in a listing (`"read"`, `"write"`, …) — OpenAPI's tag, one per method. `MethodSchema.group`; synapse lists a group's methods together, the groups in the order they first appear. |
@@ -1031,7 +1036,7 @@ A method's return type is its whole contract. The macro reads it and fills
 - A plain-`T` stream (`impl Stream<Item = OneEnum>`, 0.6's only form) compiles
   and sends exactly what it did.
 
-Bidirectional methods, `#[child]` list/search methods, `#[activation_param]`
+`asks` methods, `#[child]` list/search methods, `#[activation_param]`
 / `#[from_auth]` parameters and `request = …` work with every form.
 
 #### The namespace, the trait and the client (MACRO-13, RETURNS-47)
@@ -1357,7 +1362,7 @@ See the substrate reference server (`plexus-substrate`) for end-to-end examples 
 - `bash`, `echo` — minimal single-method activations.
 - `cone`, `claudecode` — generic activations with `HandleEnum`, dynamic children, and `resolve_handle`.
 - `solar` — hub activation with dynamic child routing + `list` capability.
-- `interactive` — bidirectional channels.
+- `interactive` — a method that proposes (`asks`, ASK-6).
 - `changelog`, `mustache` — multi-method flat activations.
 
 ---

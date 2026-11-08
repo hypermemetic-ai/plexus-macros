@@ -3,7 +3,22 @@
 All notable changes to plexus-macros and plexus-client are documented here.
 This file starts at 0.7.0; earlier changes are in the git history.
 
-## [Unreleased]
+## [Unreleased] — 0.10.0
+
+ASK-2 (breaking): the in-call question is gone, replaced by a proposal.
+`#[plexus_macros::method(asks)]` marks a method that answers a call it would
+act on with a `needs_input` item and acts when called again with the token:
+it declares `confirm: Option<ConfirmToken>` (an ordinary optional parameter)
+and its item type a `NeedsInput(NeedsInput)` variant (each a compile error
+naming it otherwise); the schema says `asks: true`; the dispatch runs the
+method as its path (`<ns>.<method>`) so `plexus_core::plexus::ask::propose` /
+`check` seal for it. `bidirectional` (flag and `bidirectional(request, response)`)
+is a compile error naming `asks`; a `ctx: &BidirChannel` is no longer
+recognised. plexus-client: `StreamItem::Request` and `RawItem::Request` are
+gone; an older server's `request` item is skipped as any unknown kind
+(spec/03). Fixture goldens regenerated (`asks` absent while false, no
+`bidirectional`; IR 3.1's `mdAsks`).
+
 
 NEST-7: `#[plexus_macros::peer(list = …, search = …)] async fn x(&self, name:
 &str) -> Result<Box<dyn I>, PeerError>` — a typed peer slot (`I` a contract's

@@ -191,6 +191,17 @@ impl Parse for HubMethodAttrs {
 /// the six. `returns(..)` is removed (a compile error); `streaming` is a
 /// deprecated no-op on a stream form and an error on a one-item one.
 ///
+/// # A method that proposes (ASK-2)
+///
+/// `asks` — the method may answer a call it would act on with a
+/// `needs_input` proposal (plexus-wire spec/08) and acts when called again
+/// with the proposal's token. It declares `confirm: Option<ConfirmToken>`, an
+/// ordinary optional parameter, and its item type a `NeedsInput(NeedsInput)`
+/// variant; the schema says `asks: true`; the dispatch runs the method (its
+/// body and its stream) as `<ns>.<method>`, so
+/// `plexus_core::plexus::ask::propose` and `check` seal for it.
+/// `bidirectional` is removed: a compile error naming `asks`.
+///
 /// # Authorization arguments (R-1 / AUTHZ-CORE-2)
 ///
 /// - `scope = "..."` — explicit required scope, emitted into the generated
@@ -613,7 +624,7 @@ fn generate_schema_fn(
 ///   `bar`), each wire method in it under its own return type, boxed; the
 ///   activation implements it by cloning itself into each stream — unless a
 ///   wire method takes what the server injects (`auth`, `reach`,
-///   `#[from_auth]`, `#[activation_param]`, a bidirectional `ctx`). The
+///   `#[from_auth]`, `#[activation_param]`). The
 ///   client implements no trait: its methods answer `Result<T, ClientError>`
 ///   (one item) or the `{Ns}{Method}Stream` alias (many), so no item type
 ///   needs `plexus_client::FromClientError`.

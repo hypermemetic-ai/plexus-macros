@@ -36,7 +36,7 @@ follows.
   provoke. Each line is a whole call, with no `done` after it.
 - `expected/aggregate.jsonl`: every item of the `wire/` calls, in call order,
   as a serialized `ConformanceEvent`.
-- `expected/ir.json`: the fixture's synapse IR 3.0 (RETURNS-13), built from
+- `expected/ir.json`: the fixture's synapse IR 3.1 (RETURNS-13; 3.1, ASK-2: `mdAsks`), built from
   `schema.json` with the activation at path `conformance`. It is what
   `synapse -i <backend> conformance` prints when a service serves the activation
   as its `conformance` child, with `irBackend` `"conformance"` and
@@ -51,7 +51,7 @@ follows.
 | macro, server half | RETURNS-8 | `src/`, `calls.json` | serve the activation in-process: its schema RPC equals `schema.json`, and each call in `calls.json` yields exactly its frames (`wire/`, or its `errors.jsonl` line) |
 | macro, client half | RETURNS-9 | `src/`, `calls.json`, `wire/`, `errors.jsonl`, `aggregate.jsonl` | (`tests/client.rs`) over `InProcessTransport`, each call decodes to the items `wire/` encodes (`load`'s `.with_progress()` yields its two `LoadStep`s; `scan` carries on past its err); `errors.jsonl` calls surface as `ClientError::Remote(RemoteError::…)` of that kind; the derived `ConformanceEvent` serializes them to `aggregate.jsonl` byte for byte, and back |
 | plexus-protocol (Haskell) | RETURNS-12 | `schema.json`, `wire/`, `errors.jsonl` | parse, re-encode, equal (key order aside) |
-| synapse IR 3.0 | RETURNS-13 | `schema.json`, `ir.json` | (`synapse/test/IR3Spec.hs`, suite `ir3-test`) the IR `buildIRFromSchema` builds from `schema.json` equals `ir.json` byte for byte, and decodes back to the same IR; every method's `mdReturns` / `mdError` / `mdProgress` / `mdCardinality` is the schema's, and every `RefNamed` has a `TypeDef` |
+| synapse IR 3.1 | RETURNS-13, ASK-2 | `schema.json`, `ir.json` | (`synapse/test/IR3Spec.hs`, suite `ir3-test`) the IR `buildIRFromSchema` builds from `schema.json` equals `ir.json` byte for byte, and decodes back to the same IR; every method's `mdReturns` / `mdError` / `mdProgress` / `mdCardinality` is the schema's, and every `RefNamed` has a `TypeDef` |
 | service-codegen, TS | RETURNS-17 | `ir.json`, `wire/`, `errors.jsonl`, `aggregate.jsonl` | the generated client typechecks; replaying `wire/` decodes the items (`withProgress()`, `scan` as above); `errors.jsonl` throws `RemoteCallError` of that kind; `JSON.stringify` of each `.events()` value is its `aggregate.jsonl` line |
 | service-codegen, Rust | RETURNS-18 | `ir.json`, `wire/`, `errors.jsonl`, `aggregate.jsonl` | replaying `wire/` through `MemoryTransport` decodes the items; `errors.jsonl` yields `ClientError::Remote` of that kind; the generated `ConformanceEvent` reproduces `aggregate.jsonl` |
 
@@ -68,7 +68,7 @@ follows.
   `json.dumps(m, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`
   writes the same bytes.
 - **Metadata is kept, made deterministic.** Every frame carries
-  `{"provenance":["conformance"],"plexus_hash":"60d7e85ced34c0c7","timestamp":0}`:
+  `{"provenance":["conformance"],"plexus_hash":"65a9cc374cca00f9","timestamp":0}`:
   `plexus_hash` is `schema.json`'s `hash`, the fixture being served as its
   own service (a service puts its own hash in every frame). Normalize `timestamp` to
   `0` before comparing.

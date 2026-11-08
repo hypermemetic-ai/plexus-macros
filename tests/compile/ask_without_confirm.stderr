@@ -1,0 +1,5 @@
+error: `wipe` is marked `asks`: it takes its proposal's token back as a parameter `confirm: Option<ConfirmToken>` (plexus_core::plexus::ConfirmToken), which it does not declare
+  --> tests/compile/ask_without_confirm.rs:17:29
+   |
+17 |     #[plexus_macros::method(asks)]
+   |                             ^^^^
