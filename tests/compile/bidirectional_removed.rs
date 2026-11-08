@@ -1,4 +1,4 @@
-//! ASK-2 compile-fail: `bidirectional` is removed; the error says what replaced it.
+//! ASK-1 compile-fail: `bidirectional` is removed; the error says so.
 
 #[derive(Clone)]
 struct Wizard;

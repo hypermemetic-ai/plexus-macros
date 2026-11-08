@@ -1119,9 +1119,7 @@ fn rpc_methods(methods: &[MethodInfo]) -> impl Iterator<Item = &MethodInfo> {
         // Auth-requiring methods and methods with activation_params are dispatched through
         // Activation::call() which handles auth injection and request extraction.
         // The jsonrpsee RPC trait cannot carry auth context or raw_ctx.
-        // ASK-2: and an `asks` method, whose proposal is sealed for the call's
-        // caller, which only `Activation::call` runs inside.
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none() && !m.asks)
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none())
 }
 
 /// The server trait's method signatures, as jsonrpsee's `#[rpc(server)]`
@@ -1328,9 +1326,7 @@ fn generate_rpc_impl_methods(
     methods
         .iter()
         // Skip auth-requiring methods and activation_param methods — they route through Activation::call()
-        // ASK-2: and an `asks` method, whose proposal is sealed for the call's
-        // caller, which only `Activation::call` runs inside.
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none() && !m.asks)
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none())
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -1592,26 +1588,6 @@ fn generate_dispatch_arms(
             // form turns its return value into frames.
             let wrapped = wrap_return(m, quote! { __ret }, &content_type, namespace, crate_path);
 
-            // ASK-2: an `asks` method runs as its path (`<ns>.<method>`), the
-            // body and the stream it answers, so `ask::propose` and
-            // `ask::check` seal for it; its item type must carry the
-            // proposal as `NeedsInput(NeedsInput)`.
-            let (run, answer) = if m.asks {
-                let ok_ty = &m.ok_ty;
-                let check = quote::quote_spanned! { fn_name.span() =>
-                    let _: fn(#crate_path::plexus::ask::NeedsInput) -> #ok_ty = <#ok_ty>::NeedsInput;
-                };
-                (
-                    quote! {
-                        #check
-                        let __ret = #crate_path::plexus::ask::asking(#content_type, #call).await;
-                    },
-                    quote! { Ok(#crate_path::plexus::ask::asking_stream(#content_type, #wrapped)) },
-                )
-            } else {
-                (quote! { let __ret = #call.await; }, quote! { Ok(#wrapped) })
-            };
-
             quote! {
                 #method_name => {
                     #auth_injection
@@ -1622,8 +1598,8 @@ fn generate_dispatch_arms(
                     #param_extraction
                     #reach_binding
                     #input_open
-                    #run
-                    #answer
+                    let __ret = #call.await;
+                    Ok(#wrapped)
                 }
             }
         })

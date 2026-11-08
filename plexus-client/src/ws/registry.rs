@@ -238,7 +238,7 @@ pub(crate) struct Registry {
 }
 
 /// The item `type`s this client reads (spec/03); any other is skipped — an
-/// older server's `request` (the in-call question ASK-2 retired) among them.
+/// older server's `request` (the in-call question ASK-1 removed) among them.
 const KINDS: [&str; 4] = ["data", "progress", "error", "done"];
 
 /// The routing key for a subscription id.
@@ -1115,7 +1115,7 @@ mod tests {
             assert!(registry.on_text(&note("\"s-8\"", item)).is_none());
         }
         let (values, raws) = (drain(&mut values), drain_raw(&mut raws));
-        // ASK-2: an older server's `request` (the retired in-call question)
+        // ASK-1: an older server's `request` (the retired in-call question)
         // is a `type` this client does not read: skipped by both.
         assert_eq!(values.len(), items.len() - 1, "{values:?}");
         assert_eq!(raws.len(), items.len() - 1, "{raws:?}");
@@ -1160,7 +1160,7 @@ mod tests {
             let built = fields.stream_item(fields.kind.unwrap());
             assert_eq!(built, Some(serde_json::from_str::<StreamItem>(item).unwrap()), "{item}");
         }
-        // ASK-2: an older server's `request` is a `type` this client skips.
+        // ASK-1: an older server's `request` is a `type` this client skips.
         for item in [
             r#"{"type":"request","requestId":"r-1","requestData":{"type":"confirm"},"timeoutMs":30000}"#,
             r#"{"type":"request","requestId":"r-2","requestData":null}"#,

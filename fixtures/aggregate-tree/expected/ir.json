@@ -4,7 +4,6 @@
   "irMetadata": null,
   "irMethods": {
     "tree.branch": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The branch: a static child.",
       "mdError": null,
@@ -22,7 +21,6 @@
       }
     },
     "tree.branch.grow": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Grows `n` buds; bud 2 is frosted, and the branch grows on.",
       "mdError": {
@@ -66,7 +64,6 @@
       }
     },
     "tree.branch.leaf": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The leaf: the static child's static child.",
       "mdError": null,
@@ -84,7 +81,6 @@
       }
     },
     "tree.branch.leaf.fall": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "`n` leaves fall, one by one.",
       "mdError": null,
@@ -122,7 +118,6 @@
       }
     },
     "tree.branch.leaf.schema": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -163,7 +158,6 @@
       }
     },
     "tree.branch.schema": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -204,7 +198,6 @@
       }
     },
     "tree.count": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Ticks from 1 up to `to`.",
       "mdError": null,
@@ -242,7 +235,6 @@
       }
     },
     "tree.item": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "An item by name — `a` or `b`: a dynamic child.",
       "mdError": null,
@@ -260,7 +252,6 @@
       }
     },
     "tree.ping": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Always answers pong.",
       "mdError": null,
@@ -282,7 +273,6 @@
       }
     },
     "tree.schema": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -325,19 +315,19 @@
   },
   "irPluginHashes": {
     "tree": {
-      "phiChildrenHash": "52369aa61df68709",
-      "phiHash": "52369aa61df68709",
-      "phiSelfHash": "52369aa61df68709"
+      "phiChildrenHash": "929171f873477fc6",
+      "phiHash": "929171f873477fc6",
+      "phiSelfHash": "929171f873477fc6"
     },
     "tree.branch": {
-      "phiChildrenHash": "5b779986245fecaf",
-      "phiHash": "5b779986245fecaf",
-      "phiSelfHash": "5b779986245fecaf"
+      "phiChildrenHash": "d76e8d26866d9214",
+      "phiHash": "d76e8d26866d9214",
+      "phiSelfHash": "d76e8d26866d9214"
     },
     "tree.branch.leaf": {
-      "phiChildrenHash": "af2d86adfb2db4a6",
-      "phiHash": "af2d86adfb2db4a6",
-      "phiSelfHash": "af2d86adfb2db4a6"
+      "phiChildrenHash": "22c57fad5e01295b",
+      "phiHash": "22c57fad5e01295b",
+      "phiSelfHash": "22c57fad5e01295b"
     }
   },
   "irPluginRequests": null,
@@ -1211,19 +1201,6 @@
                 "tag": "RefPrimitive"
               },
               "tag": "RefOptional"
-            }
-          },
-          {
-            "fdDefault": null,
-            "fdDescription": "Whether this method may answer a call with a proposal (a\n`needs_input` item saying what it would do) and act when called again\nwith the proposal's token in its `confirm` parameter. Absent when false.",
-            "fdName": "asks",
-            "fdRequired": false,
-            "fdType": {
-              "contents": [
-                "boolean",
-                null
-              ],
-              "tag": "RefPrimitive"
             }
           },
           {

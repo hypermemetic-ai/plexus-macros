@@ -49,14 +49,12 @@ pub struct ParsedDeprecation {
     pub message: String,
 }
 
-/// ASK-2: `bidirectional` is gone — the in-call question it declared is
-/// replaced by a proposal the caller answers with a second call.
+/// ASK-1: `bidirectional` is gone — the in-call question it declared, with
+/// nothing in its place.
 pub(crate) const BIDIRECTIONAL_REMOVED: &str =
-    "`bidirectional` is removed (ASK-2): a method no longer asks its caller mid-call. \
-     A method that needs its caller's yes is `#[plexus_macros::method(asks)]`: it takes \
-     `confirm: Option<ConfirmToken>`, answers a call it would act on with a `needs_input` \
-     proposal (`plexus_core::plexus::ask::propose`), and acts when called again with the \
-     proposal's token (`plexus_core::plexus::ask::check`).";
+    "`bidirectional` is removed (ASK-1): a method no longer asks its caller mid-call, and \
+     Plexus has no in-call or protocol-wide confirmation. A method that needs its caller's \
+     yes builds it from its own parameters (a `dry_run`, a plan id).";
 
 /// Per-method override for the activation-level request type.
 ///
@@ -99,8 +97,6 @@ pub struct HubMethodAttrs {
     pub description: Option<String>,
     /// Parameter descriptions: param_name -> description
     pub param_docs: HashMap<String, String>,
-    /// ASK-2: `asks` — where it was written, when it was.
-    pub asks: Option<proc_macro2::Span>,
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
     /// Stored as string during parsing, converted to enum in code generation
     pub http_method: Option<String>,
@@ -351,7 +347,6 @@ impl Parse for HubMethodAttrs {
         let mut name = None;
         let mut description: Option<String> = None;
         let mut param_docs = HashMap::new();
-        let mut asks: Option<proc_macro2::Span> = None;
         let mut http_method = None;
         let mut request_override: Option<MethodRequestOverride> = None;
         let mut public = false;
@@ -393,9 +388,6 @@ impl Parse for HubMethodAttrs {
                             streaming = Some(path.span());
                         } else if path.is_ident("bidirectional") {
                             return Err(syn::Error::new_spanned(&path, BIDIRECTIONAL_REMOVED));
-                        } else if path.is_ident("asks") {
-                            // ASK-2: the method may answer with a proposal.
-                            asks = Some(path.span());
                         } else if path.is_ident("public") {
                             // RED-2: explicit acknowledgment that this method
                             // intentionally bypasses activation-level auth.
@@ -595,7 +587,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, asks, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
+        Ok(HubMethodAttrs { name, description, param_docs, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
     }
 }
 
@@ -1822,10 +1814,6 @@ pub struct MethodInfo {
     /// whose `P` is the default `Note`); `None` when the method reports no
     /// progress.
     pub progress_ty: Option<ProgressTy>,
-    /// ASK-2: `#[method(asks)]` — the method may answer with a
-    /// `needs_input` proposal; it declares `confirm: Option<ConfirmToken>`
-    /// (checked) and its item type carries `NeedsInput(NeedsInput)`.
-    pub asks: bool,
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
     /// None defaults to POST
     pub http_method: Option<String>,
@@ -1926,20 +1914,6 @@ pub(crate) fn long_description_from(doc: &str, description: &str) -> Option<Stri
     }
 }
 
-/// ASK-2: is `ty` `Option<…::Name>` (by the inner type's last path segment)?
-fn is_option_of(ty: &Type, name: &str) -> bool {
-    let Type::Path(tp) = ty else { return false };
-    let Some(last) = tp.path.segments.last() else { return false };
-    if last.ident != "Option" {
-        return false;
-    }
-    let PathArguments::AngleBracketed(args) = &last.arguments else { return false };
-    match args.args.first() {
-        Some(GenericArgument::Type(Type::Path(inner))) => inner.path.segments.last().is_some_and(|s| s.ident == name),
-        _ => false,
-    }
-}
-
 /// AUTH-2: is `ty` the framework's `Reach` (by its last path segment, as
 /// `AuthContext` is recognised)?
 fn is_reach_type(ty: &Type) -> bool {
@@ -1984,9 +1958,6 @@ impl MethodInfo {
             .and_then(|a| a.http_method.clone());
         let request_override = hub_method_attrs
             .and_then(|a| a.request_override.clone());
-
-        // ASK-2: `asks`, checked against the `confirm` parameter below.
-        let asks = hub_method_attrs.and_then(|a| a.asks);
 
         // Track if method requires auth
         let mut requires_auth = false;
@@ -2245,32 +2216,6 @@ impl MethodInfo {
         }
         let group = hub_method_attrs.and_then(|a| a.group.clone());
 
-        // ASK-2: a method marked `asks` takes its proposal's token back as
-        // `confirm: Option<ConfirmToken>` — an ordinary parameter, so it is
-        // in the schema and every client sends it as any other; a `confirm`
-        // of that type on a method not marked `asks` would be a token
-        // nothing proposed.
-        let confirm = params.iter().find(|p: &&ParamInfo| p.name == "confirm");
-        let confirm_ok = confirm.is_some_and(|p| is_option_of(&p.ty, "ConfirmToken"));
-        match (asks, confirm) {
-            (Some(span), _) if !confirm_ok => {
-                return Err(syn::Error::new(
-                    span,
-                    format!(
-                        "`{fn_name}` is marked `asks`: it takes its proposal's token back as a parameter \
-                         `confirm: Option<ConfirmToken>` (plexus_core::plexus::ConfirmToken), which it does not declare"
-                    ),
-                ));
-            }
-            (None, Some(p)) if confirm_ok => {
-                return Err(syn::Error::new_spanned(
-                    &p.ty,
-                    format!("`{fn_name}` takes `confirm: Option<ConfirmToken>` but is not marked `asks`: add `#[plexus_macros::method(asks)]`"),
-                ));
-            }
-            _ => {}
-        }
-
         Ok(MethodInfo {
             fn_name,
             method_name,
@@ -2281,7 +2226,6 @@ impl MethodInfo {
             ok_ty,
             err_ty,
             progress_ty,
-            asks: asks.is_some(),
             http_method,
             requires_auth,
             auth_optional,
@@ -2846,7 +2790,6 @@ mod tests {
                 m.insert("message".to_string(), "explicit description".to_string());
                 m
             },
-            asks: None,
             http_method: None,
             request_override: None,
             public: false,

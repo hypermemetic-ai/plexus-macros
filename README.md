@@ -191,7 +191,6 @@ A single realistic activation that exercises every macro in the crate. Every att
 use async_stream::stream;
 use futures::Stream;
 use plexus_macros::{HandleEnum, PlexusRequest};
-use plexus_core::plexus::ask::{self, ConfirmToken, NeedsInput, Proposal};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -332,27 +331,7 @@ impl Counter {
         stream! { yield "ok".into(); }
     }
 
-    // -- E. A method that proposes (`asks`, ASK-2; plexus-wire spec/08) --
-    //
-    // It answers a call it would act on with a `needs_input` proposal and
-    // acts when called again with the token in `confirm` — an ordinary
-    // parameter. Its item type carries `NeedsInput(NeedsInput)`:
-    // `enum ResetEvent { NeedsInput(NeedsInput), Reset }`, `type`-tagged.
-    /// Reset the counter, once the caller has seen what would go.
-    #[plexus_macros::method(asks)]
-    async fn reset(&self, confirm: Option<ConfirmToken>)
-        -> impl Stream<Item = ResetEvent> + Send + 'static
-    {
-        let plan = serde_json::json!({ "value": 0 }); // what would change, and the store version read
-        stream! {
-            match ask::check(confirm.as_ref(), &plan) {
-                Ok(()) => yield ResetEvent::Reset,
-                Err(_) => yield ResetEvent::NeedsInput(ask::propose(&plan, Proposal::new("reset the counter"))),
-            }
-        }
-    }
-
-    // -- F. Request-struct field injection via `#[activation_param]` --
+    // -- E. Request-struct field injection via `#[activation_param]` --
     //
     // The named parameter must match a field name on `CounterRequest`
     // by name AND type. The dispatch wrapper extracts the request
@@ -369,7 +348,7 @@ impl Counter {
         }
     }
 
-    // -- G. Per-method escape from activation-level request extraction --
+    // -- F. Per-method escape from activation-level request extraction --
     //
     // `request = ()` makes the dispatch skip `CounterRequest::extract()`
     // for this method. Use this for truly public endpoints like health
@@ -380,7 +359,7 @@ impl Counter {
         stream! { yield "ok".into(); }
     }
 
-    // -- H. Static child (zero-arg) --
+    // -- G. Static child (zero-arg) --
     //
     // `#[child]` methods are NOT RPC methods; they contribute to the
     // generated `ChildRouter` implementation. A zero-arg method is a
@@ -389,7 +368,7 @@ impl Counter {
     #[plexus_macros::child]
     fn stats(&self) -> Stats { Stats {} }
 
-    // -- I. Dynamic child with list + search capabilities --
+    // -- H. Dynamic child with list + search capabilities --
     //
     // `fn NAME(&self, name: &str) -> Option<Child>` is a dynamic
     // fallback dispatcher. `list = "..."` and `search = "..."` name
@@ -977,7 +956,6 @@ Attached to methods inside an `#[activation]` impl. Marks the method as an RPC e
 |---|---|---|---|
 | `description = "..."` | string | first `///` doc-comment block (CHILD-5) | Explicit arg wins over doc comments. |
 | `name = "..."` | string | method identifier | Override the RPC name without renaming the Rust fn. |
-| `asks` | flag | _(off)_ | ASK-2 (plexus-wire spec/08): the method may answer with a `needs_input` proposal and acts when called again with its token. It declares `confirm: Option<ConfirmToken>` (an ordinary, optional parameter) and its item type a `NeedsInput(NeedsInput)` variant — each a compile error naming it otherwise. The schema says `asks: true`. The body seals and checks with `plexus_core::plexus::ask::{propose, check}`. `bidirectional` (the in-call question it replaced) is a compile error naming `asks`. |
 | `http_method = "..."` | string | _(none)_ | One of `GET\|POST\|PUT\|DELETE\|PATCH`. Hint for REST generators. |
 | `params(name = "doc", ...)` | key/value list | _(empty)_ | Per-parameter descriptions. Less common now that field-level `///` extraction works; retained for cases where parameters have no natural Rust doc site. |
 | `group = "..."` | string | _(none)_ | SYNAPSE-13: the method's group in a listing (`"read"`, `"write"`, …) — OpenAPI's tag, one per method. `MethodSchema.group`; synapse lists a group's methods together, the groups in the order they first appear. |
@@ -1036,7 +1014,7 @@ A method's return type is its whole contract. The macro reads it and fills
 - A plain-`T` stream (`impl Stream<Item = OneEnum>`, 0.6's only form) compiles
   and sends exactly what it did.
 
-`asks` methods, `#[child]` list/search methods, `#[activation_param]`
+`#[child]` list/search methods, `#[activation_param]`
 / `#[from_auth]` parameters and `request = …` work with every form.
 
 #### The namespace, the trait and the client (MACRO-13, RETURNS-47)
@@ -1362,7 +1340,6 @@ See the substrate reference server (`plexus-substrate`) for end-to-end examples 
 - `bash`, `echo` — minimal single-method activations.
 - `cone`, `claudecode` — generic activations with `HandleEnum`, dynamic children, and `resolve_handle`.
 - `solar` — hub activation with dynamic child routing + `list` capability.
-- `interactive` — a method that proposes (`asks`, ASK-6).
 - `changelog`, `mustache` — multi-method flat activations.
 
 ---

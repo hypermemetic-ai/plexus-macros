@@ -191,16 +191,12 @@ impl Parse for HubMethodAttrs {
 /// the six. `returns(..)` is removed (a compile error); `streaming` is a
 /// deprecated no-op on a stream form and an error on a one-item one.
 ///
-/// # A method that proposes (ASK-2)
+/// # No in-call question (ASK-1)
 ///
-/// `asks` — the method may answer a call it would act on with a
-/// `needs_input` proposal (plexus-wire spec/08) and acts when called again
-/// with the proposal's token. It declares `confirm: Option<ConfirmToken>`, an
-/// ordinary optional parameter, and its item type a `NeedsInput(NeedsInput)`
-/// variant; the schema says `asks: true`; the dispatch runs the method (its
-/// body and its stream) as `<ns>.<method>`, so
-/// `plexus_core::plexus::ask::propose` and `check` seal for it.
-/// `bidirectional` is removed: a compile error naming `asks`.
+/// `bidirectional` is removed (a compile error): a method never asks its
+/// caller mid-call, and Plexus has no in-call or protocol-wide
+/// confirmation. A method that wants its caller's yes builds it from its
+/// own parameters (a `dry_run`, a plan id).
 ///
 /// # Authorization arguments (R-1 / AUTHZ-CORE-2)
 ///

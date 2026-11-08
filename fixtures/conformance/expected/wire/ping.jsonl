@@ -1,2 +1,2 @@
-{"type":"data","metadata":{"provenance":["conformance"],"plexus_hash":"65a9cc374cca00f9","timestamp":0},"content_type":"conformance.ping","content":{"message":"pong"}}
-{"type":"done","metadata":{"provenance":["conformance"],"plexus_hash":"65a9cc374cca00f9","timestamp":0}}
+{"type":"data","metadata":{"provenance":["conformance"],"plexus_hash":"b3a843ed84070f47","timestamp":0},"content_type":"conformance.ping","content":{"message":"pong"}}
+{"type":"done","metadata":{"provenance":["conformance"],"plexus_hash":"b3a843ed84070f47","timestamp":0}}

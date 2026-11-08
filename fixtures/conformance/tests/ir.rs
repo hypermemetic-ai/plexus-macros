@@ -27,7 +27,7 @@ async fn the_service_writes_the_fixtures_ir() {
     // synapse names the backend it was asked of; the fixture's is "conformance"
     served["irBackend"] = json!("conformance");
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("expected/ir.json");
-    // ASK-2: `CONFORMANCE_ACCEPT=1` writes it (plexus-core's IR is held
+    // `CONFORMANCE_ACCEPT=1` writes it (plexus-core's IR is held
     // equal to synapse's: regenerate synapse's golden from the same schema).
     if std::env::var("CONFORMANCE_ACCEPT").as_deref() == Ok("1") {
         std::fs::write(&path, ir::canonical(&served)).unwrap();

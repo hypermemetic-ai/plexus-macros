@@ -141,7 +141,7 @@ async fn the_schema_rpc_returns_schema_json() {
     assert_eq!(frames[0]["content_type"], "conformance.schema");
     assert_eq!(frames[1]["type"], "done");
 
-    // ASK-2: `CONFORMANCE_ACCEPT=1` writes the served schema (a contract
+    // `CONFORMANCE_ACCEPT=1` writes the served schema (a contract
     // change: name the decision it follows; then move `plexus_hash` in
     // `wire/` and `errors.jsonl` to its `hash`, and regenerate `ir.json`).
     if std::env::var("CONFORMANCE_ACCEPT").as_deref() == Ok("1") {

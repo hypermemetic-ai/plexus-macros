@@ -193,7 +193,7 @@ fn progress_content_is_a_note_by_default() {
     assert!(serde_json::from_value::<StreamItem>(json!({"type": "progress", "message": "m"})).is_err());
 }
 
-/// ASK-2: the in-call question is gone from the wire. An older server's
+/// ASK-1: the in-call question is gone from the wire. An older server's
 /// `request` item is no `StreamItem` (a transport skips its `type`, spec/03).
 #[test]
 fn an_older_servers_request_item_is_not_an_item() {

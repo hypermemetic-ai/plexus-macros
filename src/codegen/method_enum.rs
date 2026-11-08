@@ -486,15 +486,6 @@ pub fn generate(
         }
     };
 
-    // ASK-2: the indices of the methods marked `asks`, each said in its
-    // schema (`asks: true`).
-    let asks_index: Vec<proc_macro2::Literal> = methods
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.asks)
-        .map(|(idx, _)| proc_macro2::Literal::usize_suffixed(idx))
-        .collect();
-
     quote! {
         /// Auto-generated method enum for schema extraction
         #[derive(Debug, Clone, #serde_derive_path::Serialize, #serde_derive_path::Deserialize, #schemars_derive_path::JsonSchema)]
@@ -737,16 +728,6 @@ pub fn generate(
                             _ => {}
                         }
 
-                        // ASK-2: a method marked `asks` says so.
-                        match i {
-                            #(
-                                #asks_index => {
-                                    schema = schema.with_asks(true);
-                                }
-                            )*
-                            _ => {}
-                        }
-
                         // IR-3: apply deprecation metadata per-method. Emitted
                         // only for methods that carry `#[deprecated]` (see
                         // `parse_deprecation_attrs` for the contract).
@@ -775,7 +756,7 @@ pub fn generate(
                         // from the return type's `CredentialFieldMarker`
                         // registry (see `credential_decls_per_method` above).
                         //
-                        // Like the `asks` match, this is a per-index
+                        // Like the scope match above, this is a per-index
                         // compile-time match so that type-level calls (here,
                         // `CredentialsRegistryProbe::<RT>::new()`) resolve at
                         // macro-expansion time against each method's concrete

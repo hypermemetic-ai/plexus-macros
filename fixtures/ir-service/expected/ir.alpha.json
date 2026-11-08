@@ -4,7 +4,6 @@
   "irMetadata": null,
   "irMethods": {
     "alpha.gamma": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Item tools, one level down.",
       "mdError": null,
@@ -22,7 +21,6 @@
       }
     },
     "alpha.gamma.echo": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The item back.",
       "mdError": null,
@@ -60,7 +58,6 @@
       }
     },
     "alpha.gamma.odd": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "A type the IR reader refuses: a map flattened beside a field.",
       "mdError": null,
@@ -82,7 +79,6 @@
       }
     },
     "alpha.gamma.pick": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "A type the IR reader refuses: an untagged union.",
       "mdError": null,
@@ -112,7 +108,6 @@
       }
     },
     "alpha.gamma.schema": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -153,7 +148,6 @@
       }
     },
     "alpha.get": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The item with this id.\n\nAn id no item has is `not_found`; one that had an item, `gone`.",
       "mdError": {
@@ -198,7 +192,6 @@
       "mdTarget": "id"
     },
     "alpha.list": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "A page of items.",
       "mdError": null,
@@ -239,7 +232,6 @@
       }
     },
     "alpha.paint": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Paint an item.",
       "mdError": null,
@@ -292,7 +284,6 @@
       }
     },
     "alpha.rename": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The items' names.",
       "mdError": null,
@@ -330,7 +321,6 @@
       }
     },
     "alpha.schema": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -371,7 +361,6 @@
       }
     },
     "alpha.watch": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Every change to the items.",
       "mdError": null,
@@ -395,14 +384,14 @@
   },
   "irPluginHashes": {
     "alpha": {
-      "phiChildrenHash": "116ca94feacf28e2",
-      "phiHash": "116ca94feacf28e2",
-      "phiSelfHash": "116ca94feacf28e2"
+      "phiChildrenHash": "bb273cbe0a5e1f33",
+      "phiHash": "bb273cbe0a5e1f33",
+      "phiSelfHash": "bb273cbe0a5e1f33"
     },
     "alpha.gamma": {
-      "phiChildrenHash": "07a7fc173f9475bd",
-      "phiHash": "07a7fc173f9475bd",
-      "phiSelfHash": "07a7fc173f9475bd"
+      "phiChildrenHash": "627884825dbd5344",
+      "phiHash": "627884825dbd5344",
+      "phiSelfHash": "627884825dbd5344"
     }
   },
   "irPluginRequests": null,
@@ -1480,19 +1469,6 @@
                 "tag": "RefPrimitive"
               },
               "tag": "RefOptional"
-            }
-          },
-          {
-            "fdDefault": null,
-            "fdDescription": "Whether this method may answer a call with a proposal (a\n`needs_input` item saying what it would do) and act when called again\nwith the proposal's token in its `confirm` parameter. Absent when false.",
-            "fdName": "asks",
-            "fdRequired": false,
-            "fdType": {
-              "contents": [
-                "boolean",
-                null
-              ],
-              "tag": "RefPrimitive"
             }
           },
           {

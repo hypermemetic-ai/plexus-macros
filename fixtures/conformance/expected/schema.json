@@ -2,8 +2,8 @@
   "namespace": "conformance",
   "version": "0.7.0",
   "description": "Conformance fixture: one method per signature form",
-  "self_hash": "b69a219b027b4507",
-  "hash": "65a9cc374cca00f9",
+  "self_hash": "b48a5158bae2ba64",
+  "hash": "b3a843ed84070f47",
   "methods": [
     {
       "name": "ping",
@@ -351,7 +351,7 @@
     {
       "name": "schema",
       "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
-      "hash": "93bbec09bbedf2aa",
+      "hash": "f3c8ef571f2ac1a3",
       "params": {
         "type": "object",
         "properties": {
@@ -1012,10 +1012,6 @@
                   "string",
                   "null"
                 ]
-              },
-              "asks": {
-                "description": "Whether this method may answer a call with a proposal (a\n`needs_input` item saying what it would do) and act when called again\nwith the proposal's token in its `confirm` parameter. Absent when false.",
-                "type": "boolean"
               },
               "auth_posture": {
                 "description": "Declared auth posture of the activation this method belongs to.\n\nPopulated by `#[plexus_macros::activation(auth = \"...\")]` (R-1) —\nstamped onto every RPC method of the activation. `None` means the\nactivation never declared a posture (pre-R-1 emissions and\nposture-silent activations are byte-identical on the wire).\n\nAdded in R-2 (joint AP-1). Defaults to `None` via `#[serde(default)]`\nso pre-R IRs decode cleanly; `skip_serializing_if` keeps the wire\nshape unchanged when unset.",

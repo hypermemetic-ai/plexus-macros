@@ -1,10 +1,9 @@
 {
   "irBackend": "irsvc",
-  "irHash": "2e04158392c636cc",
+  "irHash": "f149b127723d836f",
   "irMetadata": null,
   "irMethods": {
     ".call": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Route a call to a registered activation",
       "mdError": null,
@@ -53,7 +52,6 @@
       }
     },
     ".hash": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Get plexus configuration hash (from the recursive schema)\n\n This hash changes whenever any method or child plugin changes.\n It's computed from the method hashes rolled up through the schema tree.",
       "mdError": null,
@@ -76,7 +74,6 @@
       }
     },
     ".hashes": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Get plugin hashes for cache validation",
       "mdError": null,
@@ -99,7 +96,6 @@
       }
     },
     ".ir": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The service's IR (3.0): every type once, each method referring to them — of the namespaces asked, or the whole service",
       "mdError": {
@@ -146,7 +142,6 @@
       }
     },
     ".schema": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -187,7 +182,6 @@
       }
     },
     "alpha.gamma": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Item tools, one level down.",
       "mdError": null,
@@ -205,7 +199,6 @@
       }
     },
     "alpha.gamma.echo": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The item back.",
       "mdError": null,
@@ -243,7 +236,6 @@
       }
     },
     "alpha.gamma.odd": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "A type the IR reader refuses: a map flattened beside a field.",
       "mdError": null,
@@ -265,7 +257,6 @@
       }
     },
     "alpha.gamma.pick": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "A type the IR reader refuses: an untagged union.",
       "mdError": null,
@@ -295,7 +286,6 @@
       }
     },
     "alpha.gamma.schema": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -336,7 +326,6 @@
       }
     },
     "alpha.get": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The item with this id.\n\nAn id no item has is `not_found`; one that had an item, `gone`.",
       "mdError": {
@@ -381,7 +370,6 @@
       "mdTarget": "id"
     },
     "alpha.list": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "A page of items.",
       "mdError": null,
@@ -422,7 +410,6 @@
       }
     },
     "alpha.paint": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Paint an item.",
       "mdError": null,
@@ -475,7 +462,6 @@
       }
     },
     "alpha.rename": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The items' names.",
       "mdError": null,
@@ -513,7 +499,6 @@
       }
     },
     "alpha.schema": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -554,7 +539,6 @@
       }
     },
     "alpha.watch": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Every change to the items.",
       "mdError": null,
@@ -576,7 +560,6 @@
       }
     },
     "beta.events": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Every change to the items, as `alpha.watch` says them.",
       "mdError": null,
@@ -598,7 +581,6 @@
       }
     },
     "beta.find": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The items matching a query.",
       "mdError": {
@@ -645,7 +627,6 @@
       }
     },
     "beta.get": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "The item with this id, or why not.",
       "mdError": {
@@ -689,7 +670,6 @@
       }
     },
     "beta.load": {
-      "mdAsks": false,
       "mdCardinality": "many",
       "mdDescription": "Load `n` pages, saying each step.",
       "mdError": null,
@@ -733,7 +713,6 @@
       }
     },
     "beta.schema": {
-      "mdAsks": false,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -776,24 +755,24 @@
   },
   "irPluginHashes": {
     "": {
-      "phiChildrenHash": "2e04158392c636cc",
-      "phiHash": "2e04158392c636cc",
-      "phiSelfHash": "2e04158392c636cc"
+      "phiChildrenHash": "f149b127723d836f",
+      "phiHash": "f149b127723d836f",
+      "phiSelfHash": "f149b127723d836f"
     },
     "alpha": {
-      "phiChildrenHash": "116ca94feacf28e2",
-      "phiHash": "116ca94feacf28e2",
-      "phiSelfHash": "116ca94feacf28e2"
+      "phiChildrenHash": "bb273cbe0a5e1f33",
+      "phiHash": "bb273cbe0a5e1f33",
+      "phiSelfHash": "bb273cbe0a5e1f33"
     },
     "alpha.gamma": {
-      "phiChildrenHash": "07a7fc173f9475bd",
-      "phiHash": "07a7fc173f9475bd",
-      "phiSelfHash": "07a7fc173f9475bd"
+      "phiChildrenHash": "627884825dbd5344",
+      "phiHash": "627884825dbd5344",
+      "phiSelfHash": "627884825dbd5344"
     },
     "beta": {
-      "phiChildrenHash": "faaf3c9d5fba809d",
-      "phiHash": "faaf3c9d5fba809d",
-      "phiSelfHash": "faaf3c9d5fba809d"
+      "phiChildrenHash": "a322bf936a0cf7db",
+      "phiHash": "a322bf936a0cf7db",
+      "phiSelfHash": "a322bf936a0cf7db"
     }
   },
   "irPluginRequests": null,
@@ -2715,19 +2694,6 @@
                 "tag": "RefPrimitive"
               },
               "tag": "RefOptional"
-            }
-          },
-          {
-            "fdDefault": null,
-            "fdDescription": "Whether this method may answer a call with a proposal (a\n`needs_input` item saying what it would do) and act when called again\nwith the proposal's token in its `confirm` parameter. Absent when false.",
-            "fdName": "asks",
-            "fdRequired": false,
-            "fdType": {
-              "contents": [
-                "boolean",
-                null
-              ],
-              "tag": "RefPrimitive"
             }
           },
           {

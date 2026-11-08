@@ -1,5 +1,0 @@
-error: `bidirectional` is removed (ASK-2): a method no longer asks its caller mid-call. A method that needs its caller's yes is `#[plexus_macros::method(asks)]`: it takes `confirm: Option<ConfirmToken>`, answers a call it would act on with a `needs_input` proposal (`plexus_core::plexus::ask::propose`), and acts when called again with the proposal's token (`plexus_core::plexus::ask::check`).
- --> tests/compile/ask_bidirectional_removed.rs:8:29
-  |
-8 |     #[plexus_macros::method(bidirectional)]
-  |                             ^^^^^^^^^^^^^
