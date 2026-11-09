@@ -204,8 +204,11 @@ impl fmt::Display for RoutePath {
 /// run-time value — so a `MethodRef` is `Clone`, not `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MethodRef {
-    namespace: &'static str,
-    method: &'static str,
+    /// NEST-14: a name known when the program is written (`new`, no
+    /// allocation), or one known only at run time (`named`, an untyped
+    /// client's `call("list", …)`).
+    namespace: RoutePath,
+    method: RoutePath,
     /// The dotted path the activation is reached at; empty means its own
     /// namespace (a service's top-level activation).
     path: RoutePath,
@@ -213,7 +216,18 @@ pub struct MethodRef {
 
 impl MethodRef {
     pub const fn new(namespace: &'static str, method: &'static str) -> Self {
-        Self { namespace, method, path: RoutePath::EMPTY }
+        Self {
+            namespace: RoutePath::from_static(namespace),
+            method: RoutePath::from_static(method),
+            path: RoutePath::EMPTY,
+        }
+    }
+
+    /// NEST-14: `method` on the node at the dotted `path`, both known only
+    /// at run time — what an untyped client ([`crate::Untyped`]) sends. The
+    /// path stands for the namespace too: `qualified()` is `path.method`.
+    pub fn named(path: impl Into<RoutePath>, method: impl Into<RoutePath>) -> Self {
+        Self { namespace: path.into(), method: method.into(), path: RoutePath::EMPTY }
     }
 
     /// The same method on the activation mounted at `path` — the dotted
@@ -223,7 +237,7 @@ impl MethodRef {
     /// methods compare unequal).
     pub fn at(self, path: impl Into<RoutePath>) -> Self {
         let path = path.into();
-        if path.is_empty() || path.as_str() == self.namespace {
+        if path.is_empty() || path.as_str() == self.namespace.as_str() {
             Self { path: RoutePath::EMPTY, ..self }
         } else {
             Self { path, ..self }
@@ -232,20 +246,23 @@ impl MethodRef {
 
     /// The activation namespace, e.g. `"tickets"` (a child's own, e.g.
     /// `"inputs"`).
-    pub const fn namespace(&self) -> &'static str {
-        self.namespace
+    ///
+    /// NEST-14 (0.11): `&str`, no longer `&'static str` — a [`Self::named`]
+    /// one is known only at run time.
+    pub fn namespace(&self) -> &str {
+        self.namespace.as_str()
     }
 
     /// The bare method name, e.g. `"watch"`.
-    pub const fn method(&self) -> &'static str {
-        self.method
+    pub fn method(&self) -> &str {
+        self.method.as_str()
     }
 
     /// The dotted path the activation is reached at: the namespace for a
     /// top-level activation, `"tickets.inputs"` for a child.
     pub fn path(&self) -> &str {
         if self.path.is_empty() {
-            self.namespace
+            self.namespace.as_str()
         } else {
             self.path.as_str()
         }

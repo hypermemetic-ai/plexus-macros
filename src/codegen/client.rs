@@ -106,8 +106,11 @@
 //! the only form that reaches a grandchild in one step and puts a dynamic
 //! instance's name in its events without the caller repeating it. `From`
 //! per static child is the one-level form for a child's own client. A
-//! `#[child(opaque)]` is left out, and a child without a client is held to
-//! `HasClient` in the server half, whose message says to add `opaque`.
+//! `#[child(opaque)]` has no variant, and (NEST-14) an untyped accessor,
+//! `Untyped<&T>`, as an untyped `#[peer]` slot has; a typed `#[peer]` slot's
+//! accessor is its contract's client become a peer, in the server half. A
+//! child without a client is held to `HasClient` in the server half, whose
+//! message says to add `opaque`.
 //!
 //! **The aggregate derives through `plexus_client::__rt::serde`**
 //! (`#[serde(crate = "…")]`), so the emitted code needs nothing in the
@@ -283,14 +286,15 @@ pub(crate) fn generate(
     methods: &[MethodInfo],
     children: &[ChildMethodInfo],
     client_path: &syn::Path,
+    crate_path: &syn::Path,
 ) -> syn::Result<(TokenStream, TokenStream)> {
     let event_ty = derived_ident(
         &aggregate_name_for(namespace, methods),
         &format!("the namespace `{namespace}`"),
         Span::call_site(),
     )?;
-    // RETURNS-46: a `#[child(opaque)]` has no client — no variant, no
-    // accessor. Every child is a segment an instance name must not be.
+    // RETURNS-46: a `#[child(opaque)]` has no client — no variant, and no
+    // typed accessor (NEST-14 gives it an untyped one, below). Every child is a segment an instance name must not be.
     let tree = children
         .iter()
         .filter(|c| !c.opaque)
@@ -303,8 +307,23 @@ pub(crate) fn generate(
             .map(|c| c.fn_name.to_string())
             .collect(),
     };
-    let child_accessors: Vec<TokenStream> =
+    let mut child_accessors: Vec<TokenStream> =
         tree.iter().map(|n| child_accessor(n, namespace, client_ty, &event_ty, client_path, &reserved)).collect();
+    // NEST-14: the rest of the tree — an opaque child and an untyped peer
+    // slot as an untyped client (here); a typed peer slot as its contract's
+    // client, checked against its stamp (in the server half, where the
+    // contract's peer half is).
+    let mut typed_peers: Vec<TokenStream> = Vec::new();
+    for c in children.iter().filter(|c| c.opaque) {
+        match &c.peer {
+            Some(crate::codegen::peer::PeerShape::Typed(path)) => {
+                if let Some(t) = typed_peer_accessor(c, path, namespace, client_ty, crate_path) {
+                    typed_peers.push(t);
+                }
+            }
+            _ => child_accessors.push(untyped_accessor(c, namespace, client_path, &reserved)),
+        }
+    }
     // RETURNS-46: one zero-sized `Wrap` per static child — its variant, so a
     // static level's lift is an inlined call, not one through a pointer.
     let wraps: Vec<TokenStream> = tree
@@ -755,7 +774,23 @@ pub(crate) fn generate(
             #(#method_items)*
             #(#child_accessors)*
         }
-    }, quote! { #(#server_checks)* }))
+
+        // NEST-14: what an untyped client of this node becomes
+        // (`Untyped::typed`), and what a parent's accessor would build.
+        impl<T> #client_path::FromRoute<T> for #client_ty<T> {
+            fn from_route(transport: T, route: #client_path::Route) -> Self {
+                Self { transport, route, lift: #client_path::Root }
+            }
+        }
+    }, quote! {
+        #(#server_checks)*
+        impl<__T, __L> #client_ty<__T, __L>
+        where
+            __T: #client_path::Transport + ::core::clone::Clone + ::core::marker::Send + ::core::marker::Sync + 'static,
+        {
+            #(#typed_peers)*
+        }
+    }))
 }
 
 /// RETURNS-46: what an instance name may not be — a static child's segment
@@ -966,6 +1001,101 @@ fn child_accessor(
             }
         }
     }
+}
+
+/// NEST-14: the accessor of a node whose interface the parent does not
+/// know — a `#[child(opaque)]` (static: `<path>.<segment>`; dynamic:
+/// `<path>.<name>`) or an untyped `#[peer]` slot (`<path>.<slot>.<name>`):
+/// an [`Untyped`](plexus_client::Untyped) client, which calls by name and
+/// becomes a typed one with `.typed::<XClient<_>>()`.
+fn untyped_accessor(c: &ChildMethodInfo, namespace: &str, client: &syn::Path, reserved: &Reserved) -> TokenStream {
+    let fn_name = &c.fn_name;
+    let segment = c.fn_name.to_string();
+    let joined = format!("{namespace}.{segment}");
+    let with_desc = |routes: String| if c.description.is_empty() { routes } else { format!("{}\n\n{routes}", c.description) };
+    if c.peer.is_some() {
+        let doc = with_desc(format!(
+            "The untyped peer `name` of the slot `{segment}` — its methods go to `{namespace}.{segment}.<name>.<method>` \
+             (or beneath wherever this client is mounted), called by name: an untyped client, made typed with \
+             `.typed::<XClient<_>>()` once its interface is known (NEST-14). A name that is not a route segment \
+             makes a client every call of which fails at once."
+        ));
+        quote! {
+            #[doc = #doc]
+            pub fn #fn_name(&self, name: &str) -> #client::Untyped<&T> {
+                #client::Untyped::from_route(&self.transport, self.route.child(#segment, #joined).segment(name))
+            }
+        }
+    } else if matches!(c.kind, ChildMethodKind::Dynamic) {
+        let statics = &reserved.statics;
+        let doc = with_desc(format!(
+            "The instance `name` of the opaque dynamic child `{segment}` — its methods go to \
+             `{namespace}.<name>.<method>`, called by name: an untyped client (NEST-14). A name the service \
+             would route elsewhere makes a client every call of which fails at once."
+        ));
+        quote! {
+            #[doc = #doc]
+            pub fn #fn_name(&self, name: &str) -> #client::Untyped<&T> {
+                #client::Untyped::from_route(&self.transport, self.route.instance(#namespace, name, &[#(#statics),*]))
+            }
+        }
+    } else {
+        let doc = with_desc(format!(
+            "The opaque child `{segment}` — its methods go to `{namespace}.{segment}.<method>`, called by name: an \
+             untyped client (NEST-14)."
+        ));
+        quote! {
+            #[doc = #doc]
+            pub fn #fn_name(&self) -> #client::Untyped<&T> {
+                #client::Untyped::from_route(&self.transport, self.route.child(#segment, #joined))
+            }
+        }
+    }
+}
+
+/// NEST-14: a typed `#[peer]` slot's accessor — the slot's contract's
+/// client at `<path>.<slot>.<name>`, become a peer (NEST-7's
+/// `XClient::peer_at`): the backend's interface checked against the
+/// client's stamp, `ShapeMismatch` when a method it calls moved. The
+/// contract's client is named from the slot's peer trait (`forge::ForgePeer`
+/// → `forge::ForgeClient`); a trait not named `…Peer` gets no accessor.
+fn typed_peer_accessor(
+    c: &ChildMethodInfo,
+    peer_trait: &syn::Path,
+    namespace: &str,
+    client_ty: &syn::Ident,
+    crate_path: &syn::Path,
+) -> Option<TokenStream> {
+    let mut path = peer_trait.clone();
+    let last = path.segments.last_mut()?;
+    let name = last.ident.to_string();
+    let stem = name.strip_suffix("Peer").filter(|s| !s.is_empty())?;
+    last.ident = format_ident!("{}Client", stem, span = last.ident.span());
+    last.arguments = syn::PathArguments::None;
+    let fn_name = &c.fn_name;
+    let segment = c.fn_name.to_string();
+    let joined = format!("{namespace}.{segment}");
+    let peer = quote! { #crate_path::plexus::peer };
+    let routes = format!(
+        "The peer `name` of the typed slot `{segment}` (`{namespace}.{segment}.<name>`, beneath wherever this \
+         `{client_ty}` is mounted) as `{}`: its interface asked once and checked against the client's stamp — \
+         `PeerError::ShapeMismatch` when a method it calls moved (NEST-14, NEST-7). A name that is not a route \
+         segment is `PeerError::NotFound`, and nothing is sent.",
+        quote!(#path).to_string().replace(' ', "")
+    );
+    let doc = if c.description.is_empty() { routes } else { format!("{}\n\n{routes}", c.description) };
+    Some(quote! {
+        #[doc = #doc]
+        pub async fn #fn_name(&self, name: &str)
+            -> ::core::result::Result<#path<#peer::PeerTransport<__T>>, #peer::PeerError>
+        {
+            let __route = self.route.child(#segment, #joined).segment(name);
+            if __route.refusal().is_some() {
+                return ::core::result::Result::Err(#peer::PeerError::NotFound { name: ::std::string::ToString::to_string(name) });
+            }
+            #path::peer_at(::core::clone::Clone::clone(&self.transport), ::std::string::ToString::to_string(__route.path(#namespace))).await
+        }
+    })
 }
 
 #[cfg(test)]

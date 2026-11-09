@@ -67,6 +67,19 @@ impl Route {
         } else {
             self.path.join(name)
         };
+        self.then(path, name, statics)
+    }
+
+    /// NEST-14: the route of the segment `name` below this one — a peer
+    /// slot's name, an untyped child — joined to this route's path as it
+    /// is (empty: `name` alone), refused as [`Route::instance`] refuses a
+    /// name, with no static children to avoid.
+    pub fn segment(&self, name: &str) -> Route {
+        let path = if self.path.is_empty() { RoutePath::from(name.to_owned()) } else { self.path.join(name) };
+        self.then(path, name, &[])
+    }
+
+    fn then(&self, path: RoutePath, name: &str, statics: &[&str]) -> Route {
         let refusal = if name.is_empty() {
             Some(NameRefusal::Empty)
         } else if name.contains('.') {
@@ -84,6 +97,12 @@ impl Route {
             (None, None) => None,
         };
         Route { path, refused }
+    }
+
+    /// NEST-14: why nothing may be sent along this route, if anything —
+    /// the error every call through it is.
+    pub fn refusal(&self) -> Option<ClientError> {
+        self.refused.as_ref().map(|r| ClientError::InvalidName { name: r.0.clone(), reason: r.1 })
     }
 
     /// `method` sent along this route, or why it may not be.

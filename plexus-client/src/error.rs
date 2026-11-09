@@ -146,6 +146,20 @@ pub enum ClientError {
         /// Why it cannot name an instance.
         reason: NameRefusal,
     },
+
+    /// NEST-14: an untyped client made typed (`Untyped::typed`) against a
+    /// node that does not serve the typed client's interface — the methods
+    /// it serves under another shape, or not at all. Nothing was called.
+    ShapeMismatch {
+        /// The node's dotted path.
+        path: String,
+        /// The typed client's interface hash.
+        wanted: String,
+        /// The node's.
+        got: String,
+        /// The client's methods the node serves otherwise, or not at all.
+        methods: Vec<String>,
+    },
 }
 
 /// Why an instance name cannot reach its instance (RETURNS-46): the service
@@ -231,6 +245,11 @@ impl fmt::Display for ClientError {
             ClientError::InvalidName { name, reason } => {
                 write!(f, "instance name {name:?} refused, nothing sent: {reason}")
             }
+            ClientError::ShapeMismatch { path, wanted, got, methods } => write!(
+                f,
+                "`{path}` does not serve the interface wanted ({wanted}, it serves {got}): {}",
+                methods.join(", ")
+            ),
         }
     }
 }
@@ -240,7 +259,10 @@ impl std::error::Error for ClientError {
         match self {
             ClientError::Transport(e) => Some(e),
             ClientError::Remote(e) => Some(e),
-            ClientError::Decode { .. } | ClientError::Encode { .. } | ClientError::InvalidName { .. } => None,
+            ClientError::Decode { .. }
+            | ClientError::Encode { .. }
+            | ClientError::InvalidName { .. }
+            | ClientError::ShapeMismatch { .. } => None,
         }
     }
 }

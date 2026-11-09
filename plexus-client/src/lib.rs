@@ -114,6 +114,7 @@ pub mod route;
 /// RETURNS-36: a peer on plexus-wire's spec as main wrote it, read as 0.8.
 pub mod spec05;
 pub mod transport;
+pub mod untyped;
 /// PERF.115-43: `#[derive(plexus_macros::Deserialize)]`'s runtime, reached
 /// through `__rt::type_first`.
 mod type_first;
@@ -135,6 +136,7 @@ pub use method_stream::{call_one, call_one_with_input, Decoder, EventOf, Events,
 pub use params::Params;
 pub use progress::{Note, Progress};
 pub use remote_error::{DenyReason, OtherError, ParamProblem, RemoteError};
+pub use untyped::{FromRoute, ShapeCheck, Untyped};
 pub use transport::{encode_input, InputItem, InputItems, ItemStream, MethodRef, RawItemStream, RoutePath, Transport};
 pub use watch::{
     watch, watch_with, Errors, Fallible, StopOnError, Watch, Watched10, Watched11, Watched12, Watched2, Watched3,

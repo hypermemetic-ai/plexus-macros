@@ -13,6 +13,8 @@ fn client_compile_pass() {
     t.pass("tests/compile/client_opt_out_is_unchanged.rs");
     // RETURNS-9: a many-item method's stream is a plain `TryStream`.
     t.pass("tests/compile/client_many_item_try_collect.rs");
+    // NEST-14: every kind of child has an accessor, of its kind's type.
+    t.pass("tests/compile/nest14_every_child_has_an_accessor.rs");
 }
 
 #[test]
@@ -35,4 +37,6 @@ fn client_compile_fail() {
     // RETURNS-46 review: a dynamic child with no client says to add
     // `#[child(opaque)]` (or give it one).
     t.compile_fail("tests/compile/returns46_dynamic_child_without_client.rs");
+    // NEST-14: an opaque child is untyped until made typed.
+    t.compile_fail("tests/compile/nest14_untyped_has_no_typed_methods.rs");
 }
