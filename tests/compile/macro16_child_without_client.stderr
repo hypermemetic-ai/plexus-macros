@@ -30,31 +30,12 @@ help: the trait `HasClient` is not implemented for `Inputs`
 26 | pub struct Inputs;
    | ^^^^^^^^^^^^^^^^^
    = note: mark the child `#[plexus_macros::child(opaque)]`: no accessor, no variant in the parent's aggregate, routed as before — or give `Inputs` a client (name it `…Activation`, or add `client`)
-help: the following other types implement trait `HasClient`
-  --> tests/compile/macro16_child_without_client.rs:11:1
-   |
-11 |   #[plexus_macros::activation(namespace = "tickets", client)]
-   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Tickets`
-   |
-  ::: $PLEXUS_CORE/src/activations/echo/activation.rs
-   |
-   | / #[plexus_macros::activation(
-   | |     version = "1.0.0",
-   | |     description = "Echo messages back - demonstrates plexus-macros usage",
-...  |
-   | | )]
-   | |__^ `EchoActivation`
-   |
-  ::: $PLEXUS_CORE/src/plexus/auth_activation.rs
-   |
-   | / #[plexus_macros::activation(
-   | |     version = "1.0.0",
-   | |     description = "Sign in, who am I, what does this need",
-   | |     roles(member = ["whoami", "logout", "requires"]),
-...  |
-   | |     typed_params,
-   | | )]
-   | |__^ `AuthActivation`
+   = help: the following other types implement trait `HasClient`:
+             AuthActivation
+             ConfigActivation
+             ConfigKeyActivation
+             EchoActivation
+             Tickets
 note: required by a bound in `__plexus_child_needs_a_client`
   --> tests/compile/macro16_child_without_client.rs:11:1
    |
