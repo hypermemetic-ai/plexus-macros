@@ -5,6 +5,19 @@ This file starts at 0.7.0; earlier changes are in the git history.
 
 ## [Unreleased] — 0.11.0
 
+NEST-14: the client all the way down. A typed `#[peer]` slot's accessor is
+its contract's client become a peer at `<path>.<slot>.<name>`
+(`async fn slot(&self, name) -> Result<ForgeClient<PeerTransport<T>>,
+PeerError>`, stamp-checked; server half). An untyped `#[peer]` slot and a
+`#[child(opaque)]` get an untyped accessor: plexus-client's new `Untyped<T>`
+(`call`, `call_one`, `child`, `schema`, `typed::<XClient<_>>()` checked
+against the node's schema by method shape hashes, `typed_unchecked`). Every
+client implements `FromRoute<T>` and, in the server half, `ShapeCheck`.
+plexus-client (breaking): `MethodRef::named(path, method)` for names known at
+run time, so `MethodRef::namespace()` and `method()` answer `&str`, no longer
+`&'static str`; `ClientError::ShapeMismatch`; `Route::segment` and
+`Route::refusal`.
+
 NEST-17 (breaking: a new item in every activation's scope): the activation's
 trait every time. `impl Shop` and `impl ShopActivation` emit `trait
 ShopActivationSchema` (owner, 2026-11-09; NEST-18 D2), reversing RETURNS-47's

@@ -719,7 +719,7 @@ while let Some(ev) = all.next().await { state.reduce(ev?) }   // ev: TicketsEven
 | **Transport-generic** | any `plexus_client::Transport` — in-process, WebSocket JSON-RPC, REST + SSE. The emitted code names none of them. |
 | **Two error layers** | `ClientError::Transport` (the connection failed) vs `ClientError::Remote(RemoteError)` (the server answered with a typed `error` frame). An activation's *own* `Err` item stays data. |
 | **Zero drift** | rename a field on an item type and every consumer of the client stops compiling. |
-| **Children** (MACRO-16, RETURNS-46) | a static `#[child] fn inputs(&self) -> Inputs` gives the parent's client `fn inputs(&self) -> InputsClient<&T, Static<L, __TicketsClientInputs>>`, whose calls go to `tickets.inputs.<method>`, the path the service routes. A dynamic `#[child] fn item(&self, name: &str) -> Option<Item>` gives `fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`, whose calls go to `tickets.<name>.<method>`. `#[child(opaque)]`: neither. Accessors nest, so `client.inputs().history().tail(..)` goes to `tickets.inputs.history.tail`. The child must have a client too, or `InputsClient` does not resolve at the accessor's return type. `InputsClient::new(t)` alone still sends `inputs.<method>`; `InputsClient::at(t, "tickets.inputs")` mounts it by hand; both yield the child's own aggregate. |
+| **Children** (MACRO-16, RETURNS-46) | a static `#[child] fn inputs(&self) -> Inputs` gives the parent's client `fn inputs(&self) -> InputsClient<&T, Static<L, __TicketsClientInputs>>`, whose calls go to `tickets.inputs.<method>`, the path the service routes. A dynamic `#[child] fn item(&self, name: &str) -> Option<Item>` gives `fn item(&self, name: &str) -> ItemClient<&T, Named<L, ItemEvent, TicketsEvent>>`, whose calls go to `tickets.<name>.<method>`. `#[child(opaque)]` and a `#[peer]` slot: the untyped and peer accessors below (NEST-14). Accessors nest, so `client.inputs().history().tail(..)` goes to `tickets.inputs.history.tail`. The child must have a client too, or `InputsClient` does not resolve at the accessor's return type. `InputsClient::new(t)` alone still sends `inputs.<method>`; `InputsClient::at(t, "tickets.inputs")` mounts it by hand; both yield the child's own aggregate. |
 
 ### The aggregate up the tree (RETURNS-46)
 
@@ -805,9 +805,43 @@ known to an older client, whose instance of that name the service routes to
 the new sibling.
 
 **`#[child(opaque)]`** — a child whose type has no client (a hand-written
-`ChildRouter`, an activation without one): no accessor, no variant, routed
-as before. A child of a client activation without a client and without
-`opaque` is a compile error that says so. A method whose wire name is a
+`ChildRouter`, an activation without one): no variant, routed as before,
+and (NEST-14) an untyped accessor — `fn raw(&self) -> Untyped<&T>` at
+`<path>.raw`, a dynamic one `fn item(&self, name: &str) -> Untyped<&T>` at
+`<path>.<name>`. A child of a client activation without a client and without
+`opaque` is a compile error that says so.
+
+**Peer slots and the untyped client (NEST-14).** One client reaches every
+node of the tree:
+
+| child | accessor |
+|---|---|
+| static `#[child] fn x(&self) -> X` | `x()` → `XClient<&T, Static<…>>` |
+| dynamic `#[child] fn x(&self, name) -> Option<X>` | `x(name)` → `XClient<&T, Named<…>>` |
+| typed `#[peer] async fn x(&self, name) -> Result<Box<dyn forge::ForgePeer>, PeerError>` | `async x(name)` → `Result<forge::ForgeClient<PeerTransport<T>>, PeerError>` at `<path>.x.<name>`: the contract's client become a peer (`ForgeClient::peer_at`), its interface checked against the client's stamp — `ShapeMismatch` when a method it calls moved. Needs `T: Clone + Send + Sync + 'static`; emitted in the server half (the stamp is plexus-core's) |
+| untyped `#[peer] async fn x(&self, name) -> Result<Box<dyn Peer>, PeerError>` | `x(name)` → `Untyped<&T>` at `<path>.x.<name>` |
+| `#[child(opaque)]` | `x()` / `x(name)` → `Untyped<&T>` |
+
+`plexus_client::Untyped<T>` is a transport and a dotted path, for a node
+whose interface is not known when the program is written: `call(method,
+params)` → `MethodStream<'_, Value>`, `call_one(method, params)`,
+`child(name)` / `into_child(name)` one level down, `schema()`, and
+`typed::<XClient<_>>()` — the node's schema checked against `XClient`'s
+methods by their shape hashes (NEST-7's `Interface`): every method the client
+calls served under the same shape (a node that serves more is fine), else
+`ClientError::ShapeMismatch { path, wanted, got, methods }` and nothing else
+is called. `typed_unchecked()` skips the check (a client-only build, whose
+clients have no `ShapeCheck`). Every generated client implements
+`plexus_client::FromRoute<T>`, and — in the server half — `ShapeCheck`.
+An untyped node's items are `serde_json::Value`s and lift into no parent's
+aggregate. It works over every `Transport`: a socket, `HubTransport`, a
+host's transport handed to a child.
+
+```rust
+let shop: ShopClient<_> = dyn_client.peer("shop").typed().await?;
+let gh = host.integration("github").await?;           // forge::ForgeClient<PeerTransport<T>>
+let repos = forge::Forge::repos(&gh).await?;
+``` A method whose wire name is a
 child's segment is refused: they share one route namespace and one tag.
 `fixtures/aggregate-tree` holds the JSON at every level;
 `fixtures/aggregate-probe` the shapes the tree must survive.

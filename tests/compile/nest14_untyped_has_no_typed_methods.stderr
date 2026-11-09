@@ -1,0 +1,10 @@
+error[E0599]: no method named `ping` found for struct `Untyped<T>` in the current scope
+  --> tests/compile/nest14_untyped_has_no_typed_methods.rs:36:39
+   |
+36 |     let _ = TreeClient::new(&t).raw().ping();
+   |                                       ^^^^ method not found in `Untyped<&&MemoryTransport>`
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following traits define an item `ping`, perhaps you need to implement one of them:
+           candidate #1: `LeafActivationSchema`
+           candidate #2: `LeafRpcServer`

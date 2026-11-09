@@ -917,7 +917,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     };
     let (client_impl, client_server_checks) = match &client_path {
         Some(path) => {
-            let (mut client, checks) = client::generate(&names.client_ident, &namespace, &methods, &child_methods, path)?;
+            let (mut client, checks) = client::generate(&names.client_ident, &namespace, &methods, &child_methods, path, &crate_path)?;
             // RETURNS-47: a parent's `#[child]` names its child's client from
             // the child type (`{stem}Client`, MACRO-16). Where this
             // activation's client is named otherwise — `impl Trait for Type`
@@ -938,7 +938,51 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             let has_client = quote! {
                 impl #impl_generics #path::HasClient for #self_ty #where_clause {}
             };
-            (client, quote! { #has_client #checks })
+            // NEST-14: what `Untyped::typed::<{Client}<_>>()` checks a node's
+            // schema against — this activation's methods by their shape
+            // hashes (NEST-7's `Interface`), in the server half, where the
+            // method schemas are.
+            let shape_check = if contract_mode || input_impl.generics.params.is_empty() {
+                let client_ident = &names.client_ident;
+                let enum_name = format_ident!("{}Method", struct_name);
+                let version_expr = match &args.version {
+                    Some(v) => quote! { #v },
+                    None => quote! { env!("CARGO_PKG_VERSION") },
+                };
+                let peer = quote! { #crate_path::plexus::peer };
+                let desc = &resolved_description;
+                quote! {
+                    impl<__T, __L> #path::ShapeCheck for #client_ident<__T, __L> {
+                        fn shape_check(path: &str, schema: &#deps::serde_json::Value) -> ::core::result::Result<(), #path::ClientError> {
+                            static __WANT: ::std::sync::OnceLock<#peer::Interface> = ::std::sync::OnceLock::new();
+                            let __want = __WANT.get_or_init(|| {
+                                let __schema = #crate_path::plexus::PluginSchema::leaf(#namespace, #version_expr, #desc, #enum_name::method_schemas());
+                                #peer::Interface::named(#namespace, &__schema)
+                            });
+                            let __served: #crate_path::plexus::PluginSchema = #deps::serde_json::from_value(::core::clone::Clone::clone(schema))
+                                .map_err(|e| #path::ClientError::Decode {
+                                    content_type: ::core::option::Option::Some(::std::format!("{path}.schema")),
+                                    message: ::std::string::ToString::to_string(&e),
+                                })?;
+                            match #peer::Interface::named(#namespace, &__served).satisfies(__want) {
+                                ::core::result::Result::Ok(()) => ::core::result::Result::Ok(()),
+                                ::core::result::Result::Err(#peer::PeerError::ShapeMismatch { wanted, got, methods }) => {
+                                    ::core::result::Result::Err(#path::ClientError::ShapeMismatch { path: ::std::string::ToString::to_string(path), wanted, got, methods })
+                                }
+                                ::core::result::Result::Err(__e) => ::core::result::Result::Err(#path::ClientError::ShapeMismatch {
+                                    path: ::std::string::ToString::to_string(path),
+                                    wanted: ::core::clone::Clone::clone(&__want.hash),
+                                    got: ::std::string::ToString::to_string(&__e),
+                                    methods: ::std::vec::Vec::new(),
+                                }),
+                            }
+                        }
+                    }
+                }
+            } else {
+                TokenStream::new()
+            };
+            (client, quote! { #has_client #checks #shape_check })
         }
         None => (TokenStream::new(), TokenStream::new()),
     };
