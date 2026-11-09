@@ -411,10 +411,16 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             ),
         ));
     }
-    // RETURNS-47 (owner, 2026-11-04, reversing MACRO-13's `always`): a
-    // trait only when named (`trait = "…"`) or for a contract — each method
-    // in it under its own return type (RETURNS-36).
-    let trait_ident: Option<syn::Ident> = names.trait_ident.clone();
+    // NEST-17 (owner, 2026-11-09, reversing RETURNS-47's "only when
+    // named"): the trait every time — named (`trait = "…"`), a contract's,
+    // or `{Name}ActivationSchema` — each method in it under its own return
+    // type (RETURNS-36). The default steps aside for a generic impl, whose
+    // methods' types may name parameters a trait cannot.
+    let trait_ident: Option<syn::Ident> = if names.trait_default && !input_impl.generics.params.is_empty() {
+        None
+    } else {
+        names.trait_ident.clone()
+    };
     let self_callable = contract::self_callable(&methods);
     if contract_mode && !self_callable {
         let m = methods.iter().find(|m| contract::injected(m).is_some()).unwrap();
@@ -605,7 +611,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         ));
     }
 
-    // CHILD-4: resolve `list = "..."` / `search = "..."` args against the
+    // CHILD-4: resolve `list = …` / `search = …` args against the
     // same-impl sibling methods. Missing names produce `not found in impl`;
     // signature mismatches produce an error containing `signature mismatch`.
     let mut list_method: Option<ListSearchMethodInfo> = None;
@@ -630,7 +636,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 return Err(syn::Error::new(
                     name.span(),
                     format!(
-                        "duplicate `list = \"{}\"` across #[plexus_macros::child] methods; \
+                        "duplicate `list = {}` across #[plexus_macros::child] methods; \
                          at most one list method per activation impl",
                         name
                     ),
@@ -649,7 +655,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 return Err(syn::Error::new(
                     name.span(),
                     format!(
-                        "duplicate `search = \"{}\"` across #[plexus_macros::child] methods; \
+                        "duplicate `search = {}` across #[plexus_macros::child] methods; \
                          at most one search method per activation impl",
                         name
                     ),
@@ -964,12 +970,23 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     // MACRO-13: the trait, its implementations, and a contract's struct.
     let mut trait_server_items = TokenStream::new();
     let mut trait_items = TokenStream::new();
-    if let Some(trait_ident) = &trait_ident {
-        let boxes = contract::boxes(
+    // NEST-17: the default trait, asked for by no one, steps aside in a
+    // crate that can name no boxed stream (neither plexus-client nor
+    // futures); a named one says why it cannot be written.
+    let boxes = match &trait_ident {
+        None => None,
+        Some(_) => match contract::boxes(
             client_path.as_ref(),
             &crate_path,
             args.trait_span.unwrap_or_else(Span::call_site),
-        )?;
+        ) {
+            Ok(b) => Some(b),
+            Err(_) if names.trait_default => None,
+            Err(e) => return Err(e),
+        },
+    };
+    if let (Some(trait_ident), Some(boxes)) = (&trait_ident, &boxes) {
+        let boxes = boxes;
         trait_items.extend(contract::trait_def(
             trait_ident,
             &struct_name,
@@ -1008,17 +1025,41 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                     &deps,
                 ));
             }
-        } else if self_callable {
-            trait_server_items.extend(contract::activation_trait_impl(
-                trait_ident,
-                &struct_name,
-                self_ty,
-                &impl_generics,
-                where_clause,
-                &methods,
-                &boxes,
-                &deps,
-            ));
+        } else {
+            // A named trait whose methods take nothing injected is
+            // implemented as before (its `Clone` asked for by name); NEST-17:
+            // otherwise the activation implements its trait where it is
+            // `Clone`, reading what the server injects from the call's
+            // context.
+            let generic = !input_impl.generics.params.is_empty();
+            let strict = !names.trait_default && self_callable;
+            if strict || contract::self_implementable(&methods, generic) {
+                let guarded = (!strict).then_some((&crate_path, namespace.as_str()));
+                trait_server_items.extend(contract::activation_trait_impl(
+                    trait_ident,
+                    &struct_name,
+                    self_ty,
+                    &impl_generics,
+                    where_clause,
+                    &methods,
+                    boxes,
+                    &deps,
+                    guarded,
+                ));
+            }
+            // NEST-17: the client as the trait, where every method answers
+            // a `Result` (a contract's shape; a contract's client is a peer
+            // over a `PeerTransport`, NEST-7).
+            if let (Some(cp), true, false) = (client_path.as_ref(), peer::peerable(&methods), generic) {
+                trait_server_items.extend(contract::client_trait_impl(
+                    trait_ident,
+                    &names.client_ident,
+                    &methods,
+                    &boxes.future,
+                    cp,
+                    &crate_path,
+                ));
+            }
         }
     }
 
@@ -1044,7 +1085,8 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         Some(meta) => cfg_gate(server_half, meta, Span::call_site())?,
     };
 
-    let streaming_warnings = contract::streaming_warnings(&methods, &struct_name);
+    let mut streaming_warnings = contract::streaming_warnings(&methods, &struct_name);
+    streaming_warnings.extend(contract::string_arg_warnings(&child_methods, &struct_name));
 
     Ok(quote! {
         #server_half

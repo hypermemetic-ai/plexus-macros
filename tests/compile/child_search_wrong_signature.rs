@@ -33,7 +33,7 @@ impl Solar {
         stream! { yield "pong".into(); }
     }
 
-    #[plexus_macros::child(search = "find_by_id")]
+    #[plexus_macros::child(search = find_by_id)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }

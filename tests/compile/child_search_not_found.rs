@@ -1,4 +1,4 @@
-//! CHILD-4 matrix row 2: `#[child(search = "nonexistent_method")]` where
+//! CHILD-4 matrix row 2: `#[child(search = nonexistent_method)]` where
 //! the named method does not exist in the same impl must fail with an
 //! error containing `not found in impl`.
 
@@ -33,7 +33,7 @@ impl Solar {
         stream! { yield "pong".into(); }
     }
 
-    #[plexus_macros::child(search = "never_declared")]
+    #[plexus_macros::child(search = never_declared)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }

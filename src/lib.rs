@@ -266,13 +266,18 @@ pub fn hub_method(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
+/// `list = method` and `search = method` name the sibling methods that
+/// stream a dynamic child's names (`#[plexus_macros::child(list = names)]`).
+/// NEST-17: by path; the string form (`list = "names"`) is accepted for one
+/// release with a deprecation warning.
+///
 /// # How the child inherits its caller (MACRO-20)
 ///
-/// `forward = "same_service" | "identity_only" | "pass_through" | "anonymous"`
+/// `forward = same_service | identity_only | pass_through | anonymous`
 /// picks the policy the emitted `ChildRouter::forward_policy_for` hands
 /// the child. A static child defaults to `same_service`: the same service as
 /// its parent, it keeps the caller whole (principal stamp, session,
-/// ceiling). Write `#[plexus_macros::child(forward = "identity_only")]` for a
+/// ceiling). Write `#[plexus_macros::child(forward = identity_only)]` for a
 /// deputy that must not see the caller's session. A dynamic child keeps the
 /// framework default (`IdentityOnly`) unless it names one.
 ///
@@ -282,9 +287,9 @@ pub fn hub_method(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// across the network, typed by a contract's peer trait or untyped:
 ///
 /// ```ignore
-/// #[plexus_macros::peer(list = "integrations")]
+/// #[plexus_macros::peer(list = integrations)]
 /// async fn integration(&self, name: &str) -> Result<Box<dyn forge::ForgePeer>, PeerError> { … }
-/// #[plexus_macros::peer(list = "dendrites", search = "find")]
+/// #[plexus_macros::peer(list = dendrites, search = find)]
 /// async fn dendrite(&self, name: &str) -> Result<Box<dyn Peer>, PeerError> { … }
 /// ```
 ///
@@ -592,8 +597,8 @@ fn generate_schema_fn(
 ///
 /// # `#[activation]` needs nothing — MACRO-13, RETURNS-47
 ///
-/// The type names everything, every key is an override, and a trait is
-/// emitted only when named:
+/// The type names everything, every key is an override, and (NEST-17) the
+/// trait is emitted every time, `{Name}ActivationSchema` unless named:
 ///
 /// ```ignore
 /// /// Tickets.                              // the activation's description
@@ -607,7 +612,8 @@ fn generate_schema_fn(
 ///     async fn helper(&self) -> u32 { .. }  // not pub: a plain method
 /// }
 /// // namespace "tickets"; `TicketsClient<T>`, whose `total()` answers
-/// // `Result<u64, ClientError>` and `list()` a `MethodStream`. No trait.
+/// // `Result<u64, ClientError>` and `list()` a `MethodStream`; the trait
+/// // `TicketsActivationSchema`, implemented by `Tickets` (when `Clone`).
 /// ```
 ///
 /// - **The name rule.** `impl Tickets` is named by itself (RETURNS-47: no
@@ -615,15 +621,24 @@ fn generate_schema_fn(
 ///   before. The namespace is the name in snake_case (`TicketsApi` →
 ///   `tickets_api`), the client `TicketsClient<T>`. `namespace = "…"`
 ///   overrides the namespace.
-/// - **A trait only when named.** `trait = "Bar"` emits `trait Bar` (and
+/// - **The trait every time** (NEST-17, owner 2026-11-09, reversing
+///   RETURNS-47's "only when named"). `impl Shop` and `impl ShopActivation`
+///   emit `trait ShopActivationSchema`; `trait = "Bar"` renames it (and
 ///   names the client `BarClient` and, absent `namespace`, the namespace
-///   `bar`), each wire method in it under its own return type, boxed; the
-///   activation implements it by cloning itself into each stream — unless a
-///   wire method takes what the server injects (`auth`, `reach`,
-///   `#[from_auth]`, `#[activation_param]`). The
-///   client implements no trait: its methods answer `Result<T, ClientError>`
-///   (one item) or the `{Ns}{Method}Stream` alias (many), so no item type
-///   needs `plexus_client::FromClientError`.
+///   `bar`); a contract is its trait (`Foo`). Each wire method is in it
+///   under its own return type, boxed, with nothing the server injects. The
+///   activation implements it by cloning itself into each stream (the
+///   default trait only where the type is `Clone`); a method that takes
+///   `auth`, `reach` or a `#[from_auth]` value reads it from the call's
+///   context there (`plexus_core::call::caller()`, as `impl Trait for Type`
+///   does — a missing caller is the method's error: its `E` from a
+///   `PlexusError` or a `PeerError`; `reach` outside a call is
+///   `Reach::nowhere()`). An `#[activation_param]` is in no context, so an
+///   activation with one does not implement its trait. The client's
+///   methods answer `Result<T, ClientError>` (one item) or the
+///   `{Ns}{Method}Stream` alias (many); it implements the trait too when
+///   every method answers one `Result<T, E>` with `E: From<PeerError>`, so
+///   `dyn ShopActivationSchema` is local or remote alike.
 /// - **`impl Trait for Type`.** `#[plexus_macros::activation] impl
 ///   forge::Forge for GitHub` serves a trait written by hand: the trait
 ///   names the namespace (`forge`) and the client (`ForgeClient<T>`, emitted

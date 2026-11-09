@@ -1,8 +1,8 @@
-error: method `nonexistent_method` referenced by #[plexus_macros::child(list = "nonexistent_method")] on `planet` not found in impl
+error: method `nonexistent_method` referenced by #[plexus_macros::child(list = nonexistent_method)] on `planet` not found in impl
   --> tests/compile/child_list_not_found.rs:37:35
    |
-37 |     #[plexus_macros::child(list = "nonexistent_method")]
-   |                                   ^^^^^^^^^^^^^^^^^^^^
+37 |     #[plexus_macros::child(list = nonexistent_method)]
+   |                                   ^^^^^^^^^^^^^^^^^^
 
 warning: use of deprecated constant `_PLEXUS_MACROS_DEPRECATED_UNNAMED_ACTIVATION_Leaf`: plexus-macros (MACRO-13, RETURNS-47): `Leaf` says its `namespace`, so it expands as before MACRO-13 (only `#[method]`s on the wire, the client on the `client` flag). Remove `namespace` — `impl Leaf` is named by itself: namespace `leaf`, client `LeafClient` — or name the type `LeafActivation` to keep `namespace` as an override; then `client`, `crate_path`, `server_cfg` and `#[method]` may go too. A later release refuses it.
   --> tests/compile/child_list_not_found.rs:16:6

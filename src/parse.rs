@@ -1091,10 +1091,10 @@ pub struct ChildMethodInfo {
     pub kind: ChildMethodKind,
     /// Whether the method is `async fn` — the generated dispatcher awaits it.
     pub is_async: bool,
-    /// CHILD-4: when `#[child(list = "METHOD")]` is present, the name of the
+    /// CHILD-4: when `#[child(list = METHOD)]` is present, the name of the
     /// sibling method that streams child names for `ChildRouter::list_children`.
     pub list_fn: Option<syn::Ident>,
-    /// CHILD-4: when `#[child(search = "METHOD")]` is present, the name of the
+    /// CHILD-4: when `#[child(search = METHOD)]` is present, the name of the
     /// sibling method that streams child names matching a query for
     /// `ChildRouter::search_children`.
     pub search_fn: Option<syn::Ident>,
@@ -1118,9 +1118,13 @@ pub struct ChildMethodInfo {
     /// NEST-7: `#[plexus_macros::peer]` — an activation returned by name,
     /// `Result<Box<dyn I>, PeerError>`: typed by `I`, or untyped (`Peer`).
     pub peer: Option<crate::codegen::peer::PeerShape>,
-    /// NEST-7: for a peer slot with `list = "…"`, whether that sibling is
+    /// NEST-7: for a peer slot with `list = …`, whether that sibling is
     /// `async` (set by the activation driver, which sees the siblings).
     pub list_is_async: bool,
+    /// NEST-17: each `list = "…"` / `search = "…"` written as a string —
+    /// the key and where — said as a deprecation warning (a path, `list =
+    /// names`, is the form now).
+    pub string_args: Vec<(String, proc_macro2::Span)>,
 }
 
 impl ChildMethodInfo {
@@ -1132,10 +1136,10 @@ impl ChildMethodInfo {
         let is_async = method.sig.asyncness.is_some();
         let description = extract_doc_description(&method.attrs).unwrap_or_default();
 
-        // CHILD-4: parse `list = "method"` / `search = "method"` args off the
+        // CHILD-4: parse `list = method` / `search = method` args off the
         // `#[child(...)]` attribute. The attribute itself is the sole carrier
         // of these args — no other attribute recognizes them.
-        let (list_fn, search_fn, forward, opaque) = parse_child_attr_args(&method.attrs)?;
+        let (list_fn, search_fn, forward, opaque, string_args) = parse_child_attr_args(&method.attrs)?;
 
         // IR-3: capture deprecation metadata from `#[deprecated(...)]` +
         // `#[plexus_macros::removed_in("X")]` on this child method.
@@ -1230,27 +1234,37 @@ impl ChildMethodInfo {
             return_ty,
             peer,
             list_is_async: false,
+            string_args,
         })
     }
 }
 
 /// Parse the arguments of a `#[child(...)]` / `#[plexus_macros::child(...)]`
-/// attribute. Supported args:
+/// (or `#[plexus_macros::peer(...)]`) attribute. Supported args:
 ///
-/// - `list = "method_name"` — links a sibling list method for CHILD-4
-/// - `search = "method_name"` — links a sibling search method for CHILD-4
-/// - `forward = "same_service" | "identity_only" | "pass_through" | "anonymous"`
+/// - `list = method_name` — links a sibling list method (CHILD-4)
+/// - `search = method_name` — links a sibling search method (CHILD-4)
+/// - `forward = same_service | identity_only | pass_through | anonymous`
 ///   — MACRO-20: how the child inherits its caller
+/// - `opaque` — RETURNS-46: the child has no typed client
+///
+/// NEST-17: `list` and `search` name a sibling method by its path; the
+/// string forms (`list = "method"`) are still accepted for one release and
+/// returned as `string_args`, which the activation says as a deprecation
+/// warning. `forward` takes the policy as a bare word or a string.
 ///
 /// If the attribute is bare (`#[child]`) every returned value is `None`.
 /// Unknown args are rejected so typos surface early.
+#[allow(clippy::type_complexity)]
 fn parse_child_attr_args(
     attrs: &[syn::Attribute],
-) -> syn::Result<(Option<syn::Ident>, Option<syn::Ident>, Option<ChildForward>, bool)> {
+) -> syn::Result<(Option<syn::Ident>, Option<syn::Ident>, Option<ChildForward>, bool, Vec<(String, proc_macro2::Span)>)> {
+    const EXPECTED: &str = "expected `list = method`, `search = method`, `forward = policy` or `opaque`";
     let mut list_fn: Option<syn::Ident> = None;
     let mut search_fn: Option<syn::Ident> = None;
     let mut forward: Option<ChildForward> = None;
     let mut opaque = false;
+    let mut string_args: Vec<(String, proc_macro2::Span)> = Vec::new();
 
     for attr in attrs {
         let path = attr.path();
@@ -1262,7 +1276,7 @@ fn parse_child_attr_args(
         match &attr.meta {
             // Bare `#[child]` — no args, nothing to parse.
             Meta::Path(_) => {}
-            // `#[child(list = "...", search = "...")]`
+            // `#[child(list = names, search = find)]`
             Meta::List(list) => {
                 let metas = list.parse_args_with(
                     Punctuated::<Meta, Token![,]>::parse_terminated,
@@ -1283,58 +1297,67 @@ fn parse_child_attr_args(
                                 None => {
                                     return Err(syn::Error::new_spanned(
                                         &path,
-                                        "unknown argument to #[plexus_macros::child]; \
-                                         expected `list = \"method\"`, `search = \"method\"`, `forward = \"policy\"` or `opaque`",
+                                        format!("unknown argument to #[plexus_macros::child]; {EXPECTED}"),
                                     ));
                                 }
                             };
-                            let s = match value {
-                                Expr::Lit(ExprLit { lit: Lit::Str(ref s), .. }) => s.clone(),
+                            // NEST-17: a path (`names`), or — deprecated for
+                            // `list` / `search` — a string (`"names"`).
+                            let (word, span, was_string) = match value {
+                                Expr::Lit(ExprLit { lit: Lit::Str(ref s), .. }) => (s.value(), s.span(), true),
+                                Expr::Path(ref p) if p.qself.is_none() && p.path.get_ident().is_some() => {
+                                    let id = p.path.get_ident().unwrap();
+                                    (id.to_string(), id.span(), false)
+                                }
                                 _ => {
                                     return Err(syn::Error::new_spanned(
                                         &value,
                                         format!(
-                                            "#[plexus_macros::child({} = \"...\")] expects a string literal naming a sibling method",
-                                            ident_key
+                                            "#[plexus_macros::child({ident_key} = …)] expects the name of a sibling method \
+                                             (`{ident_key} = method`)",
                                         ),
                                     ));
                                 }
                             };
                             if ident_key == "forward" {
                                 if forward.is_some() {
-                                    return Err(syn::Error::new_spanned(
-                                        &s,
-                                        "duplicate `forward = \"...\"` argument on #[plexus_macros::child]",
+                                    return Err(syn::Error::new(
+                                        span,
+                                        "duplicate `forward = …` argument on #[plexus_macros::child]",
                                     ));
                                 }
-                                forward = Some(ChildForward::parse(&s.value()).ok_or_else(|| {
-                                    syn::Error::new_spanned(
-                                        &s,
+                                forward = Some(ChildForward::parse(&word).ok_or_else(|| {
+                                    syn::Error::new(
+                                        span,
                                         format!(
-                                            "unknown forward policy \"{}\" on #[plexus_macros::child]; expected {}",
-                                            s.value(),
+                                            "unknown forward policy `{word}` on #[plexus_macros::child]; expected {}",
                                             ChildForward::SPELLINGS
                                         ),
                                     )
                                 })?);
                                 continue;
                             }
-                            let method_ident = syn::Ident::new(&s.value(), s.span());
+                            let method_ident = syn::parse_str::<syn::Ident>(&word)
+                                .map(|mut i| {
+                                    i.set_span(span);
+                                    i
+                                })
+                                .map_err(|_| syn::Error::new(span, format!("`{word}` is not a method name")))?;
                             match ident_key.as_str() {
                                 "list" => {
                                     if list_fn.is_some() {
-                                        return Err(syn::Error::new_spanned(
-                                            &s,
-                                            "duplicate `list = \"...\"` argument on #[plexus_macros::child]",
+                                        return Err(syn::Error::new(
+                                            span,
+                                            "duplicate `list = …` argument on #[plexus_macros::child]",
                                         ));
                                     }
                                     list_fn = Some(method_ident);
                                 }
                                 "search" => {
                                     if search_fn.is_some() {
-                                        return Err(syn::Error::new_spanned(
-                                            &s,
-                                            "duplicate `search = \"...\"` argument on #[plexus_macros::child]",
+                                        return Err(syn::Error::new(
+                                            span,
+                                            "duplicate `search = …` argument on #[plexus_macros::child]",
                                         ));
                                     }
                                     search_fn = Some(method_ident);
@@ -1342,20 +1365,18 @@ fn parse_child_attr_args(
                                 other => {
                                     return Err(syn::Error::new_spanned(
                                         &path,
-                                        format!(
-                                            "unknown argument `{}` to #[plexus_macros::child]; \
-                                             expected `list = \"method\"`, `search = \"method\"`, `forward = \"policy\"` or `opaque`",
-                                            other
-                                        ),
+                                        format!("unknown argument `{other}` to #[plexus_macros::child]; {EXPECTED}"),
                                     ));
                                 }
+                            }
+                            if was_string {
+                                string_args.push((ident_key, span));
                             }
                         }
                         other => {
                             return Err(syn::Error::new_spanned(
                                 other,
-                                "unknown argument to #[plexus_macros::child]; \
-                                 expected `list = \"method\"`, `search = \"method\"`, `forward = \"policy\"` or `opaque`",
+                                format!("unknown argument to #[plexus_macros::child]; {EXPECTED}"),
                             ));
                         }
                     }
@@ -1365,13 +1386,13 @@ fn parse_child_attr_args(
                 return Err(syn::Error::new_spanned(
                     attr,
                     "#[plexus_macros::child = ...] form is not supported; \
-                     use `#[plexus_macros::child]` or `#[plexus_macros::child(list = \"...\", search = \"...\")]`",
+                     use `#[plexus_macros::child]` or `#[plexus_macros::child(list = method, search = method)]`",
                 ));
             }
         }
     }
 
-    Ok((list_fn, search_fn, forward, opaque))
+    Ok((list_fn, search_fn, forward, opaque, string_args))
 }
 
 /// The stream-return shape of a sibling `list` / `search` method referenced by
@@ -1425,7 +1446,7 @@ pub fn find_and_validate_list_search_method(
             syn::Error::new(
                 name.span(),
                 format!(
-                    "method `{}` referenced by #[plexus_macros::child({} = \"{}\")] \
+                    "method `{}` referenced by #[plexus_macros::child({} = {})] \
                      on `{}` not found in impl",
                     name,
                     match kind {
