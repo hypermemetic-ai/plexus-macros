@@ -426,6 +426,8 @@ pub(crate) fn injected(m: &MethodInfo) -> Option<&'static str> {
         Some("an `auth` parameter")
     } else if m.takes_reach {
         Some("a `reach` parameter")
+    } else if m.parent.is_some() {
+        Some("a `parent: Parent<…>` parameter")
     } else {
         None
     }
@@ -445,7 +447,7 @@ pub(crate) fn self_callable(methods: &[MethodInfo]) -> bool {
 /// is `None` and `reach` is `Reach::nowhere()` outside a call: fail closed,
 /// never failing.
 fn caller_can_fail(m: &MethodInfo) -> bool {
-    m.requires_auth && !(m.auth_optional && m.auth_resolvers.is_empty())
+    (m.requires_auth && !(m.auth_optional && m.auth_resolvers.is_empty())) || m.parent.is_some()
 }
 
 /// NEST-17: can the activation implement its own trait? Every method a
@@ -495,6 +497,11 @@ fn passed<'a>(m: &'a MethodInfo, convert: impl Fn(&syn::Ident) -> TokenStream) -
     let mut names: Vec<TokenStream> = m.params.iter().map(|p| { let n = &p.name; quote! { #n } }).collect();
     if let Some(i) = &m.input {
         names.insert(i.at, convert(&i.name));
+    }
+    // NEST-16: the parent, made in the helper from the call's context.
+    if let Some(p) = &m.parent {
+        let n = &p.name;
+        names.insert(p.at, quote! { #n });
     }
     names
 }
@@ -671,7 +678,7 @@ fn guarded_trait_impl(
             }
         } else {
             let helper = format_ident!("__plexus_schema_{}", fn_ident);
-            helpers.push(context_helper(m, &helper, &params, boxes, crate_path));
+            helpers.push(context_helper(m, &helper, &params, boxes, crate_path, namespace));
             let grant = format!("{namespace}.{}", m.method_name);
             let fail = m.err_ty.as_ref().map(|e| fail_into(e, &grant, crate_path));
             match m.cardinality {
@@ -749,6 +756,7 @@ fn context_helper(
     params: &[TokenStream],
     boxes: &Boxes,
     crate_path: &syn::Path,
+    namespace_of_helper: &str,
 ) -> TokenStream {
     let fn_ident = &m.fn_name;
     let item = item_ty(m, &boxes.vocab);
@@ -788,6 +796,7 @@ fn context_helper(
         quote! {}
     };
     let reach_arg = if m.takes_reach { quote! { __plexus_reach, } } else { quote! {} };
+    let parent = crate::codegen::parent::binding(m, namespace_of_helper, crate_path);
     let names = passed(m, |n| quote! { ::core::convert::Into::into(#n) });
     let resolver_names: Vec<&syn::Ident> = m.auth_resolvers.iter().map(|r| &r.param_name).collect();
     let args = if m.requires_auth && m.auth_resolvers.is_empty() {
@@ -805,6 +814,7 @@ fn context_helper(
             #auth
             #(#resolvers)*
             #reach
+            #parent
             ::core::result::Result::Ok(#call)
         }
     }

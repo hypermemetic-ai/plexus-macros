@@ -40,6 +40,7 @@ pub fn remote_error(o: &Map<String, Value>) -> RemoteError {
                 Some("missing_scope") => DenyReason::MissingScope { scope: s("scope") },
                 Some("tenant_boundary") => DenyReason::TenantBoundary,
                 Some("not_accepted") => DenyReason::NotAccepted,
+                Some("not_needed") => DenyReason::NotNeeded { method: s("method") },
                 _ => DenyReason::MissingGrant { grant: s("grant"), scope: s("scope"), roles: strings("roles"), held_on: strings("held_on") },
             },
         },

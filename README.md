@@ -944,6 +944,34 @@ Both flags are opt-in: an activation naming neither expands exactly as before.
 
 ---
 
+## A graft that knows its parent: `parent = ShopClient` (NEST-16)
+
+An activation written to be grafted onto a service names that service's
+client, and a method takes it, injected by the server (not a param, not in
+its own client):
+
+```rust
+#[plexus_macros::activation(parent = ShopClient)]
+impl Restock {
+    /// What is running low.
+    pub async fn low(&self, parent: Parent<ShopClient>) -> impl Stream<Item = String> + Send + 'static {
+        let items: Vec<String> = parent.items().filter_map(|i| async move { i.ok() }).collect().await;
+        let _ = parent.host().log("info", "restock looked").await; // the standard upward interface
+        futures::stream::iter(items)
+    }
+}
+```
+
+The macro reads the body: every call chain rooted at `parent` is a need
+(`parent.items()` → `shop.items`, `parent.ui().slots().list()` →
+`shop.ui.slots.list`), published as the schema's `needs` with each method's
+shape hash. Applying the graft checks them against the service (a static
+mount, `ServiceRoot::insert`, plexus-dyn's connect/grow), and the service lets
+the child call back nothing else beyond `host.schema`, `host.whoami`,
+`host.log` and `host.notify`. `parent` used other than as a chain's root is
+a compile error at that use, unless the method lists what it calls:
+`#[plexus_macros::method(uses("shop.items"))]`.
+
 ## Security model
 
 This documents the **actual generated behavior**, not an aspiration. Read it before assuming a method is protected.

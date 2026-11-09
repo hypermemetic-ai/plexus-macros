@@ -91,6 +91,10 @@ pub(crate) const RETURNS_REMOVED: &str =
 /// Parsed attributes for #[hub_method]
 pub struct HubMethodAttrs {
     pub name: Option<String>,
+    /// NEST-16: `uses("shop.items", …)` — the parent's methods this method
+    /// calls, said by hand: added to what is inferred, and what lets the
+    /// injected `parent` leave a call chain (passed on, stored, cloned).
+    pub uses: Vec<String>,
     /// Explicit description from `description = "..."` attribute argument.
     /// When `Some`, this wins over `///` doc comments. When `None`, the method's
     /// doc comments are used as the default description (see `MethodInfo::from_fn`).
@@ -366,6 +370,7 @@ impl Parse for HubMethodAttrs {
         let mut group: Option<String> = None;
         let mut examples: Vec<ParsedExample> = Vec::new();
         let mut values: Vec<(syn::Ident, Vec<String>)> = Vec::new();
+        let mut uses: Vec<String> = Vec::new();
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -533,7 +538,20 @@ impl Parse for HubMethodAttrs {
                         }
                     }
                     Meta::List(MetaList { path, tokens, .. }) => {
-                        if path.is_ident("params") {
+                        if path.is_ident("uses") {
+                            // NEST-16: `uses("shop.items", "shop.ui.slots.list")`.
+                            let parser = Punctuated::<syn::LitStr, Token![,]>::parse_terminated;
+                            for lit in syn::parse::Parser::parse2(parser, tokens.clone())? {
+                                let v = lit.value();
+                                if v.is_empty() || v.starts_with('.') || v.ends_with('.') || !v.contains('.') {
+                                    return Err(syn::Error::new(
+                                        lit.span(),
+                                        format!("uses(\"{v}\"): a method of the parent by its dotted path from the parent's root, e.g. \"shop.items\""),
+                                    ));
+                                }
+                                uses.push(v);
+                            }
+                        } else if path.is_ident("params") {
                             // Parse params(name = "desc", other = "desc2")
                             let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
                             let nested = syn::parse::Parser::parse2(parser, tokens.clone())?;
@@ -587,7 +605,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
+        Ok(HubMethodAttrs { uses, name, description, param_docs, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
     }
 }
 
@@ -599,6 +617,10 @@ const MAX_DESCRIPTION_WORDS: usize = 15;
 
 /// Parsed attributes for #[hub_methods]
 pub struct HubMethodsAttrs {
+    /// NEST-16: `parent = ShopClient` — the client of the service this
+    /// activation is written to be grafted onto; a method takes it as
+    /// `parent: Parent<ShopClient>`.
+    pub parent: Option<syn::Path>,
     /// `namespace = "..."`. MACRO-13: optional — when absent, the type's
     /// name (`impl Foo`, the stem of `impl FooActivation`) or the trait's
     /// name in snake_case.
@@ -796,6 +818,7 @@ impl Parse for HubMethodsAttrs {
         let mut server_cfg_span: Option<proc_macro2::Span> = None;
         // AUTH-3: default roles.
         let mut roles: Vec<RoleDecl> = Vec::new();
+        let mut parent: Option<syn::Path> = None;
 
         if !input.is_empty() {
             // MACRO-13: `trait` is a keyword, which a `Meta` path refuses;
@@ -827,6 +850,20 @@ impl Parse for HubMethodsAttrs {
                                 syn::Error::new_spanned(&path, "request = <Type>: expected a type path (e.g. request = MyRequest or request = ())")
                             })?;
                             request_type = Some(ty);
+                            continue;
+                        }
+
+                        // NEST-16: `parent = ShopClient`, a path to a generated client.
+                        if path.is_ident("parent") {
+                            match &value {
+                                Expr::Path(p) if p.qself.is_none() => parent = Some(p.path.clone()),
+                                _ => {
+                                    return Err(syn::Error::new_spanned(
+                                        &value,
+                                        "parent = <Client>: the parent's generated client, by its path (parent = ShopClient)",
+                                    ))
+                                }
+                            }
                             continue;
                         }
 
@@ -982,6 +1019,7 @@ impl Parse for HubMethodsAttrs {
         }
 
         Ok(HubMethodsAttrs {
+            parent,
             namespace,
             trait_attr,
             trait_span,
@@ -1815,7 +1853,43 @@ pub fn has_method_attr(method: &ImplItemFn) -> bool {
 }
 
 /// Information extracted from a #[hub_method] function
+/// NEST-16: a method's injected `parent: Parent<C>`.
+#[derive(Clone)]
+pub struct ParentParam {
+    pub name: syn::Ident,
+    /// Its place among the arguments the method is called with after the
+    /// injected ones (the RPC params and an `Input`).
+    pub at: usize,
+    /// `C`, as the signature says it (the macro has already written its
+    /// transport: `ShopClient<ParentTransport>`).
+    pub client: Type,
+    /// `Parent<C>`.
+    pub ty: Type,
+}
+
+/// NEST-16: `C` of a `Parent<C>` type (by its last path segment).
+pub(crate) fn parent_client_type(ty: &Type) -> Option<Type> {
+    let Type::Path(tp) = ty else { return None };
+    let last = tp.path.segments.last()?;
+    if last.ident != "Parent" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else { return None };
+    match args.args.first()? {
+        syn::GenericArgument::Type(t) if args.args.len() == 1 => Some(t.clone()),
+        _ => None,
+    }
+}
+
 pub struct MethodInfo {
+    /// NEST-16: the injected `parent: Parent<C>` parameter, if any.
+    pub parent: Option<ParentParam>,
+    /// NEST-16: `uses(…)`, as written.
+    pub uses: Vec<String>,
+    /// NEST-16: the call chains on `parent` found in the body (each the
+    /// names of its links, as the code wrote them), filled in by the
+    /// activation's codegen.
+    pub parent_chains: Vec<Vec<String>>,
     pub fn_name: syn::Ident,
     pub method_name: String,
     pub description: String,
@@ -1998,6 +2072,8 @@ impl MethodInfo {
         let mut auth_at: Option<usize> = None;
         // BIDIR-6: the one `Input<T>`.
         let mut input: Option<InputInfo> = None;
+        // NEST-16: the one `Parent<C>`.
+        let mut parent: Option<ParentParam> = None;
         for arg in &method.sig.inputs {
             if let FnArg::Typed(pat_type) = arg {
                 let this_index = typed_index;
@@ -2005,6 +2081,31 @@ impl MethodInfo {
                 if let Pat::Ident(ident) = &*pat_type.pat {
                     let name = ident.ident.clone();
                     let name_str = name.to_string();
+
+                    // NEST-16: the server passes what it injects first, so a
+                    // `parent` comes after every other injected parameter.
+                    if parent.is_some()
+                        && ((name_str == "reach" && is_reach_type(&pat_type.ty))
+                            || has_activation_param_attr(&pat_type.attrs)
+                            || extract_from_auth_attr(&pat_type.attrs).is_some()
+                            || (name_str == "auth" && classify_auth_context_type(&pat_type.ty).is_some()))
+                    {
+                        return Err(syn::Error::new_spanned(
+                            pat_type,
+                            "`parent: Parent<…>` comes after `auth`, `reach`, `#[from_auth]` and `#[activation_param]` parameters",
+                        ));
+                    }
+                    if let Some(client) = parent_client_type(&pat_type.ty) {
+                        if let Some(first) = &parent {
+                            return Err(syn::Error::new_spanned(
+                                pat_type,
+                                format!("`{method_name}` takes a second `Parent` (the first is `{}`): a method takes at most one", first.name),
+                            ));
+                        }
+                        let at = params.len() + usize::from(input.is_some());
+                        parent = Some(ParentParam { name, at, client, ty: (*pat_type.ty).clone() });
+                        continue;
+                    }
 
                     // AUTH-2: `reach: Reach` is provided by the framework (the
                     // gate's answer). It must come first, or right after
@@ -2238,6 +2339,9 @@ impl MethodInfo {
         let group = hub_method_attrs.and_then(|a| a.group.clone());
 
         Ok(MethodInfo {
+            parent,
+            uses: hub_method_attrs.map(|a| a.uses.clone()).unwrap_or_default(),
+            parent_chains: Vec::new(),
             fn_name,
             method_name,
             description,
@@ -2804,6 +2908,7 @@ mod tests {
             }
         };
         let attrs = HubMethodAttrs {
+            uses: vec![],
             name: None,
             description: None,
             param_docs: {

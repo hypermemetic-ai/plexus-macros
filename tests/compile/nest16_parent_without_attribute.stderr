@@ -1,0 +1,25 @@
+error: `low` takes a `Parent`, but the activation names no parent: `#[plexus_macros::activation(parent = ShopClient)]`
+  --> tests/compile/nest16_parent_without_attribute.rs:27:18
+   |
+27 |     pub async fn low(&self, parent: Parent<ShopClient>) -> impl Stream<Item = usize> + Send + 'static {
+   |                  ^^^
+
+warning: unused imports: `StreamExt` and `Stream`
+ --> tests/compile/nest16_parent_without_attribute.rs:2:23
+  |
+2 | use futures::stream::{Stream, StreamExt};
+  |                       ^^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `plexus_core::plexus::Parent`
+ --> tests/compile/nest16_parent_without_attribute.rs:3:5
+  |
+3 | use plexus_core::plexus::Parent;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `shop::ShopClient`
+  --> tests/compile/nest16_parent_without_attribute.rs:18:5
+   |
+18 | use shop::ShopClient;
+   |     ^^^^^^^^^^^^^^^^

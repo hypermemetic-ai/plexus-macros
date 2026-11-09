@@ -5,6 +5,25 @@ This file starts at 0.7.0; earlier changes are in the git history.
 
 ## [Unreleased] — 0.11.0
 
+NEST-16: a graft that knows its parent. `#[activation(parent = ShopClient)]`;
+a method takes `parent: Parent<ShopClient>` (the macro writes the transport,
+`ShopClient<ParentTransport>`), injected at dispatch and, in the trait form,
+from the call's context — not a param, not in the client. The macro reads
+each body for the call chains rooted at `parent` (`parent.items()`,
+`parent.ui().slots().list()`; `parent.host()`, the standard upward
+interface, is no need) and emits the activation's `needs` (schema,
+`Activation::needs`, hidden `__plexus_needs` / `__plexus_parent_needs`),
+resolved through the parent's client: every client implements plexus-client's
+new `ParentShape` (which link of a chain is a method, which a static child's
+accessor) and, in the server half, `ParentHash` (each method's shape hash).
+`parent` used other than as a chain's root (passed on, rebound, cloned, its
+client or transport taken, inside a macro whose arguments are not
+expressions) is a compile error at that use, unless the method says
+`#[plexus_macros::method(uses("shop.items", …))]`, which also adds to the
+needs. A chain through a dynamic child's accessor is named as written
+(`shop.planet`), so a graft refuses it until `uses` says the real path.
+plexus-client: `DenyReason::NotNeeded { method }`. syn's `visit` feature.
+
 NEST-14: the client all the way down. A typed `#[peer]` slot's accessor is
 its contract's client become a peer at `<path>.<slot>.<name>`
 (`async fn slot(&self, name) -> Result<ForgeClient<PeerTransport<T>>,

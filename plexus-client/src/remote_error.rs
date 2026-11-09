@@ -346,6 +346,16 @@ pub enum DenyReason {
         #[serde(default)]
         held_on: Vec<String>,
     },
+    /// NEST-16: a child called its service for `method`, which is neither
+    /// the standard upward interface (`host.schema`, `host.whoami`,
+    /// `host.log`, `host.notify`) nor one of the methods its schema says it
+    /// `needs`. Not in the JSON Schema (`schemars(skip)`): it would move
+    /// the hash of every service's `call`, whose items carry this type.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    NotNeeded {
+        /// The method the child called.
+        method: String,
+    },
 }
 
 impl RemoteError {
@@ -423,6 +433,11 @@ impl fmt::Display for RemoteError {
                     }
                     DenyReason::TenantBoundary => f.write_str("tenant boundary"),
                     DenyReason::NotAccepted => f.write_str("call not accepted"),
+                    DenyReason::NotNeeded { method } => {
+                        f.write_char('`')?;
+                        one_line(f, method)?;
+                        f.write_str("` is not among the methods this child needs")
+                    }
                     DenyReason::MissingGrant { grant, scope, .. } => {
                         f.write_str("needs `")?;
                         one_line(f, grant)?;
