@@ -1,0 +1,13 @@
+error: `low`: `parent` is used here other than as the root of a call chain, so what it calls of its parent cannot be read from the code. Call the parent's methods on `parent` itself (`parent.items()`), or list what this method calls by hand: `#[plexus_macros::method(uses("shop.items"))]`
+  --> tests/compile/nest16_parent_escapes.rs:33:24
+   |
+33 |         let n = count(&parent).await;
+   |                        ^^^^^^
+
+warning: unused import: `Stream`
+ --> tests/compile/nest16_parent_escapes.rs:2:23
+  |
+2 | use futures::stream::{Stream, StreamExt};
+  |                       ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

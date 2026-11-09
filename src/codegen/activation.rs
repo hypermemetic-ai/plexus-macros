@@ -54,6 +54,8 @@ pub fn generate(
     // through it (`<Self as Trait>::m(self, …)`), whose path need not be in
     // scope where the expansion lands.
     trait_impl: Option<&syn::Path>,
+    // NEST-16: the activation names its parent: its schema says its needs.
+    has_parent: bool,
 ) -> TokenStream {
     let enum_name = format_ident!("{}Method", struct_name);
     let rpc_trait_name = format_ident!("{}Rpc", struct_name);
@@ -68,7 +70,7 @@ pub fn generate(
     // would make a call by method syntax ambiguous beside it. Every call goes
     // through the service's `{ns}.call`.
     let has_public_rpc_methods = trait_impl.is_none()
-        && methods.iter().any(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none());
+        && methods.iter().any(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none() && m.parent.is_none());
     let rpc_trait_methods = generate_rpc_trait_methods(methods, deps);
     let rpc_impl_methods = generate_rpc_impl_methods(struct_name, methods, namespace, crate_path, deps, trait_impl);
 
@@ -217,6 +219,27 @@ pub fn generate(
         }
     } else {
         deprecation_inject
+    };
+
+    // NEST-16: `PluginSchema.needs`, for an activation that names its parent.
+    let deprecation_inject = if has_parent {
+        quote! {
+            #deprecation_inject
+            __plugin_schema.needs = ::std::option::Option::Some(Self::__plexus_needs());
+        }
+    } else {
+        deprecation_inject
+    };
+
+    // NEST-16: the needs, answered without building the schema.
+    let needs_fn = if has_parent {
+        quote! {
+            fn needs(&self) -> ::std::option::Option<::std::vec::Vec<#crate_path::plexus::Need>> {
+                ::std::option::Option::Some(Self::__plexus_needs())
+            }
+        }
+    } else {
+        quote! {}
     };
 
     // NEST-5: the slot type's roles, as `roles(...)` declared them.
@@ -1089,6 +1112,8 @@ pub fn generate(
                 #plugin_schema_body
             }
 
+            #needs_fn
+
             // NEST-5: the schema without an instance — a parent's slot type.
             fn slot_schema() -> ::std::option::Option<#crate_path::plexus::PluginSchema>
             where
@@ -1119,7 +1144,7 @@ fn rpc_methods(methods: &[MethodInfo]) -> impl Iterator<Item = &MethodInfo> {
         // Auth-requiring methods and methods with activation_params are dispatched through
         // Activation::call() which handles auth injection and request extraction.
         // The jsonrpsee RPC trait cannot carry auth context or raw_ctx.
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none())
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none() && m.parent.is_none())
 }
 
 /// The server trait's method signatures, as jsonrpsee's `#[rpc(server)]`
@@ -1326,7 +1351,7 @@ fn generate_rpc_impl_methods(
     methods
         .iter()
         // Skip auth-requiring methods and activation_param methods — they route through Activation::call()
-        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none())
+        .filter(|m| !m.requires_auth && !m.takes_reach && m.activation_params.is_empty() && m.input.is_none() && m.parent.is_none())
         .map(|m| {
             let method_name = &m.fn_name;
             let method_name_str = &m.method_name;
@@ -1411,6 +1436,8 @@ fn generate_dispatch_arms(
             // BIDIR-6: the input half opens last, after the params and the
             // gate, right before the method runs; it takes its place among
             // the arguments as it does in the signature.
+            // NEST-16: the injected parent takes its place after the input's.
+            let parent_binding = crate::codegen::parent::binding(m, namespace, crate_path);
             let input_open = match &m.input {
                 Some(i) => {
                     param_names.insert(i.at, &i.name);
@@ -1422,6 +1449,9 @@ fn generate_dispatch_arms(
                 }
                 None => quote! {},
             };
+            if let Some(p) = &m.parent {
+                param_names.insert(p.at, &p.name);
+            }
             let unknown_keys = if typed_params {
                 generate_unknown_key_check(m, &content_type, crate_path, deps)
             } else {
@@ -1597,6 +1627,7 @@ fn generate_dispatch_arms(
                     #(#resolver_bindings)*
                     #param_extraction
                     #reach_binding
+                    #parent_binding
                     #input_open
                     let __ret = #call.await;
                     Ok(#wrapped)

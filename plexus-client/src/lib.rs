@@ -117,6 +117,7 @@ pub mod transport;
 pub mod untyped;
 /// PERF.115-43: `#[derive(plexus_macros::Deserialize)]`'s runtime, reached
 /// through `__rt::type_first`.
+pub mod parent;
 mod type_first;
 pub mod watch;
 pub mod wire_result;
@@ -137,6 +138,7 @@ pub use params::Params;
 pub use progress::{Note, Progress};
 pub use remote_error::{DenyReason, OtherError, ParamProblem, RemoteError};
 pub use untyped::{FromRoute, ShapeCheck, Untyped};
+pub use parent::{ParentHash, ParentShape};
 pub use transport::{encode_input, InputItem, InputItems, ItemStream, MethodRef, RawItemStream, RoutePath, Transport};
 pub use watch::{
     watch, watch_with, Errors, Fallible, StopOnError, Watch, Watched10, Watched11, Watched12, Watched2, Watched3,

@@ -367,6 +367,39 @@ pub(crate) fn generate(
             }
         })
         .collect();
+    // NEST-16: which link of a call chain on this client is a method (and
+    // its wire name and shape hash), which a static child's accessor — what
+    // a graft that names this client as its parent infers its needs from.
+    let parent_shape = {
+        let fns: Vec<String> = methods.iter().map(|m| m.fn_name.to_string()).collect();
+        let wires: Vec<&String> = methods.iter().map(|m| &m.method_name).collect();
+        let statics: Vec<&ChildNode> = tree.iter().filter(|n| !n.dynamic).collect();
+        let child_fns: Vec<String> = statics.iter().map(|n| n.fn_name.to_string()).collect();
+        let child_segments: Vec<&String> = statics.iter().map(|n| &n.segment).collect();
+        let child_clients: Vec<&TokenStream> = statics.iter().map(|n| &n.child_client).collect();
+        quote! {
+            impl<__T, __L> #client_path::ParentShape for #client_ty<__T, __L> {
+                fn namespace() -> &'static str {
+                    #namespace
+                }
+
+                #[allow(unused_imports, unreachable_patterns)]
+                fn resolve(segments: &[&str]) -> ::core::option::Option<(::std::string::String, ::core::option::Option<::std::string::String>)> {
+                    use #client_path::parent::__probe::{Probe, ViaHash, ViaNone};
+                    let (first, rest) = segments.split_first()?;
+                    match *first {
+                        #(#fns => ::core::option::Option::Some((
+                            ::std::string::String::from(#wires),
+                            (&&Probe::<#client_ty<()>>::new()).__plexus_hash(#wires),
+                        )),)*
+                        #(#child_fns => <#child_clients<()> as #client_path::ParentShape>::resolve(rest)
+                            .map(|(p, h)| (::std::format!("{}.{}", #child_segments, p), h)),)*
+                        _ => ::core::option::Option::None,
+                    }
+                }
+            }
+        }
+    };
     let wire_result_path = path_string(quote! { #client_path::wire_result });
     let serde_path = path_string(quote! { #client_path::__rt::serde });
 
@@ -782,6 +815,8 @@ pub(crate) fn generate(
                 Self { transport, route, lift: #client_path::Root }
             }
         }
+
+        #parent_shape
     }, quote! {
         #(#server_checks)*
         impl<__T, __L> #client_ty<__T, __L>

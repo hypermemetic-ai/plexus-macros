@@ -4,6 +4,7 @@ mod activation;
 pub(crate) mod client;
 mod contract;
 mod method_enum;
+mod parent;
 pub(crate) mod peer;
 
 use crate::parse::{
@@ -304,6 +305,9 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 matches!(last.as_deref(), Some("method") | Some("hub_method"))
             });
 
+            // NEST-16: `Parent<ShopClient>` is `Parent<ShopClient<ParentTransport>>`.
+            parent::rewrite_sig(&mut method.sig, &crate_path);
+
             if let Some(idx) = hub_method_idx {
                 // Parse the attribute contents before removing
                 let attr = method.attrs.remove(idx);
@@ -336,6 +340,8 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             }
             if let Some(m) = methods.last_mut() {
                 m.verifier = verifier;
+                // NEST-16: what the method calls of its parent.
+                parent::infer(m, &method.block)?;
             }
 
             {
@@ -892,6 +898,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         &declared_roles,
         args.typed_params, // MACRO-31: an unknown key is refused under it
         trait_impl.as_ref(), // RETURNS-47: methods called through the trait
+        args.parent.is_some(), // NEST-16: the schema says its needs
     );
 
     // MACRO-2 / MACRO-13: the typed client. Under the name rule it is
@@ -915,6 +922,17 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     } else {
         TokenStream::new()
     };
+    // NEST-16: `needs`, for an activation that names its parent.
+    let parent_needs_impl = parent::needs_impl(
+        args.parent.as_ref(),
+        &methods,
+        self_ty,
+        &impl_generics,
+        where_clause,
+        &crate_path,
+        client_path.as_ref(),
+    )?;
+
     let (client_impl, client_server_checks) = match &client_path {
         Some(path) => {
             let (mut client, checks) = client::generate(&names.client_ident, &namespace, &methods, &child_methods, path, &crate_path)?;
@@ -952,6 +970,23 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 let peer = quote! { #crate_path::plexus::peer };
                 let desc = &resolved_description;
                 quote! {
+                    // NEST-16: each method's shape hash, for a graft that
+                    // names this client as its parent.
+                    impl<__T, __L> #path::ParentHash for #client_ident<__T, __L> {
+                        fn method_hash(method: &str) -> ::core::option::Option<::std::string::String> {
+                            static __HASHES: ::std::sync::OnceLock<::std::collections::BTreeMap<::std::string::String, ::std::string::String>> = ::std::sync::OnceLock::new();
+                            __HASHES
+                                .get_or_init(|| {
+                                    #enum_name::method_schemas()
+                                        .iter()
+                                        .map(|m| (::core::clone::Clone::clone(&m.name), #peer::Interface::method_hash(m)))
+                                        .collect()
+                                })
+                                .get(method)
+                                .cloned()
+                        }
+                    }
+
                     impl<__T, __L> #path::ShapeCheck for #client_ident<__T, __L> {
                         fn shape_check(path: &str, schema: &#deps::serde_json::Value) -> ::core::result::Result<(), #path::ClientError> {
                             static __WANT: ::std::sync::OnceLock<#peer::Interface> = ::std::sync::OnceLock::new();
@@ -1122,6 +1157,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
         #mixed_auth_warning
         #required_posture_optional_auth_warning
         #client_server_checks
+        #parent_needs_impl
     };
 
     let server_half = match &server_gate {
