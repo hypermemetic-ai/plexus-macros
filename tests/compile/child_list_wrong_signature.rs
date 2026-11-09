@@ -1,4 +1,4 @@
-//! CHILD-4 acceptance criterion 7: `#[child(list = "wrongly_typed")]` that
+//! CHILD-4 acceptance criterion 7: `#[child(list = wrongly_typed)]` that
 //! names a method whose return element type is not `String` (here `u32`)
 //! must fail to compile with a signature-mismatch error.
 
@@ -33,7 +33,7 @@ impl Solar {
         stream! { yield "pong".into(); }
     }
 
-    #[plexus_macros::child(list = "wrongly_typed")]
+    #[plexus_macros::child(list = wrongly_typed)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }

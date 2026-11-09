@@ -177,7 +177,7 @@ impl InferredHubWithListing {
     }
 
     /// Dynamic child with listing opt-in.
-    #[plexus_macros::child(list = "dynamic_names")]
+    #[plexus_macros::child(list = dynamic_names)]
     fn planet(&self, _name: &str) -> Option<Mercury> {
         Some(Mercury)
     }

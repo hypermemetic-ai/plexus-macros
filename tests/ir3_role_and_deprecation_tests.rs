@@ -76,7 +76,7 @@ impl RoleCoverageHub {
     }
 
     /// Dynamic child with list/search opt-in — role = DynamicChild { list, search }.
-    #[plexus_macros::child(list = "list_fn", search = "search_fn")]
+    #[plexus_macros::child(list = list_fn, search = search_fn)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }
@@ -169,8 +169,8 @@ fn role_tagging_bare_dynamic_emits_none_list_and_search() {
 #[test]
 fn role_tagging_list_only_and_search_only_variants() {
     // Coverage for the middle rows of the MethodRole table:
-    //   #[child(list = "X")]                 → DynamicChild { Some("X"), None }
-    //   #[child(search = "Y")]               → DynamicChild { None, Some("Y") }
+    //   #[child(list = X)]                 → DynamicChild { Some("X"), None }
+    //   #[child(search = Y)]               → DynamicChild { None, Some("Y") }
     #[derive(Clone)]
     struct MixedDyn;
 
@@ -185,7 +185,7 @@ fn role_tagging_list_only_and_search_only_variants() {
             stream! { yield "pong".into(); }
         }
 
-        #[plexus_macros::child(list = "only_list")]
+        #[plexus_macros::child(list = only_list)]
         fn list_only(&self, _name: &str) -> Option<Leaf> {
             Some(Leaf)
         }
@@ -219,7 +219,7 @@ fn role_tagging_list_only_and_search_only_variants() {
             stream! { yield "pong".into(); }
         }
 
-        #[plexus_macros::child(search = "only_search")]
+        #[plexus_macros::child(search = only_search)]
         fn search_only(&self, _name: &str) -> Option<Leaf> {
             Some(Leaf)
         }

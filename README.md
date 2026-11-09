@@ -371,12 +371,12 @@ impl Counter {
     // -- H. Dynamic child with list + search capabilities --
     //
     // `fn NAME(&self, name: &str) -> Option<Child>` is a dynamic
-    // fallback dispatcher. `list = "..."` and `search = "..."` name
+    // fallback dispatcher. `list = …` and `search = …` name
     // sibling methods that stream child names for completion and
     // search — the generated `ChildRouter` advertises the
     // corresponding `ChildCapabilities` bits.
     /// Look up an item child (`counter.item <id>.<method>`).
-    #[plexus_macros::child(list = "item_ids", search = "find_item")]
+    #[plexus_macros::child(list = item_ids, search = find_item)]
     async fn item(&self, id: &str) -> Option<Item> {
         self.lookup_item(id)
     }
@@ -600,12 +600,12 @@ impl forge::Forge for GitHub { /* every `async fn` on `&self` is on the wire */ 
 | rule | |
 |---|---|
 | the name | `impl Foo` names itself; `impl FooActivation` its stem `Foo`; `impl Trait for Type` the trait. Namespace: the name in snake_case (`TicketsApi` → `tickets_api`); `namespace = "…"` overrides it. An activation written before MACRO-13 — a type not named `…Activation` that says its `namespace` — expands as it did (only `#[method]`s on the wire, the client on the `client` flag), with a deprecation warning |
-| a trait only when named | `trait = "Bar"` emits `trait Bar` (and names the client `BarClient` and, absent `namespace`, the namespace `bar`), each method under its own return type, boxed: `-> T` / `-> Result<T, E>` as `BoxFuture<'static, …>`, a stream form as `BoxStream<'static, item>` (RETURNS-36); the activation implements it, by cloning itself into each stream — unless a method takes what the server injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`). Without `trait = …` no trait is emitted (RETURNS-47, reversing MACRO-13's `always`) |
+| the trait every time | NEST-17 (owner, 2026-11-09, reversing RETURNS-47's "only when named"): `impl Shop` and `impl ShopActivation` emit `trait ShopActivationSchema`; `trait = "Bar"` renames it (and names the client `BarClient` and, absent `namespace`, the namespace `bar`); a contract is its trait (`Foo`). Each method under its own return type, boxed: `-> T` / `-> Result<T, E>` as `BoxFuture<'static, …>`, a stream form as `BoxStream<'static, item>` (RETURNS-36), with nothing the server injects. The activation implements it by cloning itself into each stream (the default trait only where the type is `Clone`: a type that is not gets the trait and no impl). A method that takes `auth`, `reach` or a `#[from_auth]` value reads it from the call's context in the trait form (`plexus_core::call::caller()`, as `impl Trait for Type` does): a caller required and missing is the method's error (`E: From<PlexusError>`, else `E: From<PeerError>` as `forbidden`), `reach` outside a call `Reach::nowhere()`, an optional `auth` `None`. An `#[activation_param]` is in no context, so an activation with one does not implement its trait; nor does a generic impl get the default trait |
 | `impl Trait for Type` | every `async fn` on `&self` is a wire method, called as `<Type as Trait>::m`; the trait needs no object safety to be served. Its methods reach their caller through the call's context, `plexus_core::call::caller()` (a trait's signature cannot carry `#[from_auth]`). Under `auth = "required"` the dispatch refuses an anonymous caller before the body of every method not `public`, out of band and typed, as `#[from_auth]` does; `#[plexus_macros::from_auth(self.access.verify)]` on the method runs the verifier before the body (its error the call's typed refusal, its value the body's: `plexus_core::call::verified::<User>()`). It has no direct JSON-RPC methods, only `{ns}.call`. `trait = "…"` beside it, a bodiless method and `#[child]` are refused |
 | wire methods | every `pub async fn` on `&self` returning `impl Stream<Item = E>`, no `#[method]` needed (it stays for its overrides, and marks a one-item method); a `pub async fn` on `&self` returning anything else unmarked is a compile error; `methods = marked` restores the `#[method]`-only rule |
-| the client | emitted whenever the crate depends on `plexus-client`, no flag (`client` is accepted with a deprecation warning). It implements no trait: a one-item method answers `Result<T, ClientError>`, a many-item one its `{Ns}{Method}Stream`; no item type needs `FromClientError`, so `-> u64`, `-> bool`, `-> Vec<T>` are methods like any other (RETURNS-47, superseding RETURNS-43) |
+| the client | emitted whenever the crate depends on `plexus-client`, no flag (`client` is accepted with a deprecation warning). A one-item method answers `Result<T, ClientError>`, a many-item one its `{Ns}{Method}Stream`; no item type needs `FromClientError`, so `-> u64`, `-> bool`, `-> Vec<T>` are methods like any other (RETURNS-47, superseding RETURNS-43). NEST-17: when every method answers one `Result<T, E>` with `E: From<PeerError>`, the client implements the activation's trait as well (a call failing in transit is `E::from(PeerError)`), so `Box<dyn ShopActivationSchema>` is a local shop or a remote one |
 | the `server` feature | a crate whose manifest declares `server` gets the server half under `#[cfg(feature = "server")]`; `server_cfg` overrides; the trait and the client are never gated |
-| a contract | every wire method bodiless (`pub async fn f(&self) -> impl Stream<…>;`) and no struct written, on `impl FooActivation` (trait `Foo`) or with `trait = "…"`: the macro emits `pub struct FooActivation<D: Foo>(Arc<D>)`, delegating, and `Foo::server(self)`, so `service.register(Local::new().server())` serves an implementation. A remote one is served as a proxy by an implementation that calls its client (the client implements no trait). A mix of bodied and bodiless is refused at the first bodiless method |
+| a contract | every wire method bodiless (`pub async fn f(&self) -> impl Stream<…>;`) and no struct written, on `impl FooActivation` (trait `Foo`) or with `trait = "…"`: the macro emits `pub struct FooActivation<D: Foo>(Arc<D>)`, delegating, and `Foo::server(self)`, so `service.register(Local::new().server())` serves an implementation. A remote one is its client become a peer (`FooClient::peer(transport)`, NEST-7), which implements `Foo` when every method answers one `Result<T, E>`. A mix of bodied and bodiless is refused at the first bodiless method |
 
 ---
 
@@ -932,7 +932,7 @@ Attached to an `impl` block to generate the activation's `Activation` trait impl
 | Arg | Type | Default | Notes |
 |---|---|---|---|
 | `namespace = "..."` | string | the stem of `impl FooActivation`, snake_case | Activation namespace. Appears as `plugin_schema.namespace`. MACRO-13: an override. |
-| `trait = "..."` | string | the stem | MACRO-13: names the trait and the client whatever the type is called. |
+| `trait = "..."` | string | `{Name}ActivationSchema` | MACRO-13: names the trait and the client whatever the type is called. NEST-17: without it the trait is `{Name}ActivationSchema` (a contract's, its stem). |
 | `methods = marked` | word | every `pub async fn` on `&self` returning a signature form | MACRO-13: only `#[method]`s are on the wire. |
 | `version = "..."` | string | `CARGO_PKG_VERSION` | Semver; used by handles and deprecation schemas. |
 | `description = "..."` | string | _(none)_ | Max **15 words** — macro errors on overflow. Use `long_description` for more. |
@@ -1021,11 +1021,12 @@ A method's return type is its whole contract. The macro reads it and fills
 
 `impl Foo` and `impl FooActivation` name the namespace (`foo`) and the client
 (`FooClient<T>`), as `impl Trait for Type` does from the trait;
-`namespace = "..."` overrides the namespace. A trait is emitted only when
-named (`trait = "..."`), each method in it under its own return type
-(RETURNS-36), beside the client and its aggregate `{Ns}Event`.
+`namespace = "..."` overrides the namespace. The trait is emitted every time
+(NEST-17): `FooActivationSchema` unless `trait = "..."` names it, each method
+in it under its own return type (RETURNS-36), beside the client and its
+aggregate `{Ns}Event`.
 
-### `#[plexus_macros::child]` / `#[plexus_macros::child(list = "...", search = "...", forward = "...")]`
+### `#[plexus_macros::child]` / `#[plexus_macros::child(list = …, search = …, forward = …)]`
 
 Attached to methods inside an `#[activation]` impl to register them in the generated `ChildRouter`. Two accepted shapes:
 
@@ -1038,10 +1039,10 @@ Optional arguments on dynamic `#[child]`:
 
 | Arg | Type | Advertises capability | Sibling method shape |
 |---|---|---|---|
-| `list = "method"` | ident | `ChildCapabilities::LIST` | `(async) fn METHOD(&self) -> impl Stream<Item = String>` (or `BoxStream<'_, String>`) |
-| `search = "method"` | ident | `ChildCapabilities::SEARCH` | `(async) fn METHOD(&self, query: &str) -> impl Stream<Item = String>` |
+| `list = method` | path | `ChildCapabilities::LIST` | `(async) fn METHOD(&self) -> impl Stream<Item = String>` (or `BoxStream<'_, String>`) |
+| `search = method` | path | `ChildCapabilities::SEARCH` | `(async) fn METHOD(&self, query: &str) -> impl Stream<Item = String>` |
 
-Sibling methods are validated at macro-expansion time — typos in `list = "..."` or a wrong signature become compile errors pointing at the attribute.
+Sibling methods are validated at macro-expansion time — typos in `list = …` or a wrong signature become compile errors pointing at the attribute. NEST-17: the sibling is named by its path (`list = item_ids`); the string form (`list = "item_ids"`) is accepted for one release with a deprecation warning. `forward = identity_only` takes the policy as a bare word or a string.
 
 `#[child]` methods do **not** appear as RPC endpoints in the schema; they contribute to routing only. The presence of any `#[child]` method flips the activation into hub mode (replacing the deprecated `hub` flag).
 

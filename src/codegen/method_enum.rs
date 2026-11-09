@@ -788,7 +788,7 @@ pub fn generate(
                 // derived from the child method's signature: no extra arg →
                 // `StaticChild`; `name: &str` arg → `DynamicChild { list_method,
                 // search_method }` with values threaded through from
-                // `#[child(list = "...", search = "...")]`.
+                // `#[child(list = …, search = …)]`.
                 #(methods.push(#child_schema_entries);)*
 
                 // RETURNS-10: the last step — every entry (the methods, the

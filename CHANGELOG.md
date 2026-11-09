@@ -3,7 +3,25 @@
 All notable changes to plexus-macros and plexus-client are documented here.
 This file starts at 0.7.0; earlier changes are in the git history.
 
-## [Unreleased] — 0.10.0
+## [Unreleased] — 0.11.0
+
+NEST-17 (breaking: a new item in every activation's scope): the activation's
+trait every time. `impl Shop` and `impl ShopActivation` emit `trait
+ShopActivationSchema` (owner, 2026-11-09; NEST-18 D2), reversing RETURNS-47's
+"a trait only when named"; `trait = "…"` renames it and a contract keeps its
+stem (`Forge`). A method that takes `auth`, `reach` or a `#[from_auth]` value
+no longer keeps the activation from implementing its trait: the trait form
+reads them from the call's context (a required caller missing is the method's
+error, `E: From<PlexusError>` or `E: From<PeerError>`; `reach` outside a call
+is nowhere). The default trait is implemented only where the activation is
+`Clone`; an `#[activation_param]` (in no context) keeps the impl out; a
+generic impl gets no default trait. When every method answers one
+`Result<T, E>` with `E: From<PeerError>`, the client implements the trait
+too. `#[child(list = names, search = find)]` and `#[peer(…)]` name their
+siblings by path; the string form is deprecated (a warning, refused in a
+later release). `forward = identity_only` takes a bare word.
+
+## 0.10.0
 
 ASK-2 / ASK-1 (breaking): the in-call question is gone, and nothing replaces
 it — Plexus has no in-call or protocol-wide confirmation (owner, ASK-1).

@@ -45,10 +45,15 @@ pub(crate) struct Names {
     /// (a type not named `…Activation` that says its `namespace`, which
     /// expands as it did).
     pub new_form: bool,
-    /// The trait the macro emits — only when named (`trait = "…"`), or
-    /// for a contract (a bodiless activation is its trait). RETURNS-47: no
-    /// trait by default.
+    /// The trait the macro emits: named (`trait = "…"`), a contract's (a
+    /// bodiless activation is its trait), or — NEST-17 — by default
+    /// `{Name}ActivationSchema`. None on `impl Trait for Type` (the trait is
+    /// the one implemented) and for an activation written before MACRO-13.
     pub trait_ident: Option<syn::Ident>,
+    /// NEST-17: the trait is the default `{Name}ActivationSchema`, asked for
+    /// by no one — so it steps aside where it cannot be written (a generic
+    /// impl, a crate that can name no boxed stream).
+    pub trait_default: bool,
     pub namespace: String,
     pub client_ident: syn::Ident,
 }
@@ -91,6 +96,7 @@ impl Names {
                 namespace: args.namespace.clone().unwrap_or_else(|| snake_case(&stem.to_string())),
                 client_ident: format_ident!("{}Client", stem),
                 trait_ident: None,
+                trait_default: false,
             });
         }
 
@@ -109,17 +115,20 @@ impl Names {
                 namespace: args.namespace.clone().unwrap_or_else(|| snake_case(&named.to_string())),
                 client_ident: format_ident!("{}Client", named),
                 trait_ident: Some(named),
+                trait_default: false,
             });
         }
 
-        // `impl FooActivation`: the stem, as MACRO-13 had it — a trait only
-        // for a contract, which is its trait.
+        // `impl FooActivation`: the stem, as MACRO-13 had it — a contract's
+        // trait is the stem; any other activation's (NEST-17) is
+        // `{Stem}ActivationSchema`.
         if let Some(stem) = type_stem {
             return Ok(Names {
                 new_form: true,
                 namespace: args.namespace.clone().unwrap_or_else(|| snake_case(&stem.to_string())),
                 client_ident: format_ident!("{}Client", stem),
-                trait_ident: contract.then(|| stem.clone()),
+                trait_ident: Some(if contract { stem.clone() } else { schema_trait_ident(&stem) }),
+                trait_default: !contract,
             });
         }
 
@@ -130,6 +139,7 @@ impl Names {
             return Ok(Names {
                 new_form: false,
                 trait_ident: None,
+                trait_default: false,
                 namespace: ns.clone(),
                 client_ident: format_ident!("{}Client", struct_name),
             });
@@ -151,9 +161,16 @@ impl Names {
             new_form: true,
             namespace: snake_case(&type_name),
             client_ident: format_ident!("{}Client", struct_name),
-            trait_ident: None,
+            trait_ident: Some(schema_trait_ident(struct_name)),
+            trait_default: true,
         })
     }
+}
+
+/// NEST-17 (owner, 2026-11-09; NEST-18 D2): the trait every activation gets
+/// unless it names one — `Shop` → `ShopActivationSchema`.
+pub(crate) fn schema_trait_ident(name: &syn::Ident) -> syn::Ident {
+    format_ident!("{}ActivationSchema", name, span = name.span())
 }
 
 /// An activation written before MACRO-13 on a type not named
@@ -414,11 +431,41 @@ pub(crate) fn injected(m: &MethodInfo) -> Option<&'static str> {
     }
 }
 
-/// Does a method take what the server injects? An activation with such a
-/// method does not implement its own trait — it has no caller to take those
-/// from. True when no wire method does.
+/// Does a method take what the server injects? A contract may not (its
+/// methods are what its implementor is called with); an activation with
+/// such a method implements its own trait by reading them from the call's
+/// context (NEST-17), [`self_implementable`].
 pub(crate) fn self_callable(methods: &[MethodInfo]) -> bool {
     methods.iter().all(|m| injected(m).is_none())
+}
+
+/// NEST-17: whether reading a method's injected values from the call's
+/// context can fail — a caller required (`auth: &AuthContext`, a
+/// `#[from_auth]` resolver) and none there. `auth: Option<&AuthContext>`
+/// is `None` and `reach` is `Reach::nowhere()` outside a call: fail closed,
+/// never failing.
+fn caller_can_fail(m: &MethodInfo) -> bool {
+    m.requires_auth && !(m.auth_optional && m.auth_resolvers.is_empty())
+}
+
+/// NEST-17: can the activation implement its own trait? Every method a
+/// caller could call on the trait must be callable from it: one that takes
+/// what the server injects reads it from the call's context
+/// (`plexus_core::call::caller()`, as `impl Trait for Type` does) — except
+/// an `#[activation_param]`, which comes from the transport's request and
+/// is in no context; a generic impl's methods (whose missing-caller error
+/// cannot be named once for every instance); and a one-item method that
+/// needs a caller and answers no `Result` (it has nowhere to say the caller
+/// is missing).
+pub(crate) fn self_implementable(methods: &[MethodInfo], generic: bool) -> bool {
+    methods.iter().all(|m| {
+        if injected(m).is_none() {
+            return true;
+        }
+        !generic
+            && m.activation_params.is_empty()
+            && !(m.cardinality == Cardinality::One && m.err_ty.is_none() && caller_can_fail(m))
+    })
 }
 
 /// A trait method's parameters and their names. BIDIR-6: an `Input<T>` is a
@@ -500,11 +547,16 @@ pub(crate) fn trait_def(
     quote! {
         #doc
         ///
-        /// Emitted by `#[plexus_macros::activation]` (`trait = "…"`, or a
-        /// bodiless contract) from the activation's wire methods, each under
-        /// its own return type (RETURNS-36): implemented by the activation, so
-        /// anything that implements it can be served. Its client implements
-        /// no trait (RETURNS-47); its methods answer `Result`s.
+        /// Emitted by `#[plexus_macros::activation]` from the activation's
+        /// wire methods (NEST-17: for every activation, named
+        /// `{Name}ActivationSchema` unless `trait = "…"` names it; a contract
+        /// is its trait), each under its own return type (RETURNS-36), the
+        /// values the server injects left out: implemented by the activation
+        /// (reading those from the call's context), and by its client when
+        /// every method answers a `Result` whose error takes a `PeerError`,
+        /// so a local activation and a remote one are interchangeable behind
+        /// `dyn` this trait.
+        #[allow(private_interfaces)]
         pub trait #trait_ident: ::core::marker::Send + ::core::marker::Sync + 'static {
             #(#items)*
             #server
@@ -523,6 +575,7 @@ pub(crate) fn trait_def(
 /// inherent method's stream. The trait's stream is `'static` and the inherent
 /// method's future borrows `self`, so the activation is cloned into the
 /// stream (`Plexus::register` already asks every activation to be `Clone`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn activation_trait_impl(
     trait_ident: &syn::Ident,
     struct_name: &syn::Ident,
@@ -532,7 +585,11 @@ pub(crate) fn activation_trait_impl(
     methods: &[MethodInfo],
     boxes: &Boxes,
     deps: &syn::Ident,
+    guarded: Option<(&syn::Path, &str)>,
 ) -> TokenStream {
+    if let Some((crate_path, namespace)) = guarded {
+        return guarded_trait_impl(trait_ident, self_ty, methods, boxes, deps, crate_path, namespace);
+    }
     let items = methods.iter().map(|m| {
         let fn_ident = &m.fn_name;
         let (params, _) = sig_params(m, &boxes.stream);
@@ -575,6 +632,274 @@ pub(crate) fn activation_trait_impl(
     });
     quote! {
         impl #impl_generics #trait_ident for #self_ty #where_clause {
+            #(#items)*
+        }
+    }
+}
+
+/// NEST-17: `impl Trait for Type` where the activation is `Clone` (a
+/// higher-ranked bound, so a type that is not simply has no impl, rather
+/// than an error: the trait is emitted for every activation, unasked), each
+/// method that takes what the server injects through a hidden inherent
+/// helper reading it from the call's context.
+fn guarded_trait_impl(
+    trait_ident: &syn::Ident,
+    self_ty: &Type,
+    methods: &[MethodInfo],
+    boxes: &Boxes,
+    deps: &syn::Ident,
+    crate_path: &syn::Path,
+    namespace: &str,
+) -> TokenStream {
+    let mut helpers = Vec::new();
+    let items = methods.iter().map(|m| {
+        let fn_ident = &m.fn_name;
+        let (params, names) = sig_params(m, &boxes.stream);
+        let ret = ret_ty(m, boxes);
+        let item = item_ty(m, &boxes.vocab);
+        let body = if injected(m).is_none() {
+            let passed = passed(m, |n| quote! { ::core::convert::Into::into(#n) });
+            match m.cardinality {
+                Cardinality::One => quote! {
+                    ::std::boxed::Box::pin(async move { Self::#fn_ident(&__this #(, #passed)*).await })
+                },
+                Cardinality::Many => quote! {
+                    ::std::boxed::Box::pin(#deps::futures::StreamExt::flatten(
+                        #deps::futures::stream::once(async move { Self::#fn_ident(&__this #(, #passed)*).await }),
+                    ))
+                },
+            }
+        } else {
+            let helper = format_ident!("__plexus_schema_{}", fn_ident);
+            helpers.push(context_helper(m, &helper, &params, boxes, crate_path));
+            let grant = format!("{namespace}.{}", m.method_name);
+            let fail = m.err_ty.as_ref().map(|e| fail_into(e, &grant, crate_path));
+            match m.cardinality {
+                Cardinality::One => {
+                    // Without a `Result` only a caller that cannot be missing
+                    // gets here (`self_implementable`): the helper never fails.
+                    let on_fail = match fail {
+                        Some(f) => quote! { ::core::result::Result::Err(#f) },
+                        None => quote! { ::core::unreachable!("`{}` cannot miss its caller: {}", #grant, __e) },
+                    };
+                    quote! {
+                        ::std::boxed::Box::pin(async move {
+                            match __this.#helper(#(#names),*).await {
+                                ::core::result::Result::Ok(__v) => __v,
+                                ::core::result::Result::Err(__e) => #on_fail,
+                            }
+                        })
+                    }
+                }
+                Cardinality::Many => {
+                    let stream = &boxes.stream;
+                    let on_fail = match fail {
+                        Some(f) => quote! {
+                            let __item: #item = ::core::result::Result::Err(#f);
+                            ::std::boxed::Box::pin(#deps::futures::stream::once(::core::future::ready(__item)))
+                        },
+                        // No error to say it in: fail closed, nothing.
+                        None => quote! { { let _ = __e; ::std::boxed::Box::pin(#deps::futures::stream::empty()) } },
+                    };
+                    quote! {
+                        ::std::boxed::Box::pin(#deps::futures::StreamExt::flatten(
+                            #deps::futures::stream::once(async move {
+                                let __s: #stream<'static, #item> = match __this.#helper(#(#names),*).await {
+                                    ::core::result::Result::Ok(__s) => __s,
+                                    ::core::result::Result::Err(__e) => { #on_fail }
+                                };
+                                __s
+                            }),
+                        ))
+                    }
+                }
+            }
+        };
+        quote! {
+            #[allow(clippy::too_many_arguments)]
+            fn #fn_ident(&self #(, #params)*) -> #ret {
+                let __this = <#self_ty as ::core::clone::Clone>::clone(self);
+                #body
+            }
+        }
+    }).collect::<Vec<_>>();
+    quote! {
+        // NEST-17: what a trait method that needs its caller reads from the
+        // call's context; used by the trait's impl alone.
+        #[allow(dead_code, non_snake_case, clippy::too_many_arguments)]
+        impl #self_ty {
+            #(#helpers)*
+        }
+
+        impl #trait_ident for #self_ty
+        where
+            for<'__plexus_schema> #self_ty: ::core::clone::Clone,
+        {
+            #(#items)*
+        }
+    }
+}
+
+/// NEST-17: the hidden helper of one method that takes what the server
+/// injects: those values from the call's context, then the method —
+/// `Err(PlexusError)` when a caller is required and none is there.
+fn context_helper(
+    m: &MethodInfo,
+    helper: &syn::Ident,
+    params: &[TokenStream],
+    boxes: &Boxes,
+    crate_path: &syn::Path,
+) -> TokenStream {
+    let fn_ident = &m.fn_name;
+    let item = item_ty(m, &boxes.vocab);
+    let stream = &boxes.stream;
+    let out = match m.cardinality {
+        Cardinality::One => quote! { #item },
+        Cardinality::Many => quote! { #stream<'static, #item> },
+    };
+    let plexus_error = quote! { #crate_path::plexus::PlexusError };
+    let auth = if !m.requires_auth {
+        quote! {}
+    } else if m.auth_optional && m.auth_resolvers.is_empty() {
+        quote! {
+            let __plexus_caller = #crate_path::call::caller().ok();
+            let auth_ctx: ::core::option::Option<&#crate_path::plexus::AuthContext> =
+                __plexus_caller.as_ref().and_then(|__c| __c.auth());
+        }
+    } else {
+        quote! {
+            let __plexus_caller = #crate_path::call::caller().map_err(<#plexus_error as ::core::convert::From<_>>::from)?;
+            let auth_ctx: &#crate_path::plexus::AuthContext = __plexus_caller.signed_in()?;
+        }
+    };
+    let resolvers: Vec<TokenStream> = m
+        .auth_resolvers
+        .iter()
+        .map(|r| crate::codegen::activation::resolve_typed(&r.param_name, &r.resolver_expr, crate_path))
+        .collect();
+    let reach = if m.takes_reach {
+        quote! {
+            let __plexus_reach = match #crate_path::plexus::current_reach() {
+                ::core::result::Result::Ok(__r) => __r,
+                ::core::result::Result::Err(_) => #crate_path::plexus::Reach::nowhere(),
+            };
+        }
+    } else {
+        quote! {}
+    };
+    let reach_arg = if m.takes_reach { quote! { __plexus_reach, } } else { quote! {} };
+    let names = passed(m, |n| quote! { ::core::convert::Into::into(#n) });
+    let resolver_names: Vec<&syn::Ident> = m.auth_resolvers.iter().map(|r| &r.param_name).collect();
+    let args = if m.requires_auth && m.auth_resolvers.is_empty() {
+        quote! { auth_ctx, #reach_arg #(#names),* }
+    } else {
+        quote! { #reach_arg #(#resolver_names,)* #(#names),* }
+    };
+    let call = match m.cardinality {
+        Cardinality::One => quote! { Self::#fn_ident(self, #args).await },
+        Cardinality::Many => quote! { ::std::boxed::Box::pin(Self::#fn_ident(self, #args).await) },
+    };
+    quote! {
+        #[doc(hidden)]
+        async fn #helper(&self #(, #params)*) -> ::core::result::Result<#out, #plexus_error> {
+            #auth
+            #(#resolvers)*
+            #reach
+            ::core::result::Result::Ok(#call)
+        }
+    }
+}
+
+/// NEST-17: a missing caller as the method's own error `E`, by what `E`
+/// takes — a `PlexusError`, else a `PeerError` (`forbidden` naming the
+/// method's grant when no one is signed in, `unavailable` else) — chosen by
+/// autoref on `E`; an `E` that takes neither panics, naming the method:
+/// there is no value to answer with.
+fn fail_into(err: &Type, grant: &str, crate_path: &syn::Path) -> TokenStream {
+    let plexus_error = quote! { #crate_path::plexus::PlexusError };
+    let peer_error = quote! { #crate_path::plexus::peer::PeerError };
+    quote! {{
+        struct __PlexusFail<E>(::core::cell::Cell<::core::option::Option<#plexus_error>>, ::core::marker::PhantomData<E>);
+        trait __PlexusViaPlexus<E> { fn __plexus_fail(&self) -> E; }
+        impl<E: ::core::convert::From<#plexus_error>> __PlexusViaPlexus<E> for &__PlexusFail<E> {
+            fn __plexus_fail(&self) -> E {
+                <E as ::core::convert::From<#plexus_error>>::from(self.0.take().expect("taken once"))
+            }
+        }
+        trait __PlexusViaPeer<E> { fn __plexus_fail(&self) -> E; }
+        impl<E: ::core::convert::From<#peer_error>> __PlexusViaPeer<E> for &&__PlexusFail<E> {
+            fn __plexus_fail(&self) -> E {
+                let __e = self.0.take().expect("taken once");
+                let __p = if ::core::matches!(__e, #plexus_error::Unauthenticated(_)) {
+                    #peer_error::Forbidden { grant: ::std::string::ToString::to_string(#grant) }
+                } else {
+                    #peer_error::Unavailable { reason: ::std::string::ToString::to_string(&__e) }
+                };
+                <E as ::core::convert::From<#peer_error>>::from(__p)
+            }
+        }
+        trait __PlexusViaNothing<E> { fn __plexus_fail(&self) -> E; }
+        impl<E> __PlexusViaNothing<E> for __PlexusFail<E> {
+            fn __plexus_fail(&self) -> E {
+                let __e = self.0.take().expect("taken once");
+                ::core::panic!(
+                    "`{}` needs its caller, and has none ({}); its error type takes neither a PlexusError nor a PeerError to say so — call it inside a Plexus call",
+                    #grant, __e
+                )
+            }
+        }
+        (&&__PlexusFail::<#err>(::core::cell::Cell::new(::core::option::Option::Some(__e)), ::core::marker::PhantomData)).__plexus_fail()
+    }}
+}
+
+/// NEST-17: the client as the activation's trait, for an activation every
+/// method of which answers one `Result<T, E>` (as a contract's peer half
+/// asks): a call that fails in transit is `E::from(PeerError)`. Bounded on
+/// every `E: From<PeerError>` (higher-ranked, so an `E` that takes none
+/// leaves the client without the impl, not the crate without a build).
+pub(crate) fn client_trait_impl(
+    trait_ident: &syn::Ident,
+    client_ident: &syn::Ident,
+    methods: &[MethodInfo],
+    future: &TokenStream,
+    client_path: &syn::Path,
+    crate_path: &syn::Path,
+) -> TokenStream {
+    let peer_error = quote! { #crate_path::plexus::peer::PeerError };
+    let mut seen = std::collections::HashSet::new();
+    let bounds: Vec<TokenStream> = methods
+        .iter()
+        .filter_map(|m| m.err_ty.as_ref())
+        .filter(|e| seen.insert(quote!(#e).to_string()))
+        .map(|e| quote! { for<'__plexus_schema> #e: ::core::convert::From<#peer_error>, })
+        .collect();
+    let items = methods.iter().map(|m| {
+        let fn_ident = &m.fn_name;
+        let params: Vec<TokenStream> = m.params.iter().map(|p| { let (n, t) = (&p.name, &p.ty); quote! { #n: #t } }).collect();
+        let names: Vec<&syn::Ident> = m.params.iter().map(|p| &p.name).collect();
+        let ok = &m.ok_ty;
+        let err = m.err_ty.as_ref().expect("contract-shaped: every method is fallible");
+        quote! {
+            #[allow(clippy::too_many_arguments)]
+            fn #fn_ident(&self #(, #params)*) -> #future<'static, ::core::result::Result<#ok, #err>> {
+                let __client = ::core::clone::Clone::clone(self);
+                ::std::boxed::Box::pin(async move {
+                    match #client_ident::#fn_ident(&__client #(, #names)*).await {
+                        ::core::result::Result::Ok(__inner) => __inner,
+                        ::core::result::Result::Err(__e) => ::core::result::Result::Err(
+                            <#err as ::core::convert::From<#peer_error>>::from(#peer_error::from_client(&__e)),
+                        ),
+                    }
+                })
+            }
+        }
+    });
+    quote! {
+        impl<__T> #trait_ident for #client_ident<__T>
+        where
+            __T: #client_path::Transport + ::core::clone::Clone + ::core::marker::Send + ::core::marker::Sync + 'static,
+            #(#bounds)*
+        {
             #(#items)*
         }
     }
@@ -738,6 +1063,42 @@ pub(crate) fn streaming_warnings(methods: &[MethodInfo], struct_name: &syn::Iden
                     let _ = #const_name;
                 }
             })
+        })
+        .collect()
+}
+
+/// NEST-17: `list = "…"` / `search = "…"` on a `#[child]` or `#[peer]` —
+/// a string where a path goes now — said as a deprecation warning at the
+/// string, for one release.
+pub(crate) fn string_arg_warnings(children: &[crate::parse::ChildMethodInfo], struct_name: &syn::Ident) -> TokenStream {
+    children
+        .iter()
+        .flat_map(|c| c.string_args.iter().map(move |(key, span)| (c, key, *span)))
+        .map(|(c, key, span)| {
+            let const_name = format_ident!("_PLEXUS_MACROS_DEPRECATED_STRING_{}_{}_{}", struct_name, c.fn_name, key, span = span);
+            let touch = format_ident!("_plexus_macros_touch_string_{}_{}_{}", struct_name, c.fn_name, key, span = span);
+            let method = match key.as_str() {
+                "list" => c.list_fn.as_ref(),
+                _ => c.search_fn.as_ref(),
+            }
+            .map(|i| i.to_string())
+            .unwrap_or_default();
+            let note = format!(
+                "plexus-macros (NEST-17): `{key} = \"{method}\"` names a sibling method with a string; write \
+                 the path, `{key} = {method}`. The string form is refused in a later release."
+            );
+            quote::quote_spanned! { span =>
+                #[doc(hidden)]
+                #[allow(non_upper_case_globals, non_snake_case, dead_code)]
+                #[deprecated(since = "0.11.0", note = #note)]
+                const #const_name: () = ();
+
+                #[doc(hidden)]
+                #[allow(non_snake_case, dead_code)]
+                fn #touch() {
+                    let _ = #const_name;
+                }
+            }
         })
         .collect()
 }

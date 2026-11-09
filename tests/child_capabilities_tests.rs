@@ -6,7 +6,7 @@
 //! `impl Stream<Item = String>` and `BoxStream<'_, String>` return shapes,
 //! and confirms the pinned decision that static children are always listed.
 //!
-//! Compile-fail fixtures for `list = "nonexistent"` / signature mismatch /
+//! Compile-fail fixtures for `list = nonexistent` / signature mismatch /
 //! etc. live in `tests/compile/` and are driven from
 //! `tests/child_compile_tests.rs`.
 
@@ -119,7 +119,7 @@ async fn static_only_has_list_capability_and_streams_names() {
 }
 
 // ---------------------------------------------------------------------------
-// Row: `#[child(list = "names")]` on dynamic method → LIST, stream from the
+// Row: `#[child(list = names)]` on dynamic method → LIST, stream from the
 // named method (plus static names when present). This test covers the
 // dynamic-only sub-case.
 // ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ impl DynamicList {
     }
 
     /// Dynamic child lookup — opts in to listing via the sibling `names`.
-    #[plexus_macros::child(list = "names")]
+    #[plexus_macros::child(list = names)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }
@@ -197,7 +197,7 @@ impl MixedList {
     }
 
     /// Dynamic child with explicit list opt-in.
-    #[plexus_macros::child(list = "dynamic_names")]
+    #[plexus_macros::child(list = dynamic_names)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }
@@ -228,7 +228,7 @@ async fn mixed_list_appends_dynamic_after_static() {
 }
 
 // ---------------------------------------------------------------------------
-// Row: `#[child(search = "find")]` on dynamic method → SEARCH only; no
+// Row: `#[child(search = find)]` on dynamic method → SEARCH only; no
 // static children so list_children remains None.
 // ---------------------------------------------------------------------------
 
@@ -247,7 +247,7 @@ impl DynamicSearch {
     }
 
     /// Dynamic child lookup with search opt-in only.
-    #[plexus_macros::child(search = "find")]
+    #[plexus_macros::child(search = find)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }
@@ -297,7 +297,7 @@ impl BothListAndSearch {
         stream! { yield "pong".into(); }
     }
 
-    #[plexus_macros::child(list = "all_names", search = "find")]
+    #[plexus_macros::child(list = all_names, search = find)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }
@@ -348,7 +348,7 @@ impl MixedReturnShapes {
         stream! { yield "pong".into(); }
     }
 
-    #[plexus_macros::child(list = "names_impl", search = "find_box")]
+    #[plexus_macros::child(list = names_impl, search = find_box)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }
@@ -411,7 +411,7 @@ impl AsyncSiblings {
         stream! { yield "pong".into(); }
     }
 
-    #[plexus_macros::child(list = "names", search = "find")]
+    #[plexus_macros::child(list = names, search = find)]
     fn planet(&self, _name: &str) -> Option<Leaf> {
         Some(Leaf)
     }

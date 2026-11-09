@@ -1856,7 +1856,7 @@ fn generate_help_arms(methods: &[MethodInfo]) -> Vec<TokenStream> {
 /// typed `Forbidden` / `Unauthenticated`) passes through unchanged, any other
 /// `Display` error is `ExecutionError(e.to_string())`. RETURNS-47: the route a
 /// trait-impl method's verifier takes too.
-fn resolve_typed(name: &syn::Ident, expr: &syn::Expr, crate_path: &syn::Path) -> TokenStream {
+pub(crate) fn resolve_typed(name: &syn::Ident, expr: &syn::Expr, crate_path: &syn::Path) -> TokenStream {
     quote! {
         let #name = match #expr(&auth_ctx).await {
             ::std::result::Result::Ok(v) => v,
