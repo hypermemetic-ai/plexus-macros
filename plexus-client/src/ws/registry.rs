@@ -237,8 +237,9 @@ pub(crate) struct Registry {
     typed: AtomicBool,
 }
 
-/// The item `type`s this client reads (spec/03); any other is skipped.
-const KINDS: [&str; 5] = ["data", "progress", "error", "request", "done"];
+/// The item `type`s this client reads (spec/03); any other is skipped — an
+/// older server's `request` (the in-call question ASK-1 removed) among them.
+const KINDS: [&str; 4] = ["data", "progress", "error", "done"];
 
 /// The routing key for a subscription id.
 ///
@@ -479,8 +480,8 @@ impl<'de: 'a, 'a> Visitor<'de> for HeadSeed<'_, 'a> {
     }
 }
 
-/// An item's fields, read in place: its content, metadata and request data
-/// left as their text, what a typed decode never reads never built.
+/// An item's fields, read in place: its content and metadata left as their
+/// text, what a typed decode never reads never built.
 #[derive(Deserialize)]
 struct Fields<'a> {
     #[serde(rename = "type")]
@@ -491,12 +492,6 @@ struct Fields<'a> {
     content_type: Option<Cow<'a, str>>,
     #[serde(default, borrow, deserialize_with = "present")]
     content: Option<&'a RawValue>,
-    #[serde(default, borrow, rename = "requestId")]
-    request_id: Option<Cow<'a, str>>,
-    #[serde(default, borrow, rename = "requestData", deserialize_with = "present")]
-    request_data: Option<&'a RawValue>,
-    #[serde(default, rename = "timeoutMs")]
-    timeout_ms: Option<u64>,
 }
 
 /// A field that is there, as its text, `null` included: a `Value` field reads
@@ -505,14 +500,13 @@ fn present<'de: 'a, 'a, D: Deserializer<'de>>(d: D) -> Result<Option<&'a RawValu
     <&'a RawValue>::deserialize(d).map(Some)
 }
 
-/// An item's `type`: the five this client reads, or one it skips (spec/03).
+/// An item's `type`: the four this client reads, or one it skips (spec/03).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Kind {
     Data,
     Progress,
     Error,
-    Request,
     Done,
     /// BIDIR-6: the input half's `credit`, `ack` and `input_closed`, read
     /// through the `Value` reading (they are few: one a half window).
@@ -548,11 +542,6 @@ impl Fields<'_> {
             // flattened fields — is the call's end and rare: the `Value`
             // reading makes it whole.
             Kind::Error => return None,
-            Kind::Request => StreamItem::Request {
-                request_id: self.request_id.as_deref()?.to_owned(),
-                request_data: serde_json::from_str(self.request_data?.get()).ok()?,
-                timeout_ms: self.timeout_ms.unwrap_or(0),
-            },
             Kind::Done => StreamItem::Done { metadata },
             Kind::Credit | Kind::Ack | Kind::InputClosed | Kind::Other => return None,
         })
@@ -565,7 +554,6 @@ impl Fields<'_> {
             Kind::Data => RawItem::Data { content_type, content: Content::from(self.content?.to_owned()) },
             Kind::Progress => RawItem::Progress { content_type, content: Content::from(self.content?.to_owned()) },
             Kind::Error => return None,
-            Kind::Request => RawItem::Request,
             Kind::Done => RawItem::Done,
             Kind::Credit | Kind::Ack | Kind::InputClosed | Kind::Other => return None,
         })
@@ -1127,8 +1115,10 @@ mod tests {
             assert!(registry.on_text(&note("\"s-8\"", item)).is_none());
         }
         let (values, raws) = (drain(&mut values), drain_raw(&mut raws));
-        assert_eq!(values.len(), items.len(), "{values:?}");
-        assert_eq!(raws.len(), items.len(), "{raws:?}");
+        // ASK-1: an older server's `request` (the retired in-call question)
+        // is a `type` this client does not read: skipped by both.
+        assert_eq!(values.len(), items.len() - 1, "{values:?}");
+        assert_eq!(raws.len(), items.len() - 1, "{raws:?}");
         for (value, raw) in values.into_iter().zip(raws) {
             match (value.unwrap(), raw.unwrap()) {
                 (StreamItem::Data { content: v, content_type: a, .. }, RawItem::Data { content: r, content_type: b }) => {
@@ -1139,7 +1129,6 @@ mod tests {
                     assert_eq!(r.into_value().unwrap(), v);
                     assert_eq!(a.as_deref(), b.as_deref());
                 }
-                (StreamItem::Request { .. }, RawItem::Request) => {}
                 (
                     StreamItem::Error { message: m, code: c, recoverable: r, error: e, .. },
                     RawItem::Error { message, code, recoverable, error },
@@ -1166,12 +1155,19 @@ mod tests {
             r#"{"type":"data","metadata":{},"content":{}}"#,
             r#"{"type":"progress","metadata":{"provenance":["kit"],"plexus_hash":"h","timestamp":1},"content_type":"kit.n","content":{"message":"half","percentage":50.0}}"#,
             r#"{"type":"progress","content":{"message":"none yet"}}"#,
-            r#"{"type":"request","requestId":"r-1","requestData":{"type":"confirm"},"timeoutMs":30000}"#,
-            r#"{"type":"request","requestId":"r-2","requestData":null}"#,
         ] {
             let fields: Fields<'_> = serde_json::from_str(item).unwrap();
             let built = fields.stream_item(fields.kind.unwrap());
             assert_eq!(built, Some(serde_json::from_str::<StreamItem>(item).unwrap()), "{item}");
+        }
+        // ASK-1: an older server's `request` is a `type` this client skips.
+        for item in [
+            r#"{"type":"request","requestId":"r-1","requestData":{"type":"confirm"},"timeoutMs":30000}"#,
+            r#"{"type":"request","requestId":"r-2","requestData":null}"#,
+        ] {
+            let fields: Fields<'_> = serde_json::from_str(item).unwrap();
+            assert_eq!(fields.kind, Some(Kind::Other), "{item}");
+            assert!(serde_json::from_str::<StreamItem>(item).is_err(), "{item}");
         }
         // RETURNS-36: an error item (its typed `error` beside spec/05's
         // flattened fields) is not built in place: it is the call's end, and

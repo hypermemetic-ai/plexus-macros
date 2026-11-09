@@ -49,16 +49,12 @@ pub struct ParsedDeprecation {
     pub message: String,
 }
 
-/// Bidirectional channel type configuration
-#[derive(Debug, Clone)]
-pub enum BidirType {
-    /// Not bidirectional
-    None,
-    /// Use StandardBidirChannel (StandardRequest, StandardResponse)
-    Standard,
-    /// Use custom request/response types
-    Custom { request: String, response: String },
-}
+/// ASK-1: `bidirectional` is gone — the in-call question it declared, with
+/// nothing in its place.
+pub(crate) const BIDIRECTIONAL_REMOVED: &str =
+    "`bidirectional` is removed (ASK-1): a method no longer asks its caller mid-call, and \
+     Plexus has no in-call or protocol-wide confirmation. A method that needs its caller's \
+     yes builds it from its own parameters (a `dry_run`, a plan id).";
 
 /// Per-method override for the activation-level request type.
 ///
@@ -101,8 +97,6 @@ pub struct HubMethodAttrs {
     pub description: Option<String>,
     /// Parameter descriptions: param_name -> description
     pub param_docs: HashMap<String, String>,
-    /// Bidirectional channel type (from #[hub_method(bidirectional)] or #[hub_method(bidirectional(request = "...", response = "..."))])
-    pub bidirectional: BidirType,
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
     /// Stored as string during parsing, converted to enum in code generation
     pub http_method: Option<String>,
@@ -353,7 +347,6 @@ impl Parse for HubMethodAttrs {
         let mut name = None;
         let mut description: Option<String> = None;
         let mut param_docs = HashMap::new();
-        let mut bidirectional = BidirType::None;
         let mut http_method = None;
         let mut request_override: Option<MethodRequestOverride> = None;
         let mut public = false;
@@ -394,7 +387,7 @@ impl Parse for HubMethodAttrs {
                             // RETURNS-8: cardinality is read from the signature.
                             streaming = Some(path.span());
                         } else if path.is_ident("bidirectional") {
-                            bidirectional = BidirType::Standard;
+                            return Err(syn::Error::new_spanned(&path, BIDIRECTIONAL_REMOVED));
                         } else if path.is_ident("public") {
                             // RED-2: explicit acknowledgment that this method
                             // intentionally bypasses activation-level auth.
@@ -574,36 +567,7 @@ impl Parse for HubMethodAttrs {
                             // contract; there is no shared enum to filter.
                             return Err(syn::Error::new_spanned(&path, RETURNS_REMOVED));
                         } else if path.is_ident("bidirectional") {
-                            // Parse bidirectional(request = "MyReq", response = "MyResp")
-                            let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
-                            let nested = syn::parse::Parser::parse2(parser, tokens.clone())?;
-
-                            let mut request = None;
-                            let mut response = None;
-
-                            for meta in nested {
-                                if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
-                                    if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
-                                        if path.is_ident("request") {
-                                            request = Some(s.value());
-                                        } else if path.is_ident("response") {
-                                            response = Some(s.value());
-                                        }
-                                    }
-                                }
-                            }
-
-                            match (request, response) {
-                                (Some(req), Some(resp)) => {
-                                    bidirectional = BidirType::Custom { request: req, response: resp };
-                                }
-                                _ => {
-                                    return Err(syn::Error::new_spanned(
-                                        &path,
-                                        "bidirectional(...) requires both request and response parameters: bidirectional(request = \"MyReq\", response = \"MyResp\")"
-                                    ));
-                                }
-                            }
+                            return Err(syn::Error::new_spanned(&path, BIDIRECTIONAL_REMOVED));
                         }
                     }
                 }
@@ -623,7 +587,7 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { name, description, param_docs, bidirectional, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
+        Ok(HubMethodAttrs { name, description, param_docs, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
     }
 }
 
@@ -1151,6 +1115,12 @@ pub struct ChildMethodInfo {
     /// `Option<Child>` for a dynamic one. The client codegen names the
     /// child's generated client from it.
     pub return_ty: syn::Type,
+    /// NEST-7: `#[plexus_macros::peer]` — an activation returned by name,
+    /// `Result<Box<dyn I>, PeerError>`: typed by `I`, or untyped (`Peer`).
+    pub peer: Option<crate::codegen::peer::PeerShape>,
+    /// NEST-7: for a peer slot with `list = "…"`, whether that sibling is
+    /// `async` (set by the activation driver, which sees the siblings).
+    pub list_is_async: bool,
 }
 
 impl ChildMethodInfo {
@@ -1229,6 +1199,24 @@ impl ChildMethodInfo {
             }
         };
 
+        // NEST-7: a `#[peer]` is a dynamic slot whose function answers
+        // `Result<Box<dyn I>, PeerError>`, awaited; it has no generated
+        // client accessor (the peer's own client is its interface's).
+        let is_peer = method.attrs.iter().any(|a| a.path().segments.last().is_some_and(|s| s.ident == "peer"));
+        let (peer, opaque) = if is_peer {
+            if !matches!(kind, ChildMethodKind::Dynamic) || !is_async {
+                return Err(syn::Error::new_spanned(
+                    &method.sig,
+                    "a #[plexus_macros::peer] method is `async fn NAME(&self, name: &str) -> \
+                     Result<Box<dyn I>, PeerError>`",
+                ));
+            }
+            let shape = crate::codegen::peer::peer_shape(&return_ty).map_err(|why| syn::Error::new_spanned(&return_ty, why))?;
+            (Some(shape), true)
+        } else {
+            (None, opaque)
+        };
+
         Ok(ChildMethodInfo {
             fn_name,
             description,
@@ -1240,6 +1228,8 @@ impl ChildMethodInfo {
             deprecation,
             forward,
             return_ty,
+            peer,
+            list_is_async: false,
         })
     }
 }
@@ -1265,7 +1255,7 @@ fn parse_child_attr_args(
     for attr in attrs {
         let path = attr.path();
         let last = path.segments.last().map(|s| s.ident.to_string());
-        if !matches!(last.as_deref(), Some("child")) {
+        if !matches!(last.as_deref(), Some("child") | Some("peer")) {
             continue;
         }
 
@@ -1789,7 +1779,7 @@ pub fn has_child_attr(method: &ImplItemFn) -> bool {
         let path = a.path();
         path.segments
             .last()
-            .map(|s| s.ident == "child")
+            .map(|s| s.ident == "child" || s.ident == "peer")
             .unwrap_or(false)
     })
 }
@@ -1824,8 +1814,6 @@ pub struct MethodInfo {
     /// whose `P` is the default `Note`); `None` when the method reports no
     /// progress.
     pub progress_ty: Option<ProgressTy>,
-    /// Bidirectional channel type (from attribute or inferred from parameter type)
-    pub bidirectional: BidirType,
     /// HTTP method for REST endpoints (GET, POST, PUT, DELETE, PATCH)
     /// None defaults to POST
     pub http_method: Option<String>,
@@ -1971,11 +1959,6 @@ impl MethodInfo {
         let request_override = hub_method_attrs
             .and_then(|a| a.request_override.clone());
 
-        // Get bidirectional from attribute (may be overridden by parameter type inference)
-        let mut bidirectional = hub_method_attrs
-            .map(|a| a.bidirectional.clone())
-            .unwrap_or(BidirType::None);
-
         // Track if method requires auth
         let mut requires_auth = false;
         // AUTHZ-MACRO-OPTIONAL-AUTH-1: track whether the user wrote
@@ -2056,17 +2039,6 @@ impl MethodInfo {
                             auth_optional = matches!(shape, AuthParamShape::Optional);
                             auth_at = Some(this_index);
                             // Don't include auth in params (it's provided by framework)
-                            continue;
-                        }
-                    }
-
-                    // Check if this is a bidirectional context parameter
-                    // Detect ctx: &BidirChannel<Req, Resp> or ctx: &StandardBidirChannel
-                    if name_str == "ctx" || name_str == "context" {
-                        if let Some(bidir_types) = extract_bidir_channel_types(&pat_type.ty) {
-                            // Infer bidirectional type from parameter
-                            bidirectional = bidir_types;
-                            // Don't include ctx in params (it's provided by framework)
                             continue;
                         }
                     }
@@ -2254,7 +2226,6 @@ impl MethodInfo {
             ok_ty,
             err_ty,
             progress_ty,
-            bidirectional,
             http_method,
             requires_auth,
             auth_optional,
@@ -2400,96 +2371,6 @@ pub enum AuthParamShape {
     Optional,
 }
 
-/// Extract BidirChannel type parameters from a type like &BidirChannel<Req, Resp>
-/// Handles various forms:
-/// - &BidirChannel<Req, Resp>
-/// - &Arc<BidirChannel<Req, Resp>>
-/// - &StandardBidirChannel
-/// - &Arc<StandardBidirChannel>
-/// Returns BidirType::Custom if custom types found, BidirType::Standard if StandardBidirChannel
-fn extract_bidir_channel_types(ty: &Type) -> Option<BidirType> {
-    // Handle &T
-    let inner_ty = if let Type::Reference(type_ref) = ty {
-        &*type_ref.elem
-    } else {
-        ty
-    };
-
-    if let Type::Path(type_path) = inner_ty {
-        let last_segment = type_path.path.segments.last()?;
-
-        // Check for Arc<...> wrapper
-        if last_segment.ident == "Arc" {
-            if let PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                    // Recursively check the inner type
-                    return extract_bidir_from_path(inner);
-                }
-            }
-            return None;
-        }
-
-        // Check direct type (no Arc)
-        return extract_bidir_from_path(inner_ty);
-    }
-
-    None
-}
-
-/// Extract BidirType from a path type (BidirChannel or StandardBidirChannel)
-fn extract_bidir_from_path(ty: &Type) -> Option<BidirType> {
-    if let Type::Path(type_path) = ty {
-        let last_segment = type_path.path.segments.last()?;
-
-        // Check for StandardBidirChannel (type alias)
-        if last_segment.ident == "StandardBidirChannel" {
-            return Some(BidirType::Standard);
-        }
-
-        // Check for BidirChannel<Req, Resp>
-        if last_segment.ident == "BidirChannel" {
-            if let PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                let args_vec: Vec<_> = args.args.iter().collect();
-                if args_vec.len() == 2 {
-                    // Extract Req and Resp type names
-                    if let (GenericArgument::Type(req_ty), GenericArgument::Type(resp_ty)) =
-                        (args_vec[0], args_vec[1])
-                    {
-                        let req_name = type_to_string(req_ty);
-                        let resp_name = type_to_string(resp_ty);
-
-                        // Check if it's StandardRequest/StandardResponse
-                        if req_name == "StandardRequest" && resp_name == "StandardResponse" {
-                            return Some(BidirType::Standard);
-                        }
-
-                        return Some(BidirType::Custom {
-                            request: req_name,
-                            response: resp_name,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Convert a Type to its string representation (simple path types only)
-fn type_to_string(ty: &Type) -> String {
-    if let Type::Path(type_path) = ty {
-        type_path
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::")
-    } else {
-        format!("{:?}", ty)
-    }
-}
 
 // ============================================================================
 // RETURNS-8: the signature forms
@@ -2909,7 +2790,6 @@ mod tests {
                 m.insert("message".to_string(), "explicit description".to_string());
                 m
             },
-            bidirectional: BidirType::None,
             http_method: None,
             request_override: None,
             public: false,

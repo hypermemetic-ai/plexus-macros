@@ -1,0 +1,5 @@
+error: `bidirectional` is removed (ASK-1): a method no longer asks its caller mid-call, and Plexus has no in-call or protocol-wide confirmation. A method that needs its caller's yes builds it from its own parameters (a `dry_run`, a plan id).
+ --> tests/compile/bidirectional_removed.rs:8:29
+  |
+8 |     #[plexus_macros::method(bidirectional)]
+  |                             ^^^^^^^^^^^^^

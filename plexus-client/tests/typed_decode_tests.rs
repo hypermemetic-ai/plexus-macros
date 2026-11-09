@@ -228,7 +228,6 @@ async fn a_transport_with_no_text_is_read_as_before() {
         vec![
             StreamItem::data(json!({"type": "health", "version": "0.7.0", "count": 1})),
             StreamItem::Progress { metadata: None, content_type: None, content: json!({"message": "half", "percentage": 50.0}) },
-            StreamItem::Request { request_id: "r".into(), request_data: json!({}), timeout_ms: 0 },
             StreamItem::data(json!({"type": "ready"})),
             StreamItem::Error {
                 metadata: None,

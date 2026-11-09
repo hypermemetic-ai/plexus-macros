@@ -193,23 +193,17 @@ fn progress_content_is_a_note_by_default() {
     assert!(serde_json::from_value::<StreamItem>(json!({"type": "progress", "message": "m"})).is_err());
 }
 
-/// The `request` variant keeps its camelCase field names — it is the one
-/// variant plexus-core renames differently.
+/// ASK-1: the in-call question is gone from the wire. An older server's
+/// `request` item is no `StreamItem` (a transport skips its `type`, spec/03).
 #[test]
-fn request_variant_is_camel_case_on_the_wire() {
-    let item: StreamItem = serde_json::from_value(json!({
+fn an_older_servers_request_item_is_not_an_item() {
+    let item = serde_json::from_value::<StreamItem>(json!({
         "type": "request",
         "requestId": "r-1",
         "requestData": {"prompt": "continue?"},
         "timeoutMs": 30000
-    }))
-    .expect("deserializes");
-
-    assert!(matches!(
-        item,
-        StreamItem::Request { ref request_id, timeout_ms, .. }
-            if request_id == "r-1" && timeout_ms == 30000
-    ));
+    }));
+    assert!(item.is_err(), "{item:?}");
 }
 
 /// Variant tags are snake_case, matching plexus-core. (plexus-codegen-rust's
@@ -240,14 +234,6 @@ fn variant_tags_are_snake_case() {
             fields: Default::default(),
         }),
         "error"
-    );
-    assert_eq!(
-        tag(&StreamItem::Request {
-            request_id: "r".into(),
-            request_data: json!({}),
-            timeout_ms: 0
-        }),
-        "request"
     );
 }
 

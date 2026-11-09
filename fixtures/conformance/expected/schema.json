@@ -2,13 +2,13 @@
   "namespace": "conformance",
   "version": "0.7.0",
   "description": "Conformance fixture: one method per signature form",
-  "self_hash": "017cbf045f40af57",
-  "hash": "6b9d49caad9ae188",
+  "self_hash": "b48a5158bae2ba64",
+  "hash": "b3a843ed84070f47",
   "methods": [
     {
       "name": "ping",
       "description": "Always answers pong.",
-      "hash": "5607c05985784c5b",
+      "hash": "1b842b4ff1aa44e8",
       "returns": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Pong",
@@ -24,7 +24,6 @@
         ]
       },
       "cardinality": "one",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -34,7 +33,7 @@
     {
       "name": "lookup",
       "description": "The thing with this id; the id \"missing\" is not found.",
-      "hash": "7e88885848017f26",
+      "hash": "0113ac64cdfc484c",
       "params": {
         "type": "object",
         "properties": {
@@ -89,7 +88,6 @@
         ]
       },
       "cardinality": "one",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -99,7 +97,7 @@
     {
       "name": "count",
       "description": "Ticks from 1 up to `to`.",
-      "hash": "c2205a95212b201e",
+      "hash": "4806f9d647b08a63",
       "params": {
         "type": "object",
         "properties": {
@@ -131,7 +129,6 @@
         ]
       },
       "cardinality": "many",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -141,7 +138,7 @@
     {
       "name": "scan",
       "description": "The rows whose key starts with `prefix`, in key order.",
-      "hash": "7c771077f75f3fb1",
+      "hash": "b1172eb1e00db543",
       "params": {
         "type": "object",
         "properties": {
@@ -192,7 +189,6 @@
         ]
       },
       "cardinality": "many",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -202,7 +198,7 @@
     {
       "name": "load",
       "description": "Loads `n` batches, reporting each, then says how many items it loaded.",
-      "hash": "8dc2a70c4db3e43c",
+      "hash": "17702b5f53937aef",
       "params": {
         "type": "object",
         "properties": {
@@ -241,12 +237,12 @@
           {
             "type": "object",
             "properties": {
-              "n": {
+              "max": {
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
               },
-              "max": {
+              "n": {
                 "type": "integer",
                 "format": "uint32",
                 "minimum": 0
@@ -296,7 +292,6 @@
         ]
       },
       "cardinality": "many",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -306,7 +301,7 @@
     {
       "name": "warm",
       "description": "Warms the cache, noting its progress, then says how many entries it holds.",
-      "hash": "be36cb7d2d5e634b",
+      "hash": "db7b905d5c90830f",
       "returns": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Warmed",
@@ -347,7 +342,6 @@
         ]
       },
       "cardinality": "many",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"
@@ -357,7 +351,7 @@
     {
       "name": "schema",
       "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
-      "hash": "c122665597586b12",
+      "hash": "f3c8ef571f2ac1a3",
       "params": {
         "type": "object",
         "properties": {
@@ -836,6 +830,49 @@
               }
             ]
           },
+          "Interface": {
+            "description": "A peer's shape, named and content-addressed: what `<ns>.ir` answers for\nit, its hash, and each method's own hash. Two interfaces with one hash\nserve one shape (descriptions, grants and the name aside).",
+            "type": "object",
+            "properties": {
+              "hash": {
+                "description": "The shape's hash: of every method's own hash, by name.",
+                "type": "string"
+              },
+              "ir": {
+                "description": "The IR of the shape (IR 3.0, as `<ns>.ir` writes it).",
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ]
+              },
+              "methods": {
+                "description": "Each method's own hash, by name ([`Interface::method_hash`]).",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "name": {
+                "description": "The interface's name: a contract's namespace (`\"forge\"`), or the\npeer's own.",
+                "type": "string"
+              },
+              "schema": {
+                "description": "The schema the interface was read from: what a gate indexes for a\ntyped slot (its methods' grants, targets and roles).",
+                "$ref": "#/$defs/PluginSchema"
+              }
+            },
+            "required": [
+              "name",
+              "hash",
+              "ir",
+              "schema"
+            ]
+          },
           "MethodExample": {
             "description": "SYNAPSE-13: one worked call of a method — the params it sends and a note\nsaying what it does (`#[plexus_macros::method(example(note = \"…\", params\n= r#\"{…}\"#))]`).",
             "type": "object",
@@ -868,7 +905,7 @@
             "type": "string"
           },
           "MethodRole": {
-            "description": "Describes how a method participates in the activation graph.\n\nEvery method on a plugin is exactly one of three kinds:\n\n- `Rpc` — a regular RPC endpoint (the default).\n- `StaticChild` — the method returns a child activation by a static name\n  (no lookup argument). Used by `#[child]`-annotated methods on hubs.\n- `DynamicChild { .. }` — the method gates a dynamic child keyed by its\n  argument. `list_method` optionally names a sibling method that enumerates\n  available keys, and `search_method` optionally names a sibling method\n  that searches keys.\n\nThis tag is consumed by downstream tooling (synapse, synapse-cc,\nintrospection clients) to reconstruct the child graph without a separate\nside-table. Today's macros emit `MethodRole::Rpc` for every method; IR-3\npopulates child roles from `#[child]` annotations.\n\n# Wire back-compat\n\nAdded in IR-2. Serde defaults to `Rpc` for pre-IR schemas.\n`#[non_exhaustive]` reserves space for future variants without breaking\ndownstream match arms.",
+            "description": "Describes how a method participates in the activation graph: `rpc`,\n`static_child` (a child by its own name; `peer` set for a slot of peers,\nreached as `<slot>.<name>`, `interface` the slot's type), or\n`dynamic_child` (a child found by name at call time; `child` its slot's\ntype).",
             "oneOf": [
               {
                 "description": "Method is an RPC endpoint (the default for ordinary methods).",
@@ -884,12 +921,41 @@
                 ]
               },
               {
-                "description": "Method returns a child activation by static name (no lookup arg).",
+                "description": "Method returns a child activation by static name (no lookup arg) —\nor, marked `peer`, a slot of peers by name.",
                 "type": "object",
                 "properties": {
+                  "interface": {
+                    "description": "NEST-7: a typed peer slot's interface.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Interface"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "kind": {
                     "type": "string",
                     "const": "static_child"
+                  },
+                  "list_method": {
+                    "description": "NEST-7: a peer slot's sibling method that lists its names.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "peer": {
+                    "description": "NEST-7: the child is a slot of peers (`#[plexus_macros::peer]`).",
+                    "type": "boolean"
+                  },
+                  "search_method": {
+                    "description": "NEST-7: a peer slot's sibling method that searches its names.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -900,6 +966,17 @@
                 "description": "Method gates a dynamic child keyed by its argument.",
                 "type": "object",
                 "properties": {
+                  "child": {
+                    "description": "NEST-5: the slot's type, for a typed dynamic child.",
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/PluginSchema"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "kind": {
                     "type": "string",
                     "const": "dynamic_child"
@@ -946,11 +1023,6 @@
                     "type": "null"
                   }
                 ]
-              },
-              "bidirectional": {
-                "description": "Whether this method supports bidirectional communication\n\nWhen true, the server can send requests to the client during method execution\nand wait for responses (e.g., confirmations, prompts, selections).",
-                "type": "boolean",
-                "default": false
               },
               "cardinality": {
                 "description": "Whether the method yields one item or many — `\"one\"` / `\"many\"`.\n\nRequired on the wire: a schema that does not state its cardinality is\nnot a 0.7 schema, and guessing would reintroduce the disagreement this\nfield exists to end.",
@@ -1084,17 +1156,6 @@
                 "description": "Whether this method is explicitly public — exempt from the\ndefault-deny gate (AUTHZ-CORE-2's `#[plexus::method(public)]`).\n\n`public` and a populated `requires_credential` are mutually exclusive\nby construction: the macro rejects `public` + `scope = \"...\"` at\ncompile time.\n\nAdded in R-2. Defaults to `false` via `#[serde(default)]` so pre-R\nIRs decode cleanly; `skip_serializing_if` keeps the wire shape\nunchanged for non-public methods (i.e., every pre-R method).",
                 "type": "boolean"
               },
-              "request_type": {
-                "description": "JSON Schema for the request type sent from server to client\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nrequests the server may send during method execution.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
-                ]
-              },
               "requires_credential": {
                 "description": "What credential this method requires on input (if any).\n\nDerived implicitly from the method's scope tagging and the\ncredential-graph linkage at schema-build time (per\n`AUTHZ-CRED-CORE-3` §\"Implicit derivation\"):\n\n- `scope = \"...\"` → `RequiredCredential::from_method_scope(scope)`.\n- `public` method → `None` (the absence of this field).\n- target of `refresh_via`/`revoke_via` of another credential →\n  `RequiredCredential::from_refresh_revoke_target(kind, scopes)`.\n\nAdded in `AUTHZ-CRED-CORE-3`. Defaults to `None` via\n`#[serde(default)]` so pre-IR schemas deserialize cleanly. The\n`skip_serializing_if = \"Option::is_none\"` clause keeps the wire JSON\nshape unchanged for public methods and methods with no scope-derived\nrequirement.",
                 "anyOf": [
@@ -1104,17 +1165,6 @@
                   {
                     "type": "null"
                   }
-                ]
-              },
-              "response_type": {
-                "description": "JSON Schema for the response type sent from client to server\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nresponses the client should send in reply to server requests.",
-                "type": [
-                  "null",
-                  "boolean",
-                  "number",
-                  "string",
-                  "array",
-                  "object"
                 ]
               },
               "returns": {
@@ -1349,7 +1399,6 @@
         }
       },
       "cardinality": "one",
-      "bidirectional": false,
       "http_method": "POST",
       "role": {
         "kind": "rpc"

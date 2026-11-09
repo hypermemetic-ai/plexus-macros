@@ -2,8 +2,7 @@
 //!
 //! # Why this is not `plexus_core::plexus::types::PlexusStreamItem`
 //!
-//! The server-side envelope requires `metadata` on every non-`Request`
-//! variant, and the WebSocket JSON-RPC transport does deliver it. The REST
+//! The server-side envelope requires `metadata` on every variant, and the WebSocket JSON-RPC transport does deliver it. The REST
 //! bridge does **not**: `stream_sse_response` re-frames each item and emits
 //! only
 //!
@@ -123,17 +122,6 @@ pub enum StreamItem {
         fields: serde_json::Map<String, Value>,
     },
 
-    /// A server-to-client request (bidirectional activations). The typed
-    /// client has no answer channel, so [`crate::decode`] skips these; a
-    /// consumer that needs them reads the raw [`StreamItem`] stream.
-    #[serde(rename_all = "camelCase")]
-    Request {
-        request_id: String,
-        request_data: Value,
-        #[serde(default)]
-        timeout_ms: u64,
-    },
-
     /// Normal end of stream.
     Done {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,7 +157,6 @@ impl StreamItem {
             | StreamItem::Progress { metadata, .. }
             | StreamItem::Error { metadata, .. }
             | StreamItem::Done { metadata } => metadata.as_ref(),
-            StreamItem::Request { .. } => None,
         }
     }
 }
@@ -279,10 +266,9 @@ impl From<Value> for Content {
 
 /// One item of a response stream as a typed client reads it (PERF.115-36):
 /// a [`StreamItem`] whose content is still the wire's JSON ([`Content`]), and
-/// nothing read that a typed decode does not use: no metadata, no request's
-/// data. [`Transport::call_raw`](crate::Transport::call_raw) yields these and
+/// nothing read that a typed decode does not use: no metadata. [`Transport::call_raw`](crate::Transport::call_raw) yields these and
 /// [`decode_raw`](crate::decode_raw) turns them into events; a consumer that
-/// wants the metadata, or answers requests, reads [`StreamItem`]s.
+/// wants the metadata reads [`StreamItem`]s.
 #[derive(Debug, Clone)]
 pub enum RawItem {
     /// A payload item: its content, and its `content_type`, which every item
@@ -306,9 +292,6 @@ pub enum RawItem {
         recoverable: bool,
         error: Box<RemoteError>,
     },
-    /// A server-to-client request. A typed client has no answer channel and
-    /// skips it.
-    Request,
     /// Normal end of stream.
     Done,
 }
@@ -337,7 +320,6 @@ impl From<StreamItem> for RawItem {
                 recoverable,
                 error: Box::new(error),
             },
-            StreamItem::Request { .. } => RawItem::Request,
             StreamItem::Done { .. } => RawItem::Done,
         }
     }

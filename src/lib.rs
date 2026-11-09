@@ -191,6 +191,13 @@ impl Parse for HubMethodAttrs {
 /// the six. `returns(..)` is removed (a compile error); `streaming` is a
 /// deprecated no-op on a stream form and an error on a one-item one.
 ///
+/// # No in-call question (ASK-1)
+///
+/// `bidirectional` is removed (a compile error): a method never asks its
+/// caller mid-call, and Plexus has no in-call or protocol-wide
+/// confirmation. A method that wants its caller's yes builds it from its
+/// own parameters (a `dry_run`, a plan id).
+///
 /// # Authorization arguments (R-1 / AUTHZ-CORE-2)
 ///
 /// - `scope = "..."` — explicit required scope, emitted into the generated
@@ -271,6 +278,25 @@ pub fn hub_method(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Used standalone (outside an `#[activation]` block) this attribute is a
 /// no-op that returns the function unchanged.
+/// NEST-7: an activation returned by name — a peer, in this process or
+/// across the network, typed by a contract's peer trait or untyped:
+///
+/// ```ignore
+/// #[plexus_macros::peer(list = "integrations")]
+/// async fn integration(&self, name: &str) -> Result<Box<dyn forge::ForgePeer>, PeerError> { … }
+/// #[plexus_macros::peer(list = "dendrites", search = "find")]
+/// async fn dendrite(&self, name: &str) -> Result<Box<dyn Peer>, PeerError> { … }
+/// ```
+///
+/// Inside `#[plexus_macros::activation]` the slot's role is
+/// `MethodRole::Peer { interface }`, routing calls it (a typed peer checked
+/// against the slot's interface first) and a failure is its typed error
+/// item. Outside it this attribute does nothing.
+#[proc_macro_attribute]
+pub fn peer(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 #[proc_macro_attribute]
 pub fn child(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Outside of #[plexus_macros::activation] this attribute does nothing;
@@ -594,7 +620,7 @@ fn generate_schema_fn(
 ///   `bar`), each wire method in it under its own return type, boxed; the
 ///   activation implements it by cloning itself into each stream — unless a
 ///   wire method takes what the server injects (`auth`, `reach`,
-///   `#[from_auth]`, `#[activation_param]`, a bidirectional `ctx`). The
+///   `#[from_auth]`, `#[activation_param]`). The
 ///   client implements no trait: its methods answer `Result<T, ClientError>`
 ///   (one item) or the `{Ns}{Method}Stream` alias (many), so no item type
 ///   needs `plexus_client::FromClientError`.

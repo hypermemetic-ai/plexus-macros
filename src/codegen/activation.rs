@@ -219,6 +219,21 @@ pub fn generate(
         deprecation_inject
     };
 
+    // NEST-5: the slot type's roles, as `roles(...)` declared them.
+    let slot_roles_inject = {
+        let role_names: Vec<&str> = roles.iter().map(|(n, _)| n.as_str()).collect();
+        let role_grants: Vec<Vec<&str>> =
+            roles.iter().map(|(_, g)| g.iter().map(String::as_str).collect()).collect();
+        quote! {
+            #(
+                __plugin_schema.roles.insert(
+                    ::std::string::String::from(#role_names),
+                    ::std::vec![#(::std::string::String::from(#role_grants)),*],
+                );
+            )*
+        }
+    };
+
     let plugin_schema_body = match (hub, long_description) {
         (true, Some(long_desc)) => {
             // Hub with long description
@@ -382,7 +397,7 @@ pub fn generate(
             .collect();
         let dynamic_child: Option<&ChildMethodInfo> = child_methods
             .iter()
-            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic));
+            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic) && c.peer.is_none());
 
         let static_names: Vec<String> =
             static_children.iter().map(|c| c.fn_name.to_string()).collect();
@@ -416,7 +431,10 @@ pub fn generate(
             quote! { _ => None, }
         };
 
-        if static_children.is_empty() {
+        if static_children.is_empty() && dynamic_child.is_none() {
+            // NEST-7: only peer slots (routed by `peer_child` below).
+            quote! { None }
+        } else if static_children.is_empty() {
             // Pure-dynamic dispatch: no match needed.
             let fn_name = &dynamic_child.unwrap().fn_name;
             let await_tok = if dynamic_child.unwrap().is_async {
@@ -453,6 +471,99 @@ pub fn generate(
                 _ => None,
             }
         }
+    };
+
+    // NEST-7: `#[peer]` slots, each reached by its name
+    // (`host.integration.github.repos`). Routing asks `peer_child`, which
+    // answers a static child and the dynamic `#[child]` as `get_child`
+    // would, and for a slot's name a `PeerSlot`: its children are the peers
+    // the slot's function returns (a typed one checked against the slot's
+    // interface), each failure the caller's typed error item.
+    let peer_slots: Vec<&ChildMethodInfo> = child_methods.iter().filter(|c| c.peer.is_some()).collect();
+    let (get_child_body, peer_child_impl) = if peer_slots.is_empty() {
+        (get_child_body, quote! {})
+    } else {
+        let statics: Vec<&ChildMethodInfo> = child_methods.iter().filter(|c| matches!(c.kind, ChildMethodKind::Static)).collect();
+        let static_names: Vec<String> = statics.iter().map(|c| c.fn_name.to_string()).collect();
+        let static_fns: Vec<&syn::Ident> = statics.iter().map(|c| &c.fn_name).collect();
+        let slot_names: Vec<String> = peer_slots.iter().map(|c| c.fn_name.to_string()).collect();
+        let slot_arms: Vec<TokenStream> = peer_slots
+            .iter()
+            .map(|c| {
+                let fn_name = &c.fn_name;
+                let name = fn_name.to_string();
+                let interface = crate::codegen::peer::interface_expr(c.peer.as_ref().unwrap(), crate_path);
+                let with_list = match &c.list_fn {
+                    Some(list) => {
+                        let await_tok = if c.list_is_async { quote! { .await } } else { quote! {} };
+                        quote! {
+                            .with_list({
+                                let __this = ::core::clone::Clone::clone(self);
+                                ::std::sync::Arc::new(move || {
+                                    let __this = ::core::clone::Clone::clone(&__this);
+                                    ::std::boxed::Box::pin(async move {
+                                        let __names = __this.#list()#await_tok;
+                                        #deps::futures::StreamExt::collect::<::std::vec::Vec<::std::string::String>>(__names).await
+                                    })
+                                })
+                            })
+                        }
+                    }
+                    None => quote! {},
+                };
+                quote! {
+                    {
+                        let __this = ::core::clone::Clone::clone(self);
+                        let __find: #crate_path::plexus::peer::FindPeer = ::std::sync::Arc::new(move |__name: ::std::string::String| {
+                            let __this = ::core::clone::Clone::clone(&__this);
+                            ::std::boxed::Box::pin(async move {
+                                __this.#fn_name(&__name).await.map(|__p| {
+                                    let __p: ::std::boxed::Box<dyn #crate_path::plexus::peer::Peer> = __p;
+                                    __p
+                                })
+                            })
+                        });
+                        ::core::result::Result::Ok(::core::option::Option::Some(::std::boxed::Box::new(
+                            #crate_path::plexus::peer::PeerSlot::new(#name, #interface, __find)#with_list,
+                        ) as Box<dyn #crate_path::plexus::ChildRouter>))
+                    }
+                }
+            })
+            .collect();
+        let dynamic_arm = match child_methods.iter().find(|c| matches!(c.kind, ChildMethodKind::Dynamic) && c.peer.is_none()) {
+            Some(d) => {
+                let fn_name = &d.fn_name;
+                let await_tok = if d.is_async { quote! { .await } } else { quote! {} };
+                quote! {
+                    _ => ::core::result::Result::Ok(self.#fn_name(_name)#await_tok.map(|c| Box::new(c) as Box<dyn #crate_path::plexus::ChildRouter>)),
+                }
+            }
+            None => quote! { _ => ::core::result::Result::Ok(::core::option::Option::None), },
+        };
+        (
+            quote! {
+                <Self as #crate_path::plexus::ChildRouter>::peer_child(self, _name).await.ok().flatten()
+            },
+            quote! {
+                async fn peer_child(
+                    &self,
+                    _name: &str,
+                ) -> ::core::result::Result<
+                    ::core::option::Option<Box<dyn #crate_path::plexus::ChildRouter>>,
+                    #crate_path::plexus::peer::PeerError,
+                > {
+                    match _name {
+                        #(
+                            #static_names => ::core::result::Result::Ok(::core::option::Option::Some(
+                                Box::new(self.#static_fns()) as Box<dyn #crate_path::plexus::ChildRouter>,
+                            )),
+                        )*
+                        #( #slot_names => #slot_arms, )*
+                        #dynamic_arm
+                    }
+                }
+            },
+        )
     };
 
     // CHILD-4: compute capabilities + list/search overrides.
@@ -611,7 +722,7 @@ pub fn generate(
             .collect();
         let default_arm = match child_methods
             .iter()
-            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic))
+            .find(|c| matches!(c.kind, ChildMethodKind::Dynamic) && c.peer.is_none())
             .and_then(|c| c.forward)
         {
             Some(f) => {
@@ -703,6 +814,8 @@ pub fn generate(
                 async fn get_child(&self, _name: &str) -> Option<Box<dyn #crate_path::plexus::ChildRouter>> {
                     #get_child_body
                 }
+
+                #peer_child_impl
 
                 // CHILD-3/4: opt-in capability flags. Static children always
                 // yield LIST; `list = "..."` / `search = "..."` opt in to the
@@ -808,6 +921,36 @@ pub fn generate(
                 }
             })
             .collect();
+        // NEST-7: each `#[peer]` slot is a child by its own name
+        // (`host.integration`), whose schema lists the slot's names.
+        let peer_entries: Vec<TokenStream> = child_methods
+            .iter()
+            .filter(|c| c.peer.is_some())
+            .map(|c| {
+                let name = c.fn_name.to_string();
+                let desc = &c.description;
+                // The slot's own hash (its interface's, and its name), never
+                // a peer's: a navigator checks for cycles by hash.
+                let hash = match c.peer.as_ref().unwrap() {
+                    crate::codegen::peer::PeerShape::Typed(path) => quote! {
+                        #crate_path::plexus::content_hash::hash16(
+                            ::std::format!("slot:{}:{}", #name, <dyn #path as #crate_path::plexus::peer::Contract>::interface().hash).as_bytes(),
+                        )
+                    },
+                    crate::codegen::peer::PeerShape::Untyped => quote! {
+                        #crate_path::plexus::content_hash::hash16(::std::format!("slot:{}", #name).as_bytes())
+                    },
+                };
+                quote! {
+                    #crate_path::plexus::ChildSummary {
+                        namespace: ::std::string::String::from(#name),
+                        description: ::std::string::String::from(#desc),
+                        hash: #hash,
+                    }
+                }
+            })
+            .collect();
+        let entries: Vec<TokenStream> = entries.into_iter().chain(peer_entries).collect();
         quote! {
             /// Auto-generated child summary list from `#[plexus_macros::child]`
             /// static methods, each with its child's schema hash. Dynamic
@@ -917,6 +1060,7 @@ pub fn generate(
                                         m.role,
                                         #crate_path::plexus::MethodRole::StaticChild
                                             | #crate_path::plexus::MethodRole::DynamicChild { .. }
+                                            | #crate_path::plexus::MethodRole::Peer { .. }
                                     )
                             }) {
                                 let result = #crate_path::plexus::SchemaResult::Method(m.clone());
@@ -943,6 +1087,21 @@ pub fn generate(
 
             fn plugin_schema(&self) -> #crate_path::plexus::PluginSchema {
                 #plugin_schema_body
+            }
+
+            // NEST-5: the schema without an instance — a parent's slot type.
+            fn slot_schema() -> ::std::option::Option<#crate_path::plexus::PluginSchema>
+            where
+                Self: ::core::marker::Sized,
+            {
+                let mut __plugin_schema = #crate_path::plexus::PluginSchema::leaf(
+                    #namespace,
+                    #version_expr,
+                    #description,
+                    #enum_name::method_schemas(),
+                );
+                #slot_roles_inject
+                ::std::option::Option::Some(__plugin_schema)
             }
 
             #activation_static_children_impl
@@ -1157,7 +1316,6 @@ fn generate_rpc_impl_methods(
     deps: &syn::Ident,
     trait_impl: Option<&syn::Path>,
 ) -> Vec<TokenStream> {
-    use crate::parse::BidirType;
     // RETURNS-47: an inherent method by the type's path, a trait's through
     // the trait.
     let recv = match trait_impl {
@@ -1184,48 +1342,7 @@ fn generate_rpc_impl_methods(
                 })
                 .collect();
 
-            // Generate bidirectional channel setup and method call based on bidir type
-            let (bidir_setup, method_call) = match &m.bidirectional {
-                BidirType::None => {
-                    (quote! {}, quote! { #recv::#method_name(self, #(#param_names),*).await })
-                }
-                BidirType::Standard => {
-                    (
-                        quote! {
-                            let (tx, _rx) = #deps::tokio::sync::mpsc::channel(32);
-                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
-                                #crate_path::plexus::StandardRequest,
-                                #crate_path::plexus::StandardResponse,
-                            >::new(
-                                tx,
-                                false,
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ));
-                        },
-                        quote! { #recv::#method_name(self, &ctx, #(#param_names),*).await }
-                    )
-                }
-                BidirType::Custom { request, response } => {
-                    let req_ty: syn::Type = syn::parse_str(request).unwrap_or_else(|_| syn::parse_quote!(()));
-                    let resp_ty: syn::Type = syn::parse_str(response).unwrap_or_else(|_| syn::parse_quote!(()));
-                    (
-                        quote! {
-                            let (tx, _rx) = #deps::tokio::sync::mpsc::channel(32);
-                            let ctx = std::sync::Arc::new(#crate_path::plexus::BidirChannel::<
-                                #req_ty,
-                                #resp_ty,
-                            >::new(
-                                tx,
-                                false,
-                                vec![#namespace.into()],
-                                #crate_path::plexus::PlexusContext::hash(),
-                            ));
-                        },
-                        quote! { #recv::#method_name(self, &ctx, #(#param_names),*).await }
-                    )
-                }
-            };
+            let method_call = quote! { #recv::#method_name(self, #(#param_names),*).await };
 
             // RETURNS-8: the same per-form wrapper as `Activation::call`, so
             // both paths send the same frames.
@@ -1241,7 +1358,6 @@ fn generate_rpc_impl_methods(
                     use #deps::futures::StreamExt;
 
                     let sink = pending.accept().await?;
-                    #bidir_setup
                     let __ret = #method_call;
                     let wrapped = #wrapped;
 
@@ -1274,7 +1390,6 @@ fn generate_dispatch_arms(
     typed_params: bool,
     trait_impl: Option<&syn::Path>,
 ) -> Vec<TokenStream> {
-    use crate::parse::BidirType;
     // RETURNS-47: how the dispatch calls a method — by method syntax on an
     // inherent impl, through the trait on `impl Trait for Type`.
     let invoke = |fn_name: &syn::Ident, args: TokenStream| match trait_impl {
@@ -1473,95 +1588,18 @@ fn generate_dispatch_arms(
             // form turns its return value into frames.
             let wrapped = wrap_return(m, quote! { __ret }, &content_type, namespace, crate_path);
 
-            // Generate code based on bidirectional type
-            match &m.bidirectional {
-                BidirType::None => {
-                    quote! {
-                        #method_name => {
-                            #auth_injection
-                            #activation_extraction
-                            #(#activation_param_bindings)*
-                            #caller_gate
-                            #(#resolver_bindings)*
-                            #param_extraction
-                            #reach_binding
-                            #input_open
-                            let __ret = #call.await;
-                            Ok(#wrapped)
-                        }
-                    }
-                }
-                BidirType::Standard => {
-                    // Build param list for bidir - ctx comes first, then auth if needed, then regular params
-                    let bidir_params = if m.requires_auth {
-                        quote! { &ctx, auth_ctx, #reach_arg #(#param_names),* }
-                    } else {
-                        quote! { &ctx, #reach_arg #(#param_names),* }
-                    };
-                    let call_bidir = invoke(fn_name, bidir_params.clone());
-
-                    // StandardBidirChannel - use wrap_stream_with_bidir
-                    quote! {
-                        #method_name => {
-                            #auth_injection
-                            #activation_extraction
-                            #(#activation_param_bindings)*
-                            #caller_gate
-                            #(#resolver_bindings)*
-                            #param_extraction
-                            #reach_binding
-                            #input_open
-                            // Create bidir channel and wrap stream together
-                            let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
-                                #crate_path::plexus::StandardRequest,
-                                #crate_path::plexus::StandardResponse,
-                            >(#content_type, vec![#namespace.into()]);
-
-                            // Call the method with the bidir channel
-                            let __ret = #call_bidir.await;
-
-                            // Wrap the method's output and merge with bidir requests
-                            let wrapped_user = #wrapped;
-                            Ok(wrap_fn(wrapped_user))
-                        }
-                    }
-                }
-                BidirType::Custom { request, response } => {
-                    // Build param list for bidir - ctx comes first, then auth if needed, then regular params
-                    let bidir_params = if m.requires_auth {
-                        quote! { &ctx, auth_ctx, #reach_arg #(#param_names),* }
-                    } else {
-                        quote! { &ctx, #reach_arg #(#param_names),* }
-                    };
-                    let call_bidir = invoke(fn_name, bidir_params.clone());
-
-                    // Custom BidirChannel - use wrap_stream_with_bidir with custom types
-                    let req_ty: syn::Type = syn::parse_str(request).unwrap_or_else(|_| syn::parse_quote!(()));
-                    let resp_ty: syn::Type = syn::parse_str(response).unwrap_or_else(|_| syn::parse_quote!(()));
-                    quote! {
-                        #method_name => {
-                            #auth_injection
-                            #activation_extraction
-                            #(#activation_param_bindings)*
-                            #caller_gate
-                            #(#resolver_bindings)*
-                            #param_extraction
-                            #reach_binding
-                            #input_open
-                            // Create bidir channel and wrap stream together
-                            let (ctx, wrap_fn) = #crate_path::plexus::create_bidir_stream::<
-                                #req_ty,
-                                #resp_ty,
-                            >(#content_type, vec![#namespace.into()]);
-
-                            // Call the method with the bidir channel
-                            let __ret = #call_bidir.await;
-
-                            // Wrap the method's output and merge with bidir requests
-                            let wrapped_user = #wrapped;
-                            Ok(wrap_fn(wrapped_user))
-                        }
-                    }
+            quote! {
+                #method_name => {
+                    #auth_injection
+                    #activation_extraction
+                    #(#activation_param_bindings)*
+                    #caller_gate
+                    #(#resolver_bindings)*
+                    #param_extraction
+                    #reach_binding
+                    #input_open
+                    let __ret = #call.await;
+                    Ok(#wrapped)
                 }
             }
         })
@@ -1599,8 +1637,7 @@ fn input_ceiling(i: &crate::parse::InputInfo, crate_path: &syn::Path) -> TokenSt
 /// is looked at: `null`, a bare value and `{}` reach the extraction as
 /// before, and keys inside a parameter's value are its type's to judge.
 /// `m.params` holds the wire parameters alone — what the server injects
-/// (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`, a bidirectional
-/// `ctx`) is never a key.
+/// (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`) is never a key.
 fn generate_unknown_key_check(m: &MethodInfo, content_type: &str, crate_path: &syn::Path, deps: &syn::Ident) -> TokenStream {
     let mut known: Vec<String> = m.params.iter().map(|p| p.name.to_string()).collect();
     known.sort();

@@ -3,7 +3,34 @@
 All notable changes to plexus-macros and plexus-client are documented here.
 This file starts at 0.7.0; earlier changes are in the git history.
 
-## [Unreleased]
+## [Unreleased] — 0.10.0
+
+ASK-2 / ASK-1 (breaking): the in-call question is gone, and nothing replaces
+it — Plexus has no in-call or protocol-wide confirmation (owner, ASK-1).
+`bidirectional` (flag and `bidirectional(request, response)`) is a compile
+error; a `ctx: &BidirChannel` is no longer recognised. plexus-client:
+`StreamItem::Request` and `RawItem::Request` are gone; an older server's
+`request` item is skipped as any unknown kind (spec/03). Fixture goldens
+regenerated (no `bidirectional`; IR 3.1, 3.0 without the bidir keys).
+
+NEST-7: `#[plexus_macros::peer(list = …, search = …)] async fn x(&self, name:
+&str) -> Result<Box<dyn I>, PeerError>` — a typed peer slot (`I` a contract's
+peer trait) or an untyped one (`Peer`); several per activation, beside a
+dynamic `#[child]`. Its role is `MethodRole::Peer`, routing answers it through
+`peer_child` (a `PeerSlot`, whose schema lists the `list` sibling's names),
+and the parent's `children` names the slot. A contract every method of which
+answers one `Result<T, E>` also gets `trait {Trait}Peer: {Trait} + Peer`, its
+`Contract` (interface and stamp), `{Trait}Client::stamp()`,
+`{Trait}Client::peer(transport)`, and `{Trait}` + `Peer` for
+`{Trait}Client<PeerTransport<T>>`; each `E` must be `From<PeerError>`.
+
+NEST-5: a dynamic `#[child]`'s role carries its slot type — the child type's
+schema (`Activation::slot_schema`, emitted for every activation), chosen by
+autoref so a child that is no macro activation stays untyped; a type that
+names itself is untyped at its repeat. `roles(...)` takes a slot grant
+(`"{planet}.info"` or `"solar.{planet}.info"`, `{planet}` a dynamic child of
+the activation). Every fixture whose schema carries `MethodRole`'s moved
+(regenerated; the IR goldens by synapse's `ir3-test`).
 
 ## [0.9.0] — 2026-11-06
 

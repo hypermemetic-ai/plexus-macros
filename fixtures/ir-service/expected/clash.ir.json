@@ -1,12 +1,9 @@
 {
   "irBackend": "clashsvc",
-  "irHash": "7072cd66eeccebf4",
+  "irHash": "fd334f73d63ebecc",
   "irMetadata": null,
   "irMethods": {
     ".call": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
       "mdCardinality": "many",
       "mdDescription": "Route a call to a registered activation",
       "mdError": null,
@@ -55,9 +52,6 @@
       }
     },
     ".hash": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
       "mdCardinality": "many",
       "mdDescription": "Get plexus configuration hash (from the recursive schema)\n\n This hash changes whenever any method or child plugin changes.\n It's computed from the method hashes rolled up through the schema tree.",
       "mdError": null,
@@ -80,9 +74,6 @@
       }
     },
     ".hashes": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
       "mdCardinality": "many",
       "mdDescription": "Get plugin hashes for cache validation",
       "mdError": null,
@@ -105,9 +96,6 @@
       }
     },
     ".ir": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
       "mdCardinality": "one",
       "mdDescription": "The service's IR (3.0): every type once, each method referring to them — of the namespaces asked, or the whole service",
       "mdError": {
@@ -154,9 +142,6 @@
       }
     },
     ".schema": {
-      "mdBidirResponseSchema": null,
-      "mdBidirResponseType": null,
-      "mdBidirType": null,
       "mdCardinality": "one",
       "mdDescription": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
       "mdError": null,
@@ -199,14 +184,14 @@
   },
   "irPluginHashes": {
     "": {
-      "phiChildrenHash": "7072cd66eeccebf4",
-      "phiHash": "7072cd66eeccebf4",
-      "phiSelfHash": "7072cd66eeccebf4"
+      "phiChildrenHash": "fd334f73d63ebecc",
+      "phiHash": "fd334f73d63ebecc",
+      "phiSelfHash": "fd334f73d63ebecc"
     },
     "clash": {
-      "phiChildrenHash": "baaa5bc391166fdf",
-      "phiHash": "baaa5bc391166fdf",
-      "phiSelfHash": "baaa5bc391166fdf"
+      "phiChildrenHash": "8e053eac94f8d378",
+      "phiHash": "8e053eac94f8d378",
+      "phiSelfHash": "8e053eac94f8d378"
     }
   },
   "irPluginRequests": null,
@@ -872,6 +857,80 @@
       "tdName": "HttpMethod",
       "tdNamespace": ""
     },
+    ".Interface": {
+      "tdDescription": "A peer's shape, named and content-addressed: what `<ns>.ir` answers for\nit, its hash, and each method's own hash. Two interfaces with one hash\nserve one shape (descriptions, grants and the name aside).",
+      "tdKind": {
+        "ksFields": [
+          {
+            "fdDefault": null,
+            "fdDescription": "The shape's hash: of every method's own hash, by name.",
+            "fdName": "hash",
+            "fdRequired": true,
+            "fdType": {
+              "contents": [
+                "string",
+                null
+              ],
+              "tag": "RefPrimitive"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "The IR of the shape (IR 3.0, as `<ns>.ir` writes it).",
+            "fdName": "ir",
+            "fdRequired": true,
+            "fdType": {
+              "tag": "RefJson"
+            }
+          },
+          {
+            "fdDefault": {},
+            "fdDescription": "Each method's own hash, by name ([`Interface::method_hash`]).",
+            "fdName": "methods",
+            "fdRequired": false,
+            "fdType": {
+              "contents": {
+                "contents": [
+                  "string",
+                  null
+                ],
+                "tag": "RefPrimitive"
+              },
+              "tag": "RefMap"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "The interface's name: a contract's namespace (`\"forge\"`), or the\npeer's own.",
+            "fdName": "name",
+            "fdRequired": true,
+            "fdType": {
+              "contents": [
+                "string",
+                null
+              ],
+              "tag": "RefPrimitive"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "The schema the interface was read from: what a gate indexes for a\ntyped slot (its methods' grants, targets and roles).",
+            "fdName": "schema",
+            "fdRequired": true,
+            "fdType": {
+              "contents": {
+                "qnLocalName": "PluginSchema",
+                "qnNamespace": ""
+              },
+              "tag": "RefNamed"
+            }
+          }
+        ],
+        "tag": "KindStruct"
+      },
+      "tdName": "Interface",
+      "tdNamespace": ""
+    },
     ".IrError": {
       "tdDescription": "Why a service writes no IR for what was asked. (A title collision is no\nreason: the walk refuses that activation into the IR's `irRefusals`.)",
       "tdKind": {
@@ -1224,7 +1283,7 @@
       "tdNamespace": ""
     },
     ".MethodRole": {
-      "tdDescription": "Describes how a method participates in the activation graph.\n\nEvery method on a plugin is exactly one of three kinds:\n\n- `Rpc` — a regular RPC endpoint (the default).\n- `StaticChild` — the method returns a child activation by a static name\n  (no lookup argument). Used by `#[child]`-annotated methods on hubs.\n- `DynamicChild { .. }` — the method gates a dynamic child keyed by its\n  argument. `list_method` optionally names a sibling method that enumerates\n  available keys, and `search_method` optionally names a sibling method\n  that searches keys.\n\nThis tag is consumed by downstream tooling (synapse, synapse-cc,\nintrospection clients) to reconstruct the child graph without a separate\nside-table. Today's macros emit `MethodRole::Rpc` for every method; IR-3\npopulates child roles from `#[child]` annotations.\n\n# Wire back-compat\n\nAdded in IR-2. Serde defaults to `Rpc` for pre-IR schemas.\n`#[non_exhaustive]` reserves space for future variants without breaking\ndownstream match arms.",
+      "tdDescription": "Describes how a method participates in the activation graph: `rpc`,\n`static_child` (a child by its own name; `peer` set for a slot of peers,\nreached as `<slot>.<name>`, `interface` the slot's type), or\n`dynamic_child` (a child found by name at call time; `child` its slot's\ntype).",
       "tdKind": {
         "keDiscriminator": "kind",
         "keVariants": [
@@ -1234,13 +1293,91 @@
             "vdName": "rpc"
           },
           {
-            "vdDescription": "Method returns a child activation by static name (no lookup arg).",
-            "vdFields": [],
+            "vdDescription": "Method returns a child activation by static name (no lookup arg) —\nor, marked `peer`, a slot of peers by name.",
+            "vdFields": [
+              {
+                "fdDefault": null,
+                "fdDescription": "NEST-7: a typed peer slot's interface.",
+                "fdName": "interface",
+                "fdRequired": false,
+                "fdType": {
+                  "contents": {
+                    "contents": {
+                      "qnLocalName": "Interface",
+                      "qnNamespace": ""
+                    },
+                    "tag": "RefNamed"
+                  },
+                  "tag": "RefOptional"
+                }
+              },
+              {
+                "fdDefault": null,
+                "fdDescription": "NEST-7: a peer slot's sibling method that lists its names.",
+                "fdName": "list_method",
+                "fdRequired": false,
+                "fdType": {
+                  "contents": {
+                    "contents": [
+                      "string",
+                      null
+                    ],
+                    "tag": "RefPrimitive"
+                  },
+                  "tag": "RefOptional"
+                }
+              },
+              {
+                "fdDefault": null,
+                "fdDescription": "NEST-7: the child is a slot of peers (`#[plexus_macros::peer]`).",
+                "fdName": "peer",
+                "fdRequired": false,
+                "fdType": {
+                  "contents": [
+                    "boolean",
+                    null
+                  ],
+                  "tag": "RefPrimitive"
+                }
+              },
+              {
+                "fdDefault": null,
+                "fdDescription": "NEST-7: a peer slot's sibling method that searches its names.",
+                "fdName": "search_method",
+                "fdRequired": false,
+                "fdType": {
+                  "contents": {
+                    "contents": [
+                      "string",
+                      null
+                    ],
+                    "tag": "RefPrimitive"
+                  },
+                  "tag": "RefOptional"
+                }
+              }
+            ],
             "vdName": "static_child"
           },
           {
             "vdDescription": "Method gates a dynamic child keyed by its argument.",
             "vdFields": [
+              {
+                "fdDefault": null,
+                "fdDescription": "NEST-5: the slot's type, for a typed dynamic child.",
+                "fdName": "child",
+                "fdRequired": false,
+                "fdType": {
+                  "contents": {
+                    "contents": {
+                      "qnLocalName": "PluginSchema",
+                      "qnNamespace": ""
+                    },
+                    "tag": "RefNamed"
+                  },
+                  "tag": "RefOptional"
+                }
+              },
               {
                 "fdDefault": null,
                 "fdDescription": "Optional sibling method that lists available keys.",
@@ -1316,19 +1453,6 @@
                 "tag": "RefNamed"
               },
               "tag": "RefOptional"
-            }
-          },
-          {
-            "fdDefault": false,
-            "fdDescription": "Whether this method supports bidirectional communication\n\nWhen true, the server can send requests to the client during method execution\nand wait for responses (e.g., confirmations, prompts, selections).",
-            "fdName": "bidirectional",
-            "fdRequired": false,
-            "fdType": {
-              "contents": [
-                "boolean",
-                null
-              ],
-              "tag": "RefPrimitive"
             }
           },
           {
@@ -1578,15 +1702,6 @@
           },
           {
             "fdDefault": null,
-            "fdDescription": "JSON Schema for the request type sent from server to client\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nrequests the server may send during method execution.",
-            "fdName": "request_type",
-            "fdRequired": false,
-            "fdType": {
-              "tag": "RefJson"
-            }
-          },
-          {
-            "fdDefault": null,
             "fdDescription": "What credential this method requires on input (if any).\n\nDerived implicitly from the method's scope tagging and the\ncredential-graph linkage at schema-build time (per\n`AUTHZ-CRED-CORE-3` §\"Implicit derivation\"):\n\n- `scope = \"...\"` → `RequiredCredential::from_method_scope(scope)`.\n- `public` method → `None` (the absence of this field).\n- target of `refresh_via`/`revoke_via` of another credential →\n  `RequiredCredential::from_refresh_revoke_target(kind, scopes)`.\n\nAdded in `AUTHZ-CRED-CORE-3`. Defaults to `None` via\n`#[serde(default)]` so pre-IR schemas deserialize cleanly. The\n`skip_serializing_if = \"Option::is_none\"` clause keeps the wire JSON\nshape unchanged for public methods and methods with no scope-derived\nrequirement.",
             "fdName": "requires_credential",
             "fdRequired": false,
@@ -1599,15 +1714,6 @@
                 "tag": "RefNamed"
               },
               "tag": "RefOptional"
-            }
-          },
-          {
-            "fdDefault": null,
-            "fdDescription": "JSON Schema for the response type sent from client to server\n\nOnly relevant when `bidirectional: true`. Describes the structure of\nresponses the client should send in reply to server requests.",
-            "fdName": "response_type",
-            "fdRequired": false,
-            "fdType": {
-              "tag": "RefJson"
             }
           },
           {
@@ -1898,47 +2004,6 @@
               }
             ],
             "vdName": "error"
-          },
-          {
-            "vdDescription": "Bidirectional request from server to client\n\nServer can ask client for input during stream execution.\nClient must respond via transport-specific mechanism\n(MCP: _plexus_respond tool, WebSocket: plexus.respond RPC).",
-            "vdFields": [
-              {
-                "fdDefault": null,
-                "fdDescription": "Serialized request data (generic Req type)",
-                "fdName": "requestData",
-                "fdRequired": true,
-                "fdType": {
-                  "tag": "RefJson"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": "Unique identifier for correlating response",
-                "fdName": "requestId",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "string",
-                    null
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              },
-              {
-                "fdDefault": null,
-                "fdDescription": "Maximum time to wait for response (milliseconds)",
-                "fdName": "timeoutMs",
-                "fdRequired": true,
-                "fdType": {
-                  "contents": [
-                    "integer",
-                    "uint64"
-                  ],
-                  "tag": "RefPrimitive"
-                }
-              }
-            ],
-            "vdName": "request"
           },
           {
             "vdDescription": "Stream completed successfully",
@@ -2456,5 +2521,5 @@
       "tdNamespace": ""
     }
   },
-  "irVersion": "3.0"
+  "irVersion": "3.1"
 }

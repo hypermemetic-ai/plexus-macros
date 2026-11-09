@@ -710,8 +710,9 @@ fn assert_all_move(base: &str, versions: &[(&str, String)]) {
 ///
 /// RETURNS-36: re-pinned once (was `9a1a5aeb37ca8e66`) — the merge with main
 /// adds AUTH-3's `grant` (`fx.fetch`) to every method schema, and the hash
-/// covers the whole schema.
-const BASE_FETCH_HASH: &str = "1c3aa6c76c8cb1e6";
+/// covers the whole schema. ASK-2: re-pinned (was `1c3aa6c76c8cb1e6`) — a
+/// method schema no longer carries `bidirectional: false`.
+const BASE_FETCH_HASH: &str = "e3348acc963b0600";
 
 /// Row: unchanged code, rebuilt (same or another machine) → unchanged.
 #[test]

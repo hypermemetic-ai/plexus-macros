@@ -99,12 +99,20 @@ impl RoleCoverageHub {
 }
 
 fn lookup_role(schemas: &[plexus_core::plexus::MethodSchema], name: &str) -> MethodRole {
-    schemas
+    let role = schemas
         .iter()
         .find(|m| m.name == name)
         .unwrap_or_else(|| panic!("method `{}` not found in schemas", name))
         .role
-        .clone()
+        .clone();
+    // NEST-5: a dynamic child's role carries its slot type too; these rows
+    // are about list/search, so the type is set aside here (nest5 tests it).
+    match role {
+        MethodRole::DynamicChild { list_method, search_method, .. } => {
+            MethodRole::DynamicChild { list_method, search_method, child: None }
+        }
+        other => other,
+    }
 }
 
 #[test]
@@ -118,6 +126,7 @@ fn role_tagging_covers_rpc_static_and_dynamic() {
         MethodRole::DynamicChild {
             list_method: Some("list_fn".into()),
             search_method: Some("search_fn".into()),
+            child: None,
         },
     );
 }
@@ -152,6 +161,7 @@ fn role_tagging_bare_dynamic_emits_none_list_and_search() {
         MethodRole::DynamicChild {
             list_method: None,
             search_method: None,
+            child: None,
         },
     );
 }
@@ -191,6 +201,7 @@ fn role_tagging_list_only_and_search_only_variants() {
         MethodRole::DynamicChild {
             list_method: Some("only_list".into()),
             search_method: None,
+            child: None,
         },
     );
 
@@ -224,6 +235,7 @@ fn role_tagging_list_only_and_search_only_variants() {
         MethodRole::DynamicChild {
             list_method: None,
             search_method: Some("only_search".into()),
+            child: None,
         },
     );
 }

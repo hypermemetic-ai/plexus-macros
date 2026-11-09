@@ -4,6 +4,7 @@ mod activation;
 pub(crate) mod client;
 mod contract;
 mod method_enum;
+pub(crate) mod peer;
 
 use crate::parse::{
     extract_doc_description, find_and_validate_list_search_method, has_child_attr,
@@ -268,7 +269,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 // otherwise recognize on free-standing methods.
                 method.attrs.retain(|a| {
                     let last = a.path().segments.last().map(|s| s.ident.to_string());
-                    !matches!(last.as_deref(), Some("child") | Some("removed_in"))
+                    !matches!(last.as_deref(), Some("child") | Some("peer") | Some("removed_in"))
                 });
                 continue;
             }
@@ -464,7 +465,12 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
 
     // AUTH-3: the activation's default roles, validated against its methods
     // and flattened to grants (`<namespace>.<method>`).
-    let declared_roles = resolve_roles(&args.roles, &methods, &namespace)?;
+    let slot_names: Vec<String> = child_methods
+        .iter()
+        .filter(|c| matches!(c.kind, crate::parse::ChildMethodKind::Dynamic))
+        .map(|c| c.fn_name.to_string())
+        .collect();
+    let declared_roles = resolve_roles(&args.roles, &methods, &namespace, &slot_names)?;
 
     // REQ-10: validate per-method request overrides against the activation's
     // `required = [...]` lock list. If the activation has any required fields
@@ -540,8 +546,8 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
 
     // MACRO-12: `typed_params` refuses a bare string parameter, on the
     // parameter's own span. `MethodInfo::params` already excludes what the
-    // server injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`,
-    // a bidirectional `ctx`), so those are exempt by construction.
+    // server injects (`auth`, `reach`, `#[from_auth]`, `#[activation_param]`),
+    // so those are exempt by construction.
     if args.typed_params {
         let mut errors: Option<syn::Error> = None;
         for m in &methods {
@@ -569,7 +575,7 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     // CHILD-3: at most one dynamic `#[child]` method per impl.
     let dynamic_children: Vec<&ChildMethodInfo> = child_methods
         .iter()
-        .filter(|c| matches!(c.kind, ChildMethodKind::Dynamic))
+        .filter(|c| matches!(c.kind, ChildMethodKind::Dynamic) && c.peer.is_none())
         .collect();
     if dynamic_children.len() > 1 {
         let names: Vec<String> = dynamic_children
@@ -604,7 +610,15 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     // signature mismatches produce an error containing `signature mismatch`.
     let mut list_method: Option<ListSearchMethodInfo> = None;
     let mut search_method: Option<ListSearchMethodInfo> = None;
-    for child in &child_methods {
+    // NEST-7: whether a peer slot's `list` sibling is `async`.
+    for child in child_methods.iter_mut().filter(|c| c.peer.is_some()) {
+        if let Some(list) = &child.list_fn {
+            child.list_is_async = input_impl.items.iter().any(|i| matches!(i, ImplItem::Fn(f) if &f.sig.ident == list && f.sig.asyncness.is_some()));
+        }
+    }
+    // NEST-7: a `#[peer]` slot's `list` / `search` are its role's alone
+    // (siblings a caller calls), not the router's.
+    for child in child_methods.iter().filter(|c| c.peer.is_none()) {
         if let Some(name) = &child.list_fn {
             let info = find_and_validate_list_search_method(
                 &input_impl.items,
@@ -972,6 +986,28 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                 &methods,
                 &boxes,
             ));
+            // NEST-7: a contract every method of which answers one
+            // `Result<T, E>` is a typed slot's interface: `{Trait}Peer`, its
+            // `Contract`, and the client over a `PeerTransport` as both.
+            if let (Some(cp), true) = (client_path.as_ref(), peer::peerable(&methods)) {
+                let version_expr = match &args.version {
+                    Some(v) => quote! { #v },
+                    None => quote! { env!("CARGO_PKG_VERSION") },
+                };
+                trait_server_items.extend(peer::contract_peer_items(
+                    trait_ident,
+                    &struct_name,
+                    &namespace,
+                    &resolved_description,
+                    &version_expr,
+                    &methods,
+                    &boxes.future,
+                    &names.client_ident,
+                    cp,
+                    &crate_path,
+                    &deps,
+                ));
+            }
         } else if self_callable {
             trait_server_items.extend(contract::activation_trait_impl(
                 trait_ident,
@@ -1027,6 +1063,7 @@ fn resolve_roles(
     decls: &[crate::parse::RoleDecl],
     methods: &[MethodInfo],
     namespace: &str,
+    slots: &[String],
 ) -> syn::Result<Vec<(String, Vec<String>)>> {
     use crate::parse::RoleEntry;
     let mut out: Vec<(String, Vec<String>)> = Vec::new();
@@ -1049,6 +1086,32 @@ fn resolve_roles(
         };
         for entry in &decl.entries {
             match entry {
+                // NEST-5: a slot grant — `"{planet}.info"` or
+                // `"<namespace>.{planet}.info"`, `{planet}` a dynamic
+                // `#[child]` of this activation — taken as the slot's grant
+                // (`<namespace>.{planet}.info`; an untyped slot whole,
+                // `<namespace>.{planet}`).
+                RoleEntry::Method(lit) if lit.value().contains('{') => {
+                    let v = lit.value();
+                    let rel = v.strip_prefix(&format!("{namespace}.")).unwrap_or(&v).to_string();
+                    let slot = rel
+                        .strip_prefix('{')
+                        .and_then(|r| r.split_once('}'))
+                        .map(|(s, _)| s.to_string());
+                    match slot {
+                        Some(slot) if slots.contains(&slot) => push(format!("{namespace}.{rel}"), &mut grants),
+                        _ => {
+                            return Err(syn::Error::new(
+                                lit.span(),
+                                format!(
+                                    "role `{name}` lists \"{v}\", a slot grant whose slot is not a dynamic \
+                                     #[child] of this activation; its slots are: {}",
+                                    if slots.is_empty() { "(none)".to_string() } else { slots.join(", ") }
+                                ),
+                            ))
+                        }
+                    }
+                }
                 RoleEntry::Method(lit) => {
                     let m = lit.value();
                     if !methods.iter().any(|mi| mi.method_name == m) {

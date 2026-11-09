@@ -1,6 +1,6 @@
 //! Generate method enum from hub methods
 
-use crate::parse::{AuthPosture, BidirType, Cardinality, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
+use crate::parse::{AuthPosture, Cardinality, ChildMethodInfo, ChildMethodKind, MethodInfo, MethodRequestOverride, ParsedDeprecation};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::Type;
@@ -486,50 +486,6 @@ pub fn generate(
         }
     };
 
-    // Generate bidirectional schema setup calls and their method indices.
-    //
-    // Each entry is a (index, TokenStream) pair where the TokenStream fragment
-    // applies the appropriate `.with_*` builder calls to configure the
-    // MethodSchema for bidirectional communication.
-    //
-    // - BidirType::None     → empty fragment (no-op; skipped via index filter)
-    // - BidirType::Standard → `schema = schema.with_standard_bidirectional();`
-    // - BidirType::Custom   → `schema = schema.with_bidirectional(true)
-    //                           .with_request_type(schemars::schema_for!(Req).into())
-    //                           .with_response_type(schemars::schema_for!(Resp).into());`
-    //
-    // Both `bidir_index` and `bidir_schema_calls` are zipped together in the
-    // generated `match i { #bidir_index => { #bidir_schema_calls } }` block.
-    let (bidir_index, bidir_schema_calls): (Vec<_>, Vec<_>) = methods
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, m)| {
-            let idx_lit = proc_macro2::Literal::usize_suffixed(idx);
-            match &m.bidirectional {
-                BidirType::None => None,
-                BidirType::Standard => Some((
-                    quote! { #idx_lit },
-                    quote! { schema = schema.with_standard_bidirectional(); },
-                )),
-                BidirType::Custom { request, response } => {
-                    let req_ty: syn::Type = syn::parse_str(request)
-                        .unwrap_or_else(|_| syn::parse_quote!(#deps::serde_json::Value));
-                    let resp_ty: syn::Type = syn::parse_str(response)
-                        .unwrap_or_else(|_| syn::parse_quote!(#deps::serde_json::Value));
-                    Some((
-                        quote! { #idx_lit },
-                        quote! {
-                            schema = schema
-                                .with_bidirectional(true)
-                                .with_request_type(#deps::schemars::schema_for!(#req_ty).into())
-                                .with_response_type(#deps::schemars::schema_for!(#resp_ty).into());
-                        },
-                    ))
-                }
-            }
-        })
-        .unzip();
-
     quote! {
         /// Auto-generated method enum for schema extraction
         #[derive(Debug, Clone, #serde_derive_path::Serialize, #serde_derive_path::Deserialize, #schemars_derive_path::JsonSchema)]
@@ -581,6 +537,9 @@ pub fn generate(
 
             /// Internal: compute method schemas (called once, then cached)
             fn compute_method_schemas() -> Vec<#crate_path::plexus::MethodSchema> {
+                // NEST-5: while this enum's schemas are computed, a slot whose
+                // type is this one again is published untyped, not recursed.
+                let __plexus_building = #crate_path::plexus::slots::building(::std::any::type_name::<Self>());
                 let method_names: &[&str] = &[#(#method_names),*];
                 let descriptions: &[&str] = &[#(#method_descriptions),*];
                 let http_methods: Vec<#crate_path::plexus::schema::HttpMethod> = vec![#(#http_methods),*];
@@ -759,24 +718,11 @@ pub fn generate(
 
                         // R-1: explicit `scope = "..."` requirements →
                         // `requires_credential` (AUTHZ-CORE-2). Compile-time
-                        // per-index match, same shape as the bidir calls.
+                        // per-index match.
                         match i {
                             #(
                                 #authz_scope_index => {
                                     #authz_scope_calls
-                                }
-                            )*
-                            _ => {}
-                        }
-
-                        // Apply bidirectional schema configuration.
-                        // Uses a compile-time match on the method index so that type-level
-                        // calls like schemars::schema_for!(MyType) work correctly.
-                        // Each arm is generated at macro-expansion time.
-                        match i {
-                            #(
-                                #bidir_index => {
-                                    #bidir_schema_calls
                                 }
                             )*
                             _ => {}
@@ -810,7 +756,7 @@ pub fn generate(
                         // from the return type's `CredentialFieldMarker`
                         // registry (see `credential_decls_per_method` above).
                         //
-                        // Like `bidir_schema_calls`, this is a per-index
+                        // Like the scope match above, this is a per-index
                         // compile-time match so that type-level calls (here,
                         // `CredentialsRegistryProbe::<RT>::new()`) resolve at
                         // macro-expansion time against each method's concrete
@@ -960,11 +906,32 @@ fn child_schema_entry(child: &ChildMethodInfo, crate_path: &syn::Path) -> TokenS
                 }
                 None => quote! { ::std::option::Option::None },
             };
+            // NEST-7: a peer slot — its interface, or none (untyped).
+            if let Some(shape) = &child.peer {
+                let interface = crate::codegen::peer::interface_expr(shape, crate_path);
+                quote! {
+                    #crate_path::plexus::MethodRole::Peer {
+                        list_method: #list_expr,
+                        search_method: #search_expr,
+                        interface: #interface,
+                    }
+                }
+            } else {
+            // NEST-5: the slot's type — the child type's own schema
+            // (`Option<Planet>`: `Planet`'s), unless `#[child(opaque)]` or
+            // the type is no activation the macro wrote (a hand-written
+            // router), which leaves the slot untyped.
+            let child_expr = match (child.opaque, option_inner(&child.return_ty)) {
+                (false, Some(inner)) => slot_type_expr(inner, crate_path),
+                _ => quote! { ::std::option::Option::None },
+            };
             quote! {
                 #crate_path::plexus::MethodRole::DynamicChild {
                     list_method: #list_expr,
                     search_method: #search_expr,
+                    child: #child_expr,
                 }
+            }
             }
         }
     };
@@ -1018,4 +985,47 @@ pub fn is_option_type(ty: &syn::Type) -> bool {
 /// `credentials` field stays empty.
 fn effective_credential_probe_type(m: &MethodInfo) -> Option<Type> {
     Some(m.ok_ty.clone())
+}
+
+/// NEST-5: `T` of `Option<T>` (the last path segment named `Option`).
+pub(crate) fn option_inner(ty: &syn::Type) -> Option<&syn::Type> {
+    let syn::Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return None };
+    match args.args.first()? {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    }
+}
+
+/// NEST-5: the slot type of a child of type `inner`, as an expression:
+/// `slot_type::<inner>()` when `inner` is an `Activation`, else `None` —
+/// chosen by autoref (a concrete type here), so a hand-written router that
+/// is no activation still compiles, as an untyped slot.
+pub(crate) fn slot_type_expr(inner: &syn::Type, crate_path: &syn::Path) -> TokenStream {
+    quote! {
+        {
+            struct __PlexusSlotProbe<__T>(::core::marker::PhantomData<__T>);
+            trait __PlexusSlotTyped {
+                fn __plexus_slot(&self) -> ::std::option::Option<::std::boxed::Box<#crate_path::plexus::PluginSchema>>;
+            }
+            impl<__T: #crate_path::plexus::Activation> __PlexusSlotTyped for __PlexusSlotProbe<__T> {
+                fn __plexus_slot(&self) -> ::std::option::Option<::std::boxed::Box<#crate_path::plexus::PluginSchema>> {
+                    #crate_path::plexus::slots::slot_type::<__T>()
+                }
+            }
+            trait __PlexusSlotUntyped {
+                fn __plexus_slot(&self) -> ::std::option::Option<::std::boxed::Box<#crate_path::plexus::PluginSchema>>;
+            }
+            impl<__T> __PlexusSlotUntyped for &__PlexusSlotProbe<__T> {
+                fn __plexus_slot(&self) -> ::std::option::Option<::std::boxed::Box<#crate_path::plexus::PluginSchema>> {
+                    ::std::option::Option::None
+                }
+            }
+            (&__PlexusSlotProbe::<#inner>(::core::marker::PhantomData)).__plexus_slot()
+        }
+    }
 }

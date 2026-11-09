@@ -1,5 +1,4 @@
 # plexus-client (its generated client's path: call_raw, decode_raw) as the client under test, through tests/kit_client.rs:
 #   cargo test -p plexus-client --features ws-native --test kit_client
 # One line per test: <test id>  <gap ticket>  <why>; a line whose test passes fails the run as "fixed — remove the entry".
-client.respond     PERF-36  a typed client has no answer channel: decode_raw skips a request item, by design; a caller that answers reads StreamItems through Transport::call
 client.credential  PERF-36  the kit's --cmd template hands this client no credential to send; WsTransport::connect_with_headers carries one

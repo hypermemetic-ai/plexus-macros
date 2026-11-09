@@ -24,7 +24,7 @@
 //! | `progress` | nothing — unless opted in: `Frame::Progress(p)` | yes |
 //! | `progress` (opted in, does not decode as `P`) | `Err(ClientError::Decode)` | **no** |
 //! | `error` | `Err(ClientError::Remote(RemoteError))` | **no** |
-//! | `request` | *skipped* (the typed client has no answer channel) | yes |
+//! | any other `type` (spec/03) | *skipped* | yes |
 //! | `done` | nothing | **no** |
 //! | transport failure | `Err(ClientError::Transport)` | **no** |
 //!
@@ -146,10 +146,6 @@ impl<'a, I> Core<'a, I> {
                 }
                 Some(Err(e)) => (Err(ClientError::Transport(e)), true),
                 Some(Ok(RawItem::Error { error, .. })) => (Err(ClientError::Remote(*error)), true),
-                // Bidirectional server→client requests need an answer channel
-                // the typed client does not have. Skip rather than fail: an
-                // activation may interleave them with real data.
-                Some(Ok(RawItem::Request)) => continue,
                 Some(Ok(RawItem::Data { content, content_type })) => match (self.item)(content) {
                     Ok(item) => (Ok(Frame::Item(item)), false),
                     Err(e) => (
@@ -585,7 +581,7 @@ impl<A> fmt::Debug for Events<'_, A> {
 /// | transport failure | `Err(ClientError::Transport)` |
 ///
 /// Progress frames are dropped (a one-item method never reports progress:
-/// RETURNS-1 decision 10); `request` frames are skipped. When `params` is an
+/// RETURNS-1 decision 10). When `params` is an
 /// `Err` nothing is sent and that is the result.
 pub async fn call_one<T, I>(
     transport: &T,
