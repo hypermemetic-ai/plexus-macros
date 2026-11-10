@@ -1,0 +1,5 @@
+error: `pub fn leaf` is served as a mount, and a mount takes no argument or one `name: &str`: a mount returns an activation: `pub fn leaf(&self) -> A` (a static mount), `pub fn leaf(&self, name: &str) -> Option<A>` (a slot), or `pub async fn leaf(&self, name: &str) -> Result<Box<dyn I>, PeerError>` (a fallible mount), `A` an activation (a `ChildRouter`); a fn that is not served is not `pub`
+  --> tests/compile/keel27_mount_takes_an_argument.rs:34:24
+   |
+34 |     pub fn leaf(&self, n: u32) -> Option<LeafActivation> {
+   |                        ^

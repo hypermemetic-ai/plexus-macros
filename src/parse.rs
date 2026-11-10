@@ -637,6 +637,13 @@ pub struct HubMethodsAttrs {
     /// rule applies to): every `pub async fn` on `&self` returning
     /// `impl Stream<Item = E>` is.
     pub methods_marked: bool,
+    /// KEEL-27: `served = written` — what an unmarked fn of the block is,
+    /// read from how it is written (`codegen/infer.rs`): a `pub async fn`
+    /// on `&self` a method, a `pub fn` on `&self` a mount (a slot when it
+    /// takes `name: &str`), a `pub async fn` answering `Result<Box<dyn I>,
+    /// PeerError>` a fallible mount, anything else a helper. The span is the
+    /// key's, for diagnostics. `None`: the rule before KEEL-27.
+    pub served_written: Option<proc_macro2::Span>,
     /// Explicit version string, or None to use CARGO_PKG_VERSION at compile time
     pub version: Option<String>,
     /// Short description (max 15 words)
@@ -793,6 +800,7 @@ impl Parse for HubMethodsAttrs {
         let mut trait_attr: Option<syn::LitStr> = None;
         let mut trait_span: Option<proc_macro2::Span> = None;
         let mut methods_marked = false;
+        let mut served_written: Option<proc_macro2::Span> = None;
         let mut version: Option<String> = None;
         let mut description = None;
         let mut long_description = None;
@@ -888,6 +896,27 @@ impl Parse for HubMethodsAttrs {
                                     ))
                                 }
                             };
+                            continue;
+                        }
+
+                        // KEEL-27: `served = written` (or `"written"`).
+                        if path.is_ident("served") {
+                            let word = match &value {
+                                Expr::Path(p) if p.path.get_ident().is_some() => {
+                                    p.path.get_ident().unwrap().to_string()
+                                }
+                                Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => s.value(),
+                                _ => String::new(),
+                            };
+                            if word != "written" {
+                                return Err(syn::Error::new_spanned(
+                                    &value,
+                                    "served = written: what each unmarked fn of the block is, read \
+                                     from how it is written (a `pub async fn` a method, a `pub fn` a \
+                                     mount, anything not `pub` a helper)",
+                                ));
+                            }
+                            served_written = Some(path.span());
                             continue;
                         }
 
@@ -1017,6 +1046,15 @@ impl Parse for HubMethodsAttrs {
         if namespace.as_deref() == Some("") {
             return Err(syn::Error::new(input.span(), "namespace = \"\" names nothing"));
         }
+        // KEEL-27: two rules for the unmarked fns cannot both hold.
+        if let (Some(span), true) = (served_written, methods_marked) {
+            return Err(syn::Error::new(
+                span,
+                "served = written and methods = marked say opposite things of an unmarked fn: \
+                 under `served = written` a `pub async fn` is a method, under `methods = marked` \
+                 only a #[plexus_macros::method] is; write one",
+            ));
+        }
 
         Ok(HubMethodsAttrs {
             parent,
@@ -1024,6 +1062,7 @@ impl Parse for HubMethodsAttrs {
             trait_attr,
             trait_span,
             methods_marked,
+            served_written,
             version,
             description,
             long_description,
@@ -1170,6 +1209,16 @@ impl ChildMethodInfo {
     /// signature and returns a `syn::Error` with the phrase
     /// `child method signature` for any unsupported shape.
     pub fn from_fn(method: &ImplItemFn) -> syn::Result<Self> {
+        let is_peer = method.attrs.iter().any(|a| a.path().segments.last().is_some_and(|s| s.ident == "peer"));
+        Self::from_fn_as(method, is_peer)
+    }
+
+    /// KEEL-27: the same, with whether it is a fallible mount (a peer) said
+    /// by the caller — by its `#[peer]` marker, or, unmarked under `served =
+    /// written`, by its signature (`codegen/infer.rs`). An unmarked mount
+    /// carries no options, so it is built exactly as a bare `#[child]` /
+    /// `#[peer]` is.
+    pub fn from_fn_as(method: &ImplItemFn, is_peer: bool) -> syn::Result<Self> {
         let fn_name = method.sig.ident.clone();
         let is_async = method.sig.asyncness.is_some();
         let description = extract_doc_description(&method.attrs).unwrap_or_default();
@@ -1244,7 +1293,6 @@ impl ChildMethodInfo {
         // NEST-7: a `#[peer]` is a dynamic slot whose function answers
         // `Result<Box<dyn I>, PeerError>`, awaited; it has no generated
         // client accessor (the peer's own client is its interface's).
-        let is_peer = method.attrs.iter().any(|a| a.path().segments.last().is_some_and(|s| s.ident == "peer"));
         let (peer, opaque) = if is_peer {
             if !matches!(kind, ChildMethodKind::Dynamic) || !is_async {
                 return Err(syn::Error::new_spanned(
@@ -1652,7 +1700,7 @@ fn type_is_string(ty: &Type) -> bool {
 }
 
 /// True if `ty` is exactly `&str` (with any lifetime and no mutability).
-fn is_str_ref(ty: &Type) -> bool {
+pub(crate) fn is_str_ref(ty: &Type) -> bool {
     if let Type::Reference(r) = ty {
         if r.mutability.is_some() {
             return false;

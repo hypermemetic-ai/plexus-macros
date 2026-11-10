@@ -1,0 +1,5 @@
+error: `remote` returns `Result<Box<dyn …>, PeerError>`, so it is served as a fallible mount, and a fallible mount takes a name: `pub async fn remote(&self, name: &str) -> Result<Box<dyn I>, PeerError>`
+  --> tests/compile/keel27_fallible_mount_without_a_name.rs:34:18
+   |
+34 |     pub async fn remote(&self) -> Result<Box<dyn plexus_core::plexus::peer::Peer>, plexus_core::plexus::peer::PeerError> {
+   |                  ^^^^^^
