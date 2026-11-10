@@ -884,6 +884,66 @@ pub fn deserialize_derive(input: TokenStream) -> TokenStream {
     type_first::derive(input)
 }
 
+/// PLEXUS-59 · `#[wire]` — one attribute for a type that crosses the wire.
+///
+/// A method's parameter, its answer or a stream's item is a type that serde
+/// reads and writes and schemars describes. `#[wire]` derives all of it:
+/// `Debug`, `Clone`, serde's `Serialize` and `Deserialize`, schemars'
+/// `JsonSchema` — named through plexus-rpc when the crate depends on it, so
+/// an app lists neither serde nor schemars for its wire types. An enum is
+/// also tagged the way every Plexus event is, `#[serde(tag = "type",
+/// rename_all = "snake_case")]`, unless it says its own `tag` or `untagged`.
+///
+/// ```ignore
+/// use plexus_rpc::prelude::*;
+///
+/// #[wire]
+/// pub enum CountEvent {
+///     Tick { n: u32 },
+/// }
+/// ```
+///
+/// It takes no words; `#[serde(…)]` and `#[schemars(…)]` on the type and its
+/// fields are read as ever. A type that needs fewer derives writes them out.
+#[proc_macro_attribute]
+pub fn wire(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        let attr = TokenStream2::from(attr);
+        return syn::Error::new_spanned(attr, "#[wire] takes no words: write `#[wire]`, and `#[serde(…)]` below it for anything else")
+            .to_compile_error()
+            .into();
+    }
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    let (serde, schemars, crates) = match codegen::umbrella_crate(proc_macro2::Span::call_site()) {
+        Some(u) => {
+            let (s, j) = (format!("::{u}::__deps::serde"), format!("::{u}::__deps::schemars"));
+            (quote! { ::#u::__deps::serde }, quote! { ::#u::__deps::schemars }, quote! { #[serde(crate = #s)] #[schemars(crate = #j)] })
+        }
+        None => (quote! { ::serde }, quote! { ::schemars }, quote! {}),
+    };
+    // An enum that names its own representation keeps it.
+    let own = input.attrs.iter().filter(|a| a.path().is_ident("serde")).any(|a| {
+        let mut said = false;
+        let _ = a.parse_nested_meta(|m| {
+            said |= m.path.is_ident("tag") || m.path.is_ident("untagged");
+            if m.input.peek(syn::Token![=]) { let _: syn::Expr = m.value()?.parse()?; }
+            Ok(())
+        });
+        said
+    });
+    let tag = match (&input.data, own) {
+        (syn::Data::Enum(_), false) => quote! { #[serde(tag = "type", rename_all = "snake_case")] },
+        _ => quote! {},
+    };
+    quote! {
+        #[derive(Debug, Clone, #serde::Serialize, #serde::Deserialize, #schemars::JsonSchema)]
+        #crates
+        #tag
+        #input
+    }
+    .into()
+}
+
 /// Derive macro for typed HTTP/WebSocket request extraction.
 ///
 /// Generates `impl PlexusRequest` (extraction) and `impl schemars::JsonSchema`
