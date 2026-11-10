@@ -3,7 +3,21 @@
 All notable changes to plexus-macros and plexus-client are documented here.
 This file starts at 0.7.0; earlier changes are in the git history.
 
-## [Unreleased] — 0.11.0
+## [0.11.1] — plexus-macros
+
+KEEL-27: `#[activation(served = written)]`, opt-in per block — what an
+unmarked fn is, read from how it is written: not `pub` (or not on `&self`)
+a helper; `pub fn x(&self) -> A` a mount and `pub fn x(&self, name: &str)
+-> Option<A>` a slot, each checked by the compiler (`A: ChildRouter`; a
+wrong type is refused at the return type, the message naming the fn and
+what a mount returns); `pub async fn x(&self, name: &str) ->
+Result<Box<dyn I>, PeerError>` a fallible mount (`#[peer]`); any other
+`pub async fn` on `&self` a method, one item or a stream (a bare
+`#[method]`). A marked fn is what its marker says; a block without the
+option expands as before. Refused beside `methods = marked` and on `impl
+Trait for Type`. plexus-client unchanged.
+
+## 0.11.0
 
 NEST-16: a graft that knows its parent. `#[activation(parent = ShopClient)]`;
 a method takes `parent: Parent<ShopClient>` (the macro writes the transport,

@@ -1,0 +1,53 @@
+error[E0277]: `leaf` takes `name: &str`, so it is served as a slot, and a slot returns `Option<A>`, `A` an activation — not `LeafActivation`
+  --> tests/compile/keel27_slot_not_an_option.rs:33:40
+   |
+33 |     pub fn leaf(&self, _name: &str) -> LeafActivation {
+   |                                        ^^^^^^^^^^^^^^ not `Option` of an activation
+   |
+help: the trait `Slot` is not implemented for `LeafActivation`
+  --> tests/compile/keel27_slot_not_an_option.rs:7:1
+   |
+ 7 | pub struct LeafActivation;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: a mount returns an activation: `pub fn leaf(&self) -> A` (a static mount), `pub fn leaf(&self, name: &str) -> Option<A>` (a slot), or `pub async fn leaf(&self, name: &str) -> Result<Box<dyn I>, PeerError>` (a fallible mount), `A` an activation (a `ChildRouter`); a fn that is not served is not `pub`
+help: the trait `Slot` is implemented for `std::option::Option<A>`
+  --> tests/compile/keel27_slot_not_an_option.rs:25:1
+   |
+25 | #[plexus_macros::activation(served = written)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `slot`
+  --> tests/compile/keel27_slot_not_an_option.rs:25:1
+   |
+25 | #[plexus_macros::activation(served = written)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `slot`
+   = note: this error originates in the attribute macro `plexus_macros::activation` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: `LeafActivation` is not an iterator
+  --> tests/compile/keel27_slot_not_an_option.rs:25:1
+   |
+ 7 | pub struct LeafActivation;
+   | ------------------------- method `map` not found for this struct because it doesn't satisfy `LeafActivation: Iterator`
+...
+25 | #[plexus_macros::activation(served = written)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `LeafActivation` is not an iterator
+   |
+   = note: the following trait bounds were not satisfied:
+           `LeafActivation: Iterator`
+           which is required by `&mut LeafActivation: Iterator`
+note: the trait `Iterator` must be implemented
+  --> $RUST/core/src/iter/traits/iterator.rs
+   |
+   | pub const trait Iterator {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following traits define an item `map`, perhaps you need to implement one of them:
+           candidate #1: `FutureExt`
+           candidate #2: `Iterator`
+           candidate #3: `StreamExt`
+           candidate #4: `generic_array::functional::FunctionalSequence`
+           candidate #5: `rand::distr::distribution::Distribution`
+           candidate #6: `rand::distr::distribution::Distribution`
+           candidate #7: `rand::distributions::distribution::Distribution`
+           candidate #8: `tokio_stream::stream_ext::StreamExt`
+           candidate #9: `zerocopy::pointer::ptr::_casts::TryWithError`
+   = note: this error originates in the attribute macro `plexus_macros::activation` (in Nightly builds, run with -Z macro-backtrace for more info)

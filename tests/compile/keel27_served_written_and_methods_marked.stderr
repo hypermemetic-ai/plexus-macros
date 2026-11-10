@@ -1,0 +1,5 @@
+error: served = written and methods = marked say opposite things of an unmarked fn: under `served = written` a `pub async fn` is a method, under `methods = marked` only a #[plexus_macros::method] is; write one
+  --> tests/compile/keel27_served_written_and_methods_marked.rs:26:29
+   |
+26 | #[plexus_macros::activation(served = written, methods = marked)]
+   |                             ^^^^^^

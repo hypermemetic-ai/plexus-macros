@@ -660,6 +660,18 @@ fn generate_schema_fn(
 ///   (which stays for its overrides, and marks a one-item method); one
 ///   returning anything else unmarked is a compile error; `methods = marked`
 ///   restores the `#[method]`-only rule.
+/// - **`served = written`** (KEEL-27, opt-in per block): an unmarked fn is
+///   what its signature says — not `pub`, or not on `&self`, a helper; a
+///   `pub fn x(&self) -> A` a mount, `pub fn x(&self, name: &str) ->
+///   Option<A>` a slot (each checked by the compiler, `A: ChildRouter`, the
+///   refusal naming the fn and what a mount returns); a `pub async fn x(&self,
+///   name: &str) -> Result<Box<dyn I>, PeerError>` a fallible mount (a
+///   `#[peer]`); any other `pub async fn` on `&self` a method (a bare
+///   `#[method]`, one item or a stream). A marked fn is what its marker
+///   says; an option no signature carries (`#[method(name = …)]` and the
+///   rest, `#[child(list = …, search = …, forward = …, opaque)]`, a mount
+///   behind a type alias, a private served fn) keeps its marker. Not with
+///   `methods = marked`, nor on `impl Trait for Type`.
 /// - **The client without a flag**, whenever the crate depends on
 ///   `plexus-client`; `client` is accepted with a deprecation warning.
 /// - **The `server` feature default.** A crate whose manifest declares a

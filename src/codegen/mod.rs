@@ -3,6 +3,7 @@
 mod activation;
 pub(crate) mod client;
 mod contract;
+mod infer;
 mod method_enum;
 mod parent;
 pub(crate) mod peer;
@@ -228,6 +229,37 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
     // activation says `methods = marked`.
     let all_public_methods = names.new_form && !args.methods_marked;
 
+    // KEEL-27: `served = written` reads an unmarked fn's role from how it
+    // is written (`infer.rs`); a trait impl's fns carry no `pub` to read.
+    if let (Some(span), Some(path)) = (args.served_written, &trait_impl) {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "served = written reads `pub` and the signature of an inherent impl's fns; in \
+                 `impl {} for {struct_name}` every `async fn` on `&self` is already a wire method",
+                quote!(#path).to_string().replace(' ', "")
+            ),
+        ));
+    }
+    // KEEL-27: the compiler's check of each inferred mount's return type,
+    // added to the impl once every fn is read.
+    let mut mount_checks: Vec<ImplItem> = Vec::new();
+    // KEEL-27: the siblings a marked mount names (`list = …`, `search = …`)
+    // are its marker's word, never inferred mounts.
+    let siblings: Vec<syn::Ident> = if args.served_written.is_some() {
+        input_impl
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ImplItem::Fn(f) if has_child_attr(f) => ChildMethodInfo::from_fn(f).ok(),
+                _ => None,
+            })
+            .flat_map(|c| c.list_fn.into_iter().chain(c.search_fn))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Extract all #[method] / #[hub_method] functions and all #[child] functions.
     let mut methods: Vec<MethodInfo> = Vec::new();
     let mut child_methods: Vec<ChildMethodInfo> = Vec::new();
@@ -243,6 +275,27 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                      on the same function: a function is either an RPC method or a child router \
                      entry, not both",
                 ));
+            }
+
+            // KEEL-27: an unmarked fn of a `served = written` block is what
+            // its signature says; a marked one is what its marker says.
+            let inferred = match args.served_written {
+                Some(_) if !has_child_attr(method) && !has_method_attr(method) => {
+                    Some(infer::classify(method, &siblings)?)
+                }
+                _ => None,
+            };
+            if let Some(kind @ (infer::Inferred::Mount | infer::Inferred::FallibleMount)) = &inferred {
+                let fallible = matches!(kind, infer::Inferred::FallibleMount);
+                child_methods.push(ChildMethodInfo::from_fn_as(method, fallible)?);
+                if !fallible {
+                    mount_checks.push(ImplItem::Verbatim(infer::mount_check(method, &crate_path)));
+                }
+                method.attrs.retain(|a| {
+                    let last = a.path().segments.last().map(|s| s.ident.to_string());
+                    !matches!(last.as_deref(), Some("removed_in"))
+                });
+                continue;
             }
 
             // CHILD-3: collect + validate `#[child]` methods. These are NOT
@@ -319,7 +372,12 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
                     Meta::NameValue(_) => None,
                 };
                 methods.push(MethodInfo::from_fn(method, hub_method_attrs.as_ref())?);
-            } else if all_public_methods
+            } else if matches!(inferred, Some(infer::Inferred::Method)) {
+                // KEEL-27: unmarked, a method by how it is written — built
+                // exactly as a bare `#[method]` is.
+                methods.push(MethodInfo::from_fn(method, None)?);
+            } else if inferred.is_none()
+                && all_public_methods
                 && (if trait_impl.is_some() {
                     // RETURNS-47: every `async fn` on `&self` of the trait.
                     contract::is_trait_wire_shape(method)
@@ -379,6 +437,8 @@ pub fn generate_all(args: HubMethodsAttrs, mut input_impl: ItemImpl) -> syn::Res
             }
         }
     }
+
+    input_impl.items.extend(mount_checks);
 
     // MACRO-13: a bodiless activation is a contract — every wire method
     // bodiless, none bodied — and a bodiless method must be on the wire.
