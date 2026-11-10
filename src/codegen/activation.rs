@@ -1614,12 +1614,23 @@ fn generate_dispatch_arms(
 
             let call = invoke(fn_name, method_params.clone());
 
+            // KEEL-31: a method that acts on the whole service runs only for
+            // a call admitted on `*` — wherever it is called from (through an
+            // untyped slot, or as a child serving a hop), not only where a
+            // gate indexed it.
+            let everywhere_gate = if m.everywhere {
+                quote! { #crate_path::call::admits_everywhere(#content_type)?; }
+            } else {
+                quote! {}
+            };
+
             // RETURNS-8: the wrapper that matches the method's signature
             // form turns its return value into frames.
             let wrapped = wrap_return(m, quote! { __ret }, &content_type, namespace, crate_path);
 
             quote! {
                 #method_name => {
+                    #everywhere_gate
                     #auth_injection
                     #activation_extraction
                     #(#activation_param_bindings)*
