@@ -154,6 +154,10 @@ pub struct HubMethodAttrs {
     /// `x-plexus-values` on the param's property. Checked to name params in
     /// [`MethodInfo::from_fn`].
     pub values: Vec<(syn::Ident, Vec<String>)>,
+    /// KEEL-31: `everywhere` — the method acts on the whole service; the
+    /// gate admits it only where its grant is held on `*`. Emitted as
+    /// `MethodSchema.everywhere`.
+    pub everywhere: bool,
 }
 
 /// BIDIR-6: what `#[method(...)]` says of a method's input half. `window`
@@ -371,6 +375,8 @@ impl Parse for HubMethodAttrs {
         let mut examples: Vec<ParsedExample> = Vec::new();
         let mut values: Vec<(syn::Ident, Vec<String>)> = Vec::new();
         let mut uses: Vec<String> = Vec::new();
+        // KEEL-31: `everywhere`.
+        let mut everywhere: Option<proc_macro2::Span> = None;
 
         if !input.is_empty() {
             let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -400,6 +406,10 @@ impl Parse for HubMethodAttrs {
                             // flag (exempt from the default-deny gate).
                             public = true;
                             public_span = Some(path.span());
+                        } else if path.is_ident("everywhere") {
+                            // KEEL-31: acts on the whole service — its grant
+                            // is needed on `*`, the gate's rule.
+                            everywhere = Some(path.span());
                         }
                     }
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
@@ -605,7 +615,21 @@ impl Parse for HubMethodAttrs {
             ));
         }
 
-        Ok(HubMethodAttrs { uses, name, description, param_docs, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values })
+        // KEEL-31: a method that acts on the whole service is neither open to
+        // everyone nor located by a target.
+        if let Some(span) = everywhere {
+            if public {
+                return Err(syn::Error::new(span, "a method that acts `everywhere` is not `public`: remove one"));
+            }
+            if target.is_some() {
+                return Err(syn::Error::new(
+                    span,
+                    "a method that acts `everywhere` has no `target`: it is decided on `*`; remove one",
+                ));
+            }
+        }
+
+        Ok(HubMethodAttrs { uses, name, description, param_docs, http_method, request_override, public, scopes, streaming, target, answer_by, input_ceiling, group, examples, values, everywhere: everywhere.is_some() })
     }
 }
 
@@ -1941,6 +1965,9 @@ pub struct MethodInfo {
     ///
     /// R-1: also emitted into the generated `MethodSchema.public` flag.
     pub public: bool,
+    /// KEEL-31: `everywhere` (mirrored from `HubMethodAttrs::everywhere`);
+    /// emitted as `MethodSchema.everywhere`.
+    pub everywhere: bool,
     /// R-1 (AUTHZ-CORE-2): explicit required scopes (mirrored from
     /// `HubMethodAttrs::scopes`). Emitted into the generated
     /// `MethodSchema.requires_credential` via
@@ -2242,6 +2269,7 @@ impl MethodInfo {
         // RED-2: capture the `public` flag from the per-method attribute,
         // if present. Default false.
         let public = hub_method_attrs.map(|a| a.public).unwrap_or(false);
+        let everywhere = hub_method_attrs.is_some_and(|a| a.everywhere);
 
         // R-1: capture the explicit `scope = "..."` literals (already
         // grammar-validated at attribute-parse time).
@@ -2358,6 +2386,7 @@ impl MethodInfo {
             activation_params,
             request_override,
             public,
+            everywhere,
             scopes,
             deprecation,
             target,
@@ -2927,6 +2956,7 @@ mod tests {
             group: None,
             examples: vec![],
             values: vec![],
+            everywhere: false,
         };
         let info = MethodInfo::from_fn(&method, Some(&attrs)).expect("parses cleanly");
         let param = info.params.iter().find(|p| p.name == "message").unwrap();
