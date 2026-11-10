@@ -463,6 +463,8 @@ pub fn generate(
     // (plexus-core skips serializing `public: false`), so pre-R-1 methods
     // keep their exact wire shape.
     let public_flags: Vec<bool> = methods.iter().map(|m| m.public).collect();
+    // KEEL-31: per-method `everywhere` flags.
+    let everywhere_flags: Vec<bool> = methods.iter().map(|m| m.everywhere).collect();
 
     // R-1 (joint AP-1): activation-declared posture stamp, applied to every
     // generated RPC method schema. Undeclared posture emits nothing.
@@ -554,6 +556,7 @@ pub fn generate(
                 let method_override_is_skip: &[bool] = &[#(#method_override_is_skip),*];
                 // R-1: per-method explicit-public flags (AUTHZ-CORE-2).
                 let public_flags: &[bool] = &[#(#public_flags),*];
+                let everywhere_flags: &[bool] = &[#(#everywhere_flags),*];
                 // AUTH-3: grants, targets, long descriptions.
                 let grants: &[&str] = &[#(#method_grants),*];
                 let targets: &[::std::option::Option<&str>] = &[#(#method_targets),*];
@@ -680,6 +683,11 @@ pub fn generate(
                         // `true` reaches the wire (serde skips false).
                         if public_flags[i] {
                             schema = schema.with_public(true);
+                        }
+                        // KEEL-31: acts on the whole service (only `true`
+                        // reaches the wire).
+                        if everywhere_flags[i] {
+                            schema = schema.with_everywhere(true);
                         }
 
                         // AUTH-3: the inherent grant; the target param; the

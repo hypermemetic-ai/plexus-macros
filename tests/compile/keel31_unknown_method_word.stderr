@@ -1,0 +1,5 @@
+error: unknown word `everywher` in #[plexus_macros::method]; it takes: public, everywhere, streaming, name, description, http_method, target, answer_by, group, scope, request, input_window, input_max_items, input_max_bytes, input_max_buffered, uses, params, example, examples, values
+ --> tests/compile/keel31_unknown_method_word.rs:9:29
+  |
+9 |     #[plexus_macros::method(everywher)]
+  |                             ^^^^^^^^^

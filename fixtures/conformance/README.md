@@ -68,7 +68,7 @@ follows.
   `json.dumps(m, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`
   writes the same bytes.
 - **Metadata is kept, made deterministic.** Every frame carries
-  `{"provenance":["conformance"],"plexus_hash":"b3a843ed84070f47","timestamp":0}`:
+  `{"provenance":["conformance"],"plexus_hash":"d66dbf170e2eb0e1","timestamp":0}`:
   `plexus_hash` is `schema.json`'s `hash`, the fixture being served as its
   own service (a service puts its own hash in every frame). Normalize `timestamp` to
   `0` before comparing.

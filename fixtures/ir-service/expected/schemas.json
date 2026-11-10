@@ -3,18 +3,18 @@
     "children": [
       {
         "description": "Items, by id",
-        "hash": "bb273cbe0a5e1f33",
+        "hash": "4c50982281563bd7",
         "namespace": "alpha"
       },
       {
         "description": "Items, by query",
-        "hash": "a322bf936a0cf7db",
+        "hash": "1747372d8a451608",
         "namespace": "beta"
       }
     ],
-    "children_hash": "5481f13a96566345",
+    "children_hash": "5eac3ae3e4070848",
     "description": "Central routing and introspection",
-    "hash": "f149b127723d836f",
+    "hash": "82d309e7c96d981a",
     "methods": [
       {
         "cardinality": "many",
@@ -745,7 +745,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "irsvc.schema",
-        "hash": "51d857cec73e4ae7",
+        "hash": "e2bc7263cade58fc",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -1443,6 +1443,10 @@
                     "object"
                   ]
                 },
+                "everywhere": {
+                  "description": "KEEL-31: the method acts on the whole service\n(`#[plexus_macros::method(everywhere)]`): it names no target because\nits target is everything — a key rotated, a process spawned, a peer\nconnected. A gate admits it only where its grant is held on `*`,\nwithin every ceiling layer; a role held on some scope is not enough.\nNever with `public` or `target`.\n\nOptional on the wire (`serde(default)`, skipped when false) so a\nmethod without it, and every older schema and client, is unchanged.",
+                  "type": "boolean"
+                },
                 "examples": {
                   "description": "SYNAPSE-13: worked calls of this method, each its params object and a\nnote saying what it does — OpenAPI's `examples`. A client renders them\nas command lines (`synapse … --id MENGER-40 --status Coding`).\n\nOptional on the wire (`serde(default)`, skipped when empty).",
                   "items": {
@@ -1800,20 +1804,20 @@
       }
     ],
     "namespace": "irsvc",
-    "self_hash": "31d1af23907006d8",
+    "self_hash": "2ef296efb8f29adc",
     "version": "1.0.0"
   },
   "alpha": {
     "children": [
       {
         "description": "Item tools, one level down.",
-        "hash": "627884825dbd5344",
+        "hash": "823ecb29db033ed0",
         "namespace": "gamma"
       }
     ],
-    "children_hash": "474919edd564fb4d",
+    "children_hash": "42cda45dc9d121b7",
     "description": "Items, by id",
-    "hash": "bb273cbe0a5e1f33",
+    "hash": "4c50982281563bd7",
     "methods": [
       {
         "cardinality": "one",
@@ -2437,7 +2441,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "alpha.schema",
-        "hash": "0fe8e27aee77480c",
+        "hash": "fbc53190de295c50",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -3134,6 +3138,10 @@
                     "array",
                     "object"
                   ]
+                },
+                "everywhere": {
+                  "description": "KEEL-31: the method acts on the whole service\n(`#[plexus_macros::method(everywhere)]`): it names no target because\nits target is everything — a key rotated, a process spawned, a peer\nconnected. A gate admits it only where its grant is held on `*`,\nwithin every ceiling layer; a role held on some scope is not enough.\nNever with `public` or `target`.\n\nOptional on the wire (`serde(default)`, skipped when false) so a\nmethod without it, and every older schema and client, is unchanged.",
+                  "type": "boolean"
                 },
                 "examples": {
                   "description": "SYNAPSE-13: worked calls of this method, each its params object and a\nnote saying what it does — OpenAPI's `examples`. A client renders them\nas command lines (`synapse … --id MENGER-40 --status Coding`).\n\nOptional on the wire (`serde(default)`, skipped when empty).",
@@ -3517,12 +3525,12 @@
         "alpha.watch"
       ]
     },
-    "self_hash": "08986af3b2f9b451",
+    "self_hash": "fada1dc994b969d3",
     "version": "1.0.0"
   },
   "alpha.gamma": {
     "description": "Item tools",
-    "hash": "627884825dbd5344",
+    "hash": "823ecb29db033ed0",
     "methods": [
       {
         "cardinality": "one",
@@ -3777,7 +3785,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "gamma.schema",
-        "hash": "e8b09f64938b8932",
+        "hash": "21bb00b8aba836a1",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -4475,6 +4483,10 @@
                     "object"
                   ]
                 },
+                "everywhere": {
+                  "description": "KEEL-31: the method acts on the whole service\n(`#[plexus_macros::method(everywhere)]`): it names no target because\nits target is everything — a key rotated, a process spawned, a peer\nconnected. A gate admits it only where its grant is held on `*`,\nwithin every ceiling layer; a role held on some scope is not enough.\nNever with `public` or `target`.\n\nOptional on the wire (`serde(default)`, skipped when false) so a\nmethod without it, and every older schema and client, is unchanged.",
+                  "type": "boolean"
+                },
                 "examples": {
                   "description": "SYNAPSE-13: worked calls of this method, each its params object and a\nnote saying what it does — OpenAPI's `examples`. A client renders them\nas command lines (`synapse … --id MENGER-40 --status Coding`).\n\nOptional on the wire (`serde(default)`, skipped when empty).",
                   "items": {
@@ -4832,12 +4844,12 @@
       }
     ],
     "namespace": "gamma",
-    "self_hash": "58464c399da110c1",
+    "self_hash": "745d1060fbe9044b",
     "version": "1.0.0"
   },
   "beta": {
     "description": "Items, by query",
-    "hash": "a322bf936a0cf7db",
+    "hash": "1747372d8a451608",
     "methods": [
       {
         "cardinality": "one",
@@ -5364,7 +5376,7 @@
         "cardinality": "one",
         "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
         "grant": "beta.schema",
-        "hash": "25bf57f9b34a8927",
+        "hash": "b459248a51898b4a",
         "http_method": "POST",
         "name": "schema",
         "params": {
@@ -6062,6 +6074,10 @@
                     "object"
                   ]
                 },
+                "everywhere": {
+                  "description": "KEEL-31: the method acts on the whole service\n(`#[plexus_macros::method(everywhere)]`): it names no target because\nits target is everything — a key rotated, a process spawned, a peer\nconnected. A gate admits it only where its grant is held on `*`,\nwithin every ceiling layer; a role held on some scope is not enough.\nNever with `public` or `target`.\n\nOptional on the wire (`serde(default)`, skipped when false) so a\nmethod without it, and every older schema and client, is unchanged.",
+                  "type": "boolean"
+                },
                 "examples": {
                   "description": "SYNAPSE-13: worked calls of this method, each its params object and a\nnote saying what it does — OpenAPI's `examples`. A client renders them\nas command lines (`synapse … --id MENGER-40 --status Coding`).\n\nOptional on the wire (`serde(default)`, skipped when empty).",
                   "items": {
@@ -6419,7 +6435,7 @@
       }
     ],
     "namespace": "beta",
-    "self_hash": "0ddff00ba2520d20",
+    "self_hash": "3e1df5cecb99e313",
     "version": "1.0.0"
   }
 }

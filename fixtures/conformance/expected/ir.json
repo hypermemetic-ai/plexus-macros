@@ -266,9 +266,9 @@
   },
   "irPluginHashes": {
     "conformance": {
-      "phiChildrenHash": "b3a843ed84070f47",
-      "phiHash": "b3a843ed84070f47",
-      "phiSelfHash": "b3a843ed84070f47"
+      "phiChildrenHash": "d66dbf170e2eb0e1",
+      "phiHash": "d66dbf170e2eb0e1",
+      "phiSelfHash": "d66dbf170e2eb0e1"
     }
   },
   "irPluginRequests": null,
@@ -1357,6 +1357,19 @@
             "fdRequired": false,
             "fdType": {
               "tag": "RefJson"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "KEEL-31: the method acts on the whole service\n(`#[plexus_macros::method(everywhere)]`): it names no target because\nits target is everything — a key rotated, a process spawned, a peer\nconnected. A gate admits it only where its grant is held on `*`,\nwithin every ceiling layer; a role held on some scope is not enough.\nNever with `public` or `target`.\n\nOptional on the wire (`serde(default)`, skipped when false) so a\nmethod without it, and every older schema and client, is unchanged.",
+            "fdName": "everywhere",
+            "fdRequired": false,
+            "fdType": {
+              "contents": [
+                "boolean",
+                null
+              ],
+              "tag": "RefPrimitive"
             }
           },
           {
