@@ -1,6 +1,6 @@
 {
   "irBackend": "clashsvc",
-  "irHash": "fd334f73d63ebecc",
+  "irHash": "ad331b7e7ce0203b",
   "irMetadata": null,
   "irMethods": {
     ".call": {
@@ -184,14 +184,14 @@
   },
   "irPluginHashes": {
     "": {
-      "phiChildrenHash": "fd334f73d63ebecc",
-      "phiHash": "fd334f73d63ebecc",
-      "phiSelfHash": "fd334f73d63ebecc"
+      "phiChildrenHash": "ad331b7e7ce0203b",
+      "phiHash": "ad331b7e7ce0203b",
+      "phiSelfHash": "ad331b7e7ce0203b"
     },
     "clash": {
-      "phiChildrenHash": "8e053eac94f8d378",
-      "phiHash": "8e053eac94f8d378",
-      "phiSelfHash": "8e053eac94f8d378"
+      "phiChildrenHash": "7045760039527fb4",
+      "phiHash": "7045760039527fb4",
+      "phiSelfHash": "7045760039527fb4"
     }
   },
   "irPluginRequests": null,
@@ -1520,6 +1520,19 @@
             "fdRequired": false,
             "fdType": {
               "tag": "RefJson"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "KEEL-31: the method acts on the whole service\n(`#[plexus_macros::method(everywhere)]`): it names no target because\nits target is everything — a key rotated, a process spawned, a peer\nconnected. A gate admits it only where its grant is held on `*`,\nwithin every ceiling layer; a role held on some scope is not enough.\nNever with `public` or `target`.\n\nOptional on the wire (`serde(default)`, skipped when false) so a\nmethod without it, and every older schema and client, is unchanged.",
+            "fdName": "everywhere",
+            "fdRequired": false,
+            "fdType": {
+              "contents": [
+                "boolean",
+                null
+              ],
+              "tag": "RefPrimitive"
             }
           },
           {

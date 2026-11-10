@@ -2,8 +2,8 @@
   "namespace": "conformance",
   "version": "0.7.0",
   "description": "Conformance fixture: one method per signature form",
-  "self_hash": "b48a5158bae2ba64",
-  "hash": "b3a843ed84070f47",
+  "self_hash": "cccdb65c6c893e6b",
+  "hash": "d66dbf170e2eb0e1",
   "methods": [
     {
       "name": "ping",
@@ -351,7 +351,7 @@
     {
       "name": "schema",
       "description": "Get plugin or method schema. Pass {\"method\": \"name\"} for a specific method.",
-      "hash": "f3c8ef571f2ac1a3",
+      "hash": "dcd9179da2650a04",
       "params": {
         "type": "object",
         "properties": {
@@ -1060,6 +1060,10 @@
                   "array",
                   "object"
                 ]
+              },
+              "everywhere": {
+                "description": "KEEL-31: the method acts on the whole service\n(`#[plexus_macros::method(everywhere)]`): it names no target because\nits target is everything — a key rotated, a process spawned, a peer\nconnected. A gate admits it only where its grant is held on `*`,\nwithin every ceiling layer; a role held on some scope is not enough.\nNever with `public` or `target`.\n\nOptional on the wire (`serde(default)`, skipped when false) so a\nmethod without it, and every older schema and client, is unchanged.",
+                "type": "boolean"
               },
               "examples": {
                 "description": "SYNAPSE-13: worked calls of this method, each its params object and a\nnote saying what it does — OpenAPI's `examples`. A client renders them\nas command lines (`synapse … --id MENGER-40 --status Coding`).\n\nOptional on the wire (`serde(default)`, skipped when empty).",

@@ -1,6 +1,6 @@
 {
   "irBackend": "irsvc",
-  "irHash": "f149b127723d836f",
+  "irHash": "82d309e7c96d981a",
   "irMetadata": null,
   "irMethods": {
     ".call": {
@@ -755,24 +755,24 @@
   },
   "irPluginHashes": {
     "": {
-      "phiChildrenHash": "f149b127723d836f",
-      "phiHash": "f149b127723d836f",
-      "phiSelfHash": "f149b127723d836f"
+      "phiChildrenHash": "82d309e7c96d981a",
+      "phiHash": "82d309e7c96d981a",
+      "phiSelfHash": "82d309e7c96d981a"
     },
     "alpha": {
-      "phiChildrenHash": "bb273cbe0a5e1f33",
-      "phiHash": "bb273cbe0a5e1f33",
-      "phiSelfHash": "bb273cbe0a5e1f33"
+      "phiChildrenHash": "4c50982281563bd7",
+      "phiHash": "4c50982281563bd7",
+      "phiSelfHash": "4c50982281563bd7"
     },
     "alpha.gamma": {
-      "phiChildrenHash": "627884825dbd5344",
-      "phiHash": "627884825dbd5344",
-      "phiSelfHash": "627884825dbd5344"
+      "phiChildrenHash": "823ecb29db033ed0",
+      "phiHash": "823ecb29db033ed0",
+      "phiSelfHash": "823ecb29db033ed0"
     },
     "beta": {
-      "phiChildrenHash": "a322bf936a0cf7db",
-      "phiHash": "a322bf936a0cf7db",
-      "phiSelfHash": "a322bf936a0cf7db"
+      "phiChildrenHash": "1747372d8a451608",
+      "phiHash": "1747372d8a451608",
+      "phiSelfHash": "1747372d8a451608"
     }
   },
   "irPluginRequests": null,
@@ -2777,6 +2777,19 @@
             "fdRequired": false,
             "fdType": {
               "tag": "RefJson"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "KEEL-31: the method acts on the whole service\n(`#[plexus_macros::method(everywhere)]`): it names no target because\nits target is everything — a key rotated, a process spawned, a peer\nconnected. A gate admits it only where its grant is held on `*`,\nwithin every ceiling layer; a role held on some scope is not enough.\nNever with `public` or `target`.\n\nOptional on the wire (`serde(default)`, skipped when false) so a\nmethod without it, and every older schema and client, is unchanged.",
+            "fdName": "everywhere",
+            "fdRequired": false,
+            "fdType": {
+              "contents": [
+                "boolean",
+                null
+              ],
+              "tag": "RefPrimitive"
             }
           },
           {

@@ -315,19 +315,19 @@
   },
   "irPluginHashes": {
     "tree": {
-      "phiChildrenHash": "929171f873477fc6",
-      "phiHash": "929171f873477fc6",
-      "phiSelfHash": "929171f873477fc6"
+      "phiChildrenHash": "00b5b61e357c6f00",
+      "phiHash": "00b5b61e357c6f00",
+      "phiSelfHash": "00b5b61e357c6f00"
     },
     "tree.branch": {
-      "phiChildrenHash": "d76e8d26866d9214",
-      "phiHash": "d76e8d26866d9214",
-      "phiSelfHash": "d76e8d26866d9214"
+      "phiChildrenHash": "20118e74ffc450a5",
+      "phiHash": "20118e74ffc450a5",
+      "phiSelfHash": "20118e74ffc450a5"
     },
     "tree.branch.leaf": {
-      "phiChildrenHash": "22c57fad5e01295b",
-      "phiHash": "22c57fad5e01295b",
-      "phiSelfHash": "22c57fad5e01295b"
+      "phiChildrenHash": "4d121d69ef35e778",
+      "phiHash": "4d121d69ef35e778",
+      "phiSelfHash": "4d121d69ef35e778"
     }
   },
   "irPluginRequests": null,
@@ -1284,6 +1284,19 @@
             "fdRequired": false,
             "fdType": {
               "tag": "RefJson"
+            }
+          },
+          {
+            "fdDefault": null,
+            "fdDescription": "KEEL-31: the method acts on the whole service\n(`#[plexus_macros::method(everywhere)]`): it names no target because\nits target is everything — a key rotated, a process spawned, a peer\nconnected. A gate admits it only where its grant is held on `*`,\nwithin every ceiling layer; a role held on some scope is not enough.\nNever with `public` or `target`.\n\nOptional on the wire (`serde(default)`, skipped when false) so a\nmethod without it, and every older schema and client, is unchanged.",
+            "fdName": "everywhere",
+            "fdRequired": false,
+            "fdType": {
+              "contents": [
+                "boolean",
+                null
+              ],
+              "tag": "RefPrimitive"
             }
           },
           {
