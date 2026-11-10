@@ -573,6 +573,12 @@ impl Parse for HubMethodAttrs {
                                     // Unknown form — ignore for forward compatibility
                                 }
                             }
+                        } else if path.is_ident("streaming") {
+                            // RETURNS-36: `streaming = true`, the deprecated
+                            // no-op as its bare form (`= false` says nothing).
+                            if !matches!(value, Expr::Lit(ExprLit { lit: Lit::Bool(ref b), .. }) if !b.value) {
+                                streaming = Some(path.span());
+                            }
                         } else {
                             return Err(unknown_word(&path, "#[plexus_macros::method]", METHOD_WORDS));
                         }
