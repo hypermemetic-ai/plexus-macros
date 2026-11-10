@@ -1,0 +1,5 @@
+error: unknown word `forward_policy` in #[plexus_macros::activation]; it takes: namespace, trait, version, description, long_description, crate_path, plugin_id, namespace_fn, server_cfg, auth, request, parent, methods, served, resolve_handle, hub, client, typed_params, children, roles, required
+ --> tests/compile/keel31_unknown_activation_word.rs:6:74
+  |
+6 | #[plexus_macros::activation(namespace = "t", crate_path = "plexus_core", forward_policy = "pass_through")]
+  |                                                                          ^^^^^^^^^^^^^^

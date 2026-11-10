@@ -350,6 +350,29 @@ pub fn validate_scope_literal(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// KEEL-31: every word `#[plexus_macros::method(...)]` takes.
+const METHOD_WORDS: &[&str] = &[
+    "public", "everywhere", "streaming", "name", "description", "http_method", "target", "answer_by", "group",
+    "scope", "request", "input_window", "input_max_items", "input_max_bytes", "input_max_buffered", "uses",
+    "params", "example", "examples", "values",
+];
+
+/// KEEL-31: every word `#[plexus_macros::activation(...)]` takes.
+const ACTIVATION_WORDS: &[&str] = &[
+    "namespace", "trait", "version", "description", "long_description", "crate_path", "plugin_id", "namespace_fn",
+    "server_cfg", "auth", "request", "parent", "methods", "served", "resolve_handle", "hub", "client",
+    "typed_params", "children", "roles", "required",
+];
+
+/// KEEL-31: a word an attribute does not take is a compile error naming it
+/// and the words it does take — never dropped, as an older macro dropped
+/// `everywhere`.
+fn unknown_word(path: &syn::Path, attr: &str, known: &[&str]) -> syn::Error {
+    let word = path.get_ident().map(|i| i.to_string()).unwrap_or_else(|| quote::quote!(#path).to_string());
+    let word = if word == TRAIT_KEY { "trait".to_string() } else { word };
+    syn::Error::new_spanned(path, format!("unknown word `{word}` in {attr}; it takes: {}", known.join(", ")))
+}
+
 impl Parse for HubMethodAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut name = None;
@@ -410,6 +433,11 @@ impl Parse for HubMethodAttrs {
                             // KEEL-31: acts on the whole service — its grant
                             // is needed on `*`, the gate's rule.
                             everywhere = Some(path.span());
+                        } else {
+                            // KEEL-31: a word this macro does not know is an
+                            // error, never dropped (`everywhere` on an older
+                            // macro compiled to nothing).
+                            return Err(unknown_word(&path, "#[plexus_macros::method]", METHOD_WORDS));
                         }
                     }
                     Meta::NameValue(MetaNameValue { path, value, .. }) => {
@@ -545,6 +573,8 @@ impl Parse for HubMethodAttrs {
                                     // Unknown form — ignore for forward compatibility
                                 }
                             }
+                        } else {
+                            return Err(unknown_word(&path, "#[plexus_macros::method]", METHOD_WORDS));
                         }
                     }
                     Meta::List(MetaList { path, tokens, .. }) => {
@@ -596,6 +626,8 @@ impl Parse for HubMethodAttrs {
                             return Err(syn::Error::new_spanned(&path, RETURNS_REMOVED));
                         } else if path.is_ident("bidirectional") {
                             return Err(syn::Error::new_spanned(&path, BIDIRECTIONAL_REMOVED));
+                        } else {
+                            return Err(unknown_word(&path, "#[plexus_macros::method]", METHOD_WORDS));
                         }
                     }
                 }
@@ -923,6 +955,22 @@ impl Parse for HubMethodsAttrs {
                             continue;
                         }
 
+                        // IR-5: the legacy `children = [field, …]` (deprecated;
+                        // a warning says so), as its list form `children(…)`.
+                        if path.is_ident("children") {
+                            let Expr::Array(arr) = &value else {
+                                return Err(syn::Error::new_spanned(&value, "children = [field, …]: the fields that are child activations"));
+                            };
+                            for e in &arr.elems {
+                                match e {
+                                    Expr::Path(p) if p.path.get_ident().is_some() => children.push(p.path.get_ident().unwrap().clone()),
+                                    other => return Err(syn::Error::new_spanned(other, "children = [field, …]: each a field's name")),
+                                }
+                            }
+                            children_span = Some(path.span());
+                            continue;
+                        }
+
                         // KEEL-27: `served = written` (or `"written"`).
                         if path.is_ident("served") {
                             let word = match &value {
@@ -944,6 +992,19 @@ impl Parse for HubMethodsAttrs {
                             continue;
                         }
 
+                        // KEEL-31: every other key takes a string; one this
+                        // macro does not know is an error, never dropped.
+                        const STRING_KEYS: &[&str] = &[
+                            TRAIT_KEY, "namespace", "version", "description", "long_description", "crate_path",
+                            "plugin_id", "namespace_fn", "server_cfg", "auth",
+                        ];
+                        if !STRING_KEYS.iter().any(|k| path.is_ident(k)) {
+                            return Err(unknown_word(&path, "#[plexus_macros::activation]", ACTIVATION_WORDS));
+                        }
+                        let Expr::Lit(ExprLit { lit: Lit::Str(_), .. }) = &value else {
+                            let key = if path.is_ident(TRAIT_KEY) { "trait".to_string() } else { path.get_ident().map(|i| i.to_string()).unwrap_or_default() };
+                            return Err(syn::Error::new_spanned(&value, format!("{key} = … expects a string, e.g. {key} = \"…\"")));
+                        };
                         if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = value {
                             if path.is_ident(TRAIT_KEY) {
                                 // MACRO-13: `trait = "Bar"` names the trait and the client.
@@ -1036,6 +1097,8 @@ impl Parse for HubMethodsAttrs {
                         } else if path.is_ident("typed_params") {
                             // MACRO-12: refuse bare string parameters.
                             typed_params = true;
+                        } else {
+                            return Err(unknown_word(&path, "#[plexus_macros::activation]", ACTIVATION_WORDS));
                         }
                     }
                     Meta::List(list) => {
@@ -1059,6 +1122,9 @@ impl Parse for HubMethodsAttrs {
                             let idents = syn::parse::Parser::parse2(parser, list.tokens.clone())?;
                             required_fields = idents.into_iter().collect();
                             required_fields_span = Some(list.path.span());
+                        }
+                        else {
+                            return Err(unknown_word(&list.path, "#[plexus_macros::activation]", ACTIVATION_WORDS));
                         }
                     }
                 }
@@ -1484,9 +1550,10 @@ fn parse_child_attr_args(
                             }
                         }
                         other => {
+                            let word = other.path().get_ident().map(|i| i.to_string()).unwrap_or_default();
                             return Err(syn::Error::new_spanned(
                                 other,
-                                format!("unknown argument to #[plexus_macros::child]; {EXPECTED}"),
+                                format!("unknown word `{word}` in #[plexus_macros::child] / #[plexus_macros::peer]; {EXPECTED}"),
                             ));
                         }
                     }
