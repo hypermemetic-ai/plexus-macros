@@ -29,6 +29,8 @@ members = [
     # RETURNS-46's review probes: the shapes the tree must survive, names,
     # memory and the per-event cost.
     "fixtures/aggregate-probe",
+    # The README's example, built from its own manifest.
+    "examples/counter",
 ]
 
 [package]

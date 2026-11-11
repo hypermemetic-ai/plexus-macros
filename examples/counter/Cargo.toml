@@ -1,0 +1,19 @@
+[package]
+name = "counter"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "The README's example: an activation, its wire type and its client"
+
+[dependencies]
+plexus-macros = { version = "0.11", path = "../.." }
+plexus-core = { version = "0.11", path = "../../../plexus-core" }
+plexus-client = { version = "0.11", path = "../../plexus-client" }
+async-trait = "0.1"
+futures = "0.3"
+jsonrpsee = "0.26"
+schemars = "1.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["macros", "rt"] }
+uuid = "1.0"
