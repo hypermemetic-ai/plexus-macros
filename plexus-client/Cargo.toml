@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT"
 description = "wasm-safe client runtime for Plexus RPC: the wire envelope, the Transport trait, and typed event decoding"
 repository = "https://github.com/hypermemetic-ai/plexus-macros"
+readme = "README.md"
 
 # The whole point of this crate: a wasm32 consumer can depend on it without
 # dragging in tokio/jsonrpsee/rmcp. Every dependency below builds for
