@@ -5,10 +5,10 @@
 //! types, return types, doc comments, deprecation metadata, child routing,
 //! and typed request extraction from the source.
 //!
-//! See the crate-level [`README`](https://github.com/hypermemetic/plexus-macros/blob/main/README.md)
-//! for a comprehensive example covering every option, a deep-dive on
-//! request forwarding (`PlexusRequest` + `request = ...`), and a
-//! per-macro reference.
+//! See the [`README`](https://github.com/hypermemetic-ai/plexus-macros/blob/main/README.md)
+//! for an example a test runs, and the reference pages in
+//! [`docs/`](https://github.com/hypermemetic-ai/plexus-macros/tree/main/docs),
+//! one for each topic.
 //!
 //! # Quick example
 //!
@@ -73,12 +73,12 @@
 //! on `impl Foo for Type` (MACRO-13, RETURNS-47; `namespace = "..."`
 //! overrides it).
 //! `#[method(returns(..))]` and `#[derive(StreamEvent)]` are gone, and
-//! `#[method(streaming)]` is a deprecated no-op on a stream form. See the
-//! README's per-macro reference.
+//! `#[method(streaming)]` is a deprecated no-op on a stream form. See
+//! `docs/methods.md`.
 //!
 //! Deprecated surfaces still accepted: `#[hub_methods]`, `#[hub_method]`, the
-//! `hub` and `children = [...]` flags on `#[activation]`. See the migration
-//! section of the README.
+//! `hub` and `children = [...]` flags on `#[activation]`. See
+//! `docs/deprecation.md`.
 //!
 //! ## Crate version (UMB-2)
 //!

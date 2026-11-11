@@ -193,15 +193,19 @@ async fn the_message_carries_unknown_field() {
 }
 
 #[test]
-fn the_readme_says_an_unknown_key_is_refused() {
-    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).expect("README.md");
-    let row = readme
+fn the_reference_says_an_unknown_key_is_refused() {
+    let page = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/methods.md")).expect("docs/methods.md");
+    let section: Vec<&str> = page
         .lines()
-        .find(|l| l.starts_with("| `typed_params` |"))
-        .expect("README's attribute table has a `typed_params` row");
-    assert!(row.contains("MACRO-31"), "the `typed_params` row names MACRO-31: {row}");
+        .skip_while(|l| *l != "## `typed_params`")
+        .skip(1)
+        .take_while(|l| !l.starts_with("## "))
+        .map(str::trim)
+        .collect();
+    assert!(!section.is_empty(), "docs/methods.md has a `typed_params` section");
+    let section = section.join(" ");
     assert!(
-        row.split(". ").any(|sentence| sentence.contains("unknown field `") && sentence.contains("refused")),
-        "one sentence of the `typed_params` row says an unknown key is refused, in the refusal's words (unknown field `…`): {row}"
+        section.split(". ").any(|sentence| sentence.contains("unknown field `") && sentence.contains("refused")),
+        "one sentence of the `typed_params` section says an unknown key is refused, in the refusal's words (unknown field `…`): {section}"
     );
 }
