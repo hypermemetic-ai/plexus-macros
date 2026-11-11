@@ -3,6 +3,17 @@
 All notable changes to plexus-macros and plexus-client are documented here.
 This file starts at 0.7.0; earlier changes are in the git history.
 
+## [0.11.2] — plexus-macros
+
+PLEXUS-59: `#[derive(PlexusWire)]`, one derive for a type that crosses the
+wire — serde's `Serialize` and `Deserialize` and schemars' `JsonSchema`,
+named through plexus-rpc when the app depends on it, so the app lists
+neither crate. An enum is tagged `tag = "type", rename_all = "snake_case"`
+unless it says its own `tag` or `untagged`; `#[serde(…)]` and
+`#[schemars(…)]` are read as ever; a generic type is refused. The derive
+writes a hidden twin of the type as its serde remote (`src/wire.rs`).
+plexus-client unchanged.
+
 ## [0.11.1] — plexus-macros
 
 KEEL-27: `#[activation(served = written)]`, opt-in per block — what an
