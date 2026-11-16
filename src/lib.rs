@@ -1,5 +1,6 @@
 //! `#[activation]` on a module: the module's types and its one `impl` block
-//! are read into an IR, and from the IR come its WIT and its gRPC `.proto`.
+//! are read into an IR (`plexus-ir`), and from the IR come its WIT and its
+//! TypeScript.
 //!
 //! Two forms:
 //!
@@ -9,14 +10,15 @@
 //!   returns `impl Stream<Item = T>` gives a `stream<T>`. Data types are
 //!   replaced by the ones wit-bindgen makes from the WIT.
 //! - `#[activation(describe)]`: the module is left as ordinary Rust and gains
-//!   `IR`, `WIT` and `PROTO`. Everything the IR can say is read; nothing is
+//!   `IR`, `WIT` and `CLIENT_TS`. Everything the IR can say is read; nothing is
 //!   wired to run. This is where the caller, grants, roles, children,
 //!   progress and a stream in can be written today.
 
-mod ir;
+mod write;
 
 use heck::ToKebabCase;
-use ir::{Child, Deprecated, Field, Held, Ir, Method, Returns, Role, Shape, Ty, TypeDef};
+use plexus_ir::{Caller, Child, Deprecated, Field, Held, Ir, Method, Returns, Role, Shape, Ty, TypeDef};
+use serde_json::Value;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::punctuated::Punctuated;
@@ -63,17 +65,21 @@ fn attr<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a Attribute> {
     attrs.iter().find(|a| a.path().is_ident(name))
 }
 
-/// A literal as JSON text.
-fn literal(e: &Expr) -> Res<String> {
+/// A literal as a JSON value.
+fn literal(e: &Expr) -> Res<Value> {
+    let number = |digits: String| serde_json::from_str::<serde_json::Number>(&digits).map(Value::Number).or_else(|_| err(e, "a number JSON can hold"));
     match e {
-        Expr::Lit(l) => Ok(match &l.lit {
-            Lit::Str(s) => format!("{:?}", s.value()),
-            Lit::Bool(b) => b.value.to_string(),
-            Lit::Int(i) => i.base10_digits().to_string(),
-            Lit::Float(f) => f.base10_digits().to_string(),
-            other => return err(other, "a string, a number or a bool"),
-        }),
-        Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => Ok(format!("-{}", literal(&u.expr)?)),
+        Expr::Lit(l) => match &l.lit {
+            Lit::Str(s) => Ok(Value::String(s.value())),
+            Lit::Bool(b) => Ok(Value::Bool(b.value)),
+            Lit::Int(i) => number(i.base10_digits().to_string()),
+            Lit::Float(f) => number(f.base10_digits().to_string()),
+            other => err(other, "a string, a number or a bool"),
+        },
+        Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => match literal(&u.expr)? {
+            Value::Number(n) => number(format!("-{n}")),
+            _ => err(e, "a number after `-`"),
+        },
         other => err(other, "a literal"),
     }
 }
@@ -262,7 +268,13 @@ fn plain(items: &[Item]) -> Vec<Item> {
     for item in &mut items {
         match item {
             Item::Struct(s) => s.fields.iter_mut().for_each(|f| strip(&mut f.attrs, false)),
-            Item::Enum(e) => e.variants.iter_mut().for_each(|v| v.fields.iter_mut().for_each(|f| strip(&mut f.attrs, false))),
+            Item::Enum(e) => {
+                for v in e.variants.iter_mut() {
+                    // Only `#[wire]`: a variant's `#[default]` is Rust's own.
+                    v.attrs.retain(|a| !a.path().is_ident("wire"));
+                    v.fields.iter_mut().for_each(|f| strip(&mut f.attrs, false));
+                }
+            }
             Item::Type(t) => strip(&mut t.attrs, false),
             Item::Impl(i) => {
                 for it in &mut i.items {
@@ -315,6 +327,9 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 let mut cases = Vec::new();
                 for v in &e.variants {
                     let mut case = Field { name: kebab(&v.ident), doc: doc(&v.attrs), ..Field::default() };
+                    if let Some(a) = attr(&v.attrs, "wire") {
+                        case.wire = Some(string(&a.parse_args::<Expr>()?)?);
+                    }
                     match &v.fields {
                         Fields::Unit => {}
                         Fields::Unnamed(u) if u.unnamed.len() == 1 => case.ty = Some(ty(&u.unnamed[0].ty)?),
@@ -364,8 +379,8 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             let seg = last_segment(&t.ty);
             let inner = |seg: &syn::PathSegment| type_args(&seg.arguments).first().copied().map(ty).transpose();
             match seg.map(|s| s.ident.to_string()).as_deref() {
-                Some("Caller") => m.caller = Some("required"),
-                Some("Option") if seg.and_then(|s| type_args(&s.arguments).first().copied()).and_then(last_segment).is_some_and(|s| s.ident == "Caller") => m.caller = Some("optional"),
+                Some("Caller") => m.caller = Some(Caller::Required),
+                Some("Option") if seg.and_then(|s| type_args(&s.arguments).first().copied()).and_then(last_segment).is_some_and(|s| s.ident == "Caller") => m.caller = Some(Caller::Optional),
                 Some("Input") => m.input = inner(seg.expect("a segment"))?,
                 Some("Progress") => m.progress = inner(seg.expect("a segment"))?,
                 _ => {
@@ -457,15 +472,13 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         ir.methods.push(m);
     }
 
-    let (wit, json, proto, ts) = (ir.wit(), ir.json(), ir.proto(), ir.ts());
+    let (wit, json, ts) = (write::wit(&ir), ir.json(), write::ts(&ir));
     let (vis, ident, attrs) = (&module.vis, &module.ident, &module.attrs);
     let consts = quote! {
         /// This activation's IR, as JSON.
         pub const IR: &str = #json;
         /// Its WIT, written from the IR.
         pub const WIT: &str = #wit;
-        /// Its gRPC service and messages, written from the IR.
-        pub const PROTO: &str = #proto;
         /// Its typed client and its activation side, in TypeScript, written from the IR.
         pub const CLIENT_TS: &str = #ts;
     };
@@ -502,23 +515,64 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
 mod tests {
     use super::*;
 
-    /// `EMIT=ir|wit|proto ACTIVATION_FILE=path/to/lib.rs cargo test -p plexus-macros -- --nocapture emit`
+    /// The IR of the first `#[activation]` module in a file.
+    fn ir_of_file(path: &std::path::Path) -> Ir {
+        let file = syn::parse_file(&std::fs::read_to_string(path).expect("the file")).expect("Rust");
+        let mut module = file.items.into_iter().find_map(|i| if let Item::Mod(m) = i { Some(m) } else { None }).expect("a module");
+        let at = module.attrs.iter().position(|a| a.path().segments.last().is_some_and(|s| s.ident == "activation")).expect("#[activation]");
+        let args = match module.attrs.remove(at).meta { Meta::List(l) => l.tokens, _ => Default::default() };
+        expand(args, module).expect("an activation").0
+    }
+
+    /// `EMIT=ir|wit|ts ACTIVATION_FILE=path/to/lib.rs cargo test -p plexus-macros -- --nocapture emit`
     /// prints that form of the first `#[activation]` module in the file.
     #[test]
     fn emit_for_a_file() {
         let (Ok(path), Ok(what)) = (std::env::var("ACTIVATION_FILE"), std::env::var("EMIT")) else { return };
-        let file = syn::parse_file(&std::fs::read_to_string(&path).expect("the file")).expect("Rust");
-        let mut module = file.items.into_iter().find_map(|i| if let Item::Mod(m) = i { Some(m) } else { None }).expect("a module");
-        let at = module.attrs.iter().position(|a| a.path().segments.last().is_some_and(|s| s.ident == "activation")).expect("#[activation]");
-        let args = match module.attrs.remove(at).meta { Meta::List(l) => l.tokens, _ => Default::default() };
-        let (ir, _) = expand(args, module).expect("an activation");
+        let ir = ir_of_file(path.as_ref());
         let text = match what.as_str() {
-            "ir" => ir.json(),
-            "wit" => ir.wit(),
-            "ts" => ir.ts(),
-            _ => ir.proto(),
+            "wit" => write::wit(&ir),
+            "ts" => write::ts(&ir),
+            _ => ir.json(),
         };
         println!("-----8<-----\n{text}-----8<-----");
+    }
+
+    /// Every example in `../plexus-examples` writes the IR kept for it in
+    /// its `ir/`: a showcase file as `ir/<file>.json`, kiln and glaze as
+    /// `ir/kiln.json` and `ir/glaze.json`. `BLESS=1 cargo test goldens`
+    /// writes them anew.
+    #[test]
+    fn goldens() {
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../plexus-examples");
+        let mut sources: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(examples.join("showcase/src"))
+            .expect("plexus-examples beside this checkout")
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.file_stem().is_some_and(|s| s != "lib"))
+            .map(|p| (p.file_stem().unwrap().to_string_lossy().into_owned(), p))
+            .collect();
+        sources.extend(["kiln", "glaze"].map(|c| (c.to_string(), examples.join(c).join("src/lib.rs"))));
+        sources.sort();
+        let bless = std::env::var_os("BLESS").is_some();
+        let mut wrong = Vec::new();
+        for (name, path) in &sources {
+            let (made, golden) = (ir_of_file(path).json(), examples.join(format!("ir/{name}.json")));
+            if bless {
+                std::fs::create_dir_all(golden.parent().unwrap()).unwrap();
+                std::fs::write(&golden, &made).unwrap();
+                continue;
+            }
+            let kept = std::fs::read_to_string(&golden).unwrap_or_default();
+            if kept != made {
+                let diff = similar::TextDiff::from_lines(&kept, &made).unified_diff().header(&format!("ir/{name}.json (kept)"), "what the macro writes").to_string();
+                wrong.push(diff);
+            }
+        }
+        let mut kept: Vec<String> = std::fs::read_dir(examples.join("ir")).unwrap().map(|e| e.unwrap().path().file_stem().unwrap().to_string_lossy().into_owned()).collect();
+        kept.sort();
+        let names: Vec<String> = sources.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(kept, names, "a golden for each example, and none for what is not one");
+        assert!(wrong.is_empty(), "the IR drifted from its golden (BLESS=1 cargo test goldens keeps what is written now):\n{}", wrong.join("\n"));
     }
 
     fn shop() -> (Ir, String) {
@@ -545,7 +599,7 @@ mod tests {
 
     #[test]
     fn the_wit() {
-        let wit = shop().0.wit();
+        let wit = write::wit(&shop().0);
         assert!(wit.contains("  record item {\n    name: string,\n    in-stock: u32,\n  }"), "{wit}");
         assert!(wit.contains("  variant shop-error {\n    sold-out,\n    no-such(string),\n  }"), "{wit}");
         assert!(wit.contains("  enum size {\n    small,\n    large,\n  }"), "{wit}");
@@ -557,23 +611,11 @@ mod tests {
     }
 
     #[test]
-    fn the_proto() {
-        let proto = shop().0.proto();
-        assert!(proto.contains("service Shop {"), "{proto}");
-        assert!(proto.contains("  rpc Buy(BuyRequest) returns (BuyResponse);"), "{proto}");
-        assert!(proto.contains("  rpc Prices(PricesRequest) returns (stream PricesItem);"), "{proto}");
-        assert!(proto.contains("message BuyResponse {\n  oneof result {\n    Item ok = 1;\n    ShopError err = 2;\n  }\n}"), "{proto}");
-        assert!(proto.contains("message ItemsResponse {\n  repeated Item value = 1;\n}"), "{proto}");
-        assert!(proto.contains("enum Size {\n  SIZE_SMALL = 0;\n  SIZE_LARGE = 1;\n}"), "{proto}");
-        assert!(proto.contains("    google.protobuf.Empty sold_out = 1;"), "{proto}");
-    }
-
-    #[test]
     fn the_ir() {
         let json = shop().0.json();
         assert!(json.contains(r#""activation": "shop""#), "{json}");
         assert!(json.contains(r#""name": "buy""#) && json.contains(r#""fails": "shop-error""#), "{json}");
-        serde_free_json_check(&json);
+        assert_eq!(Ir::read(&json).unwrap().json(), json);
         assert!(json.contains(r#""stream": "f32""#), "{json}");
         assert!(json.contains(r#""returns": {"list": "item"}"#), "{json}");
     }
@@ -586,23 +628,21 @@ mod tests {
         assert!(expand(Default::default(), module).unwrap_err().to_string().contains("&self"));
     }
 
-    /// Brackets and quotes balance: the IR's writer is by hand.
-    fn serde_free_json_check(json: &str) {
-        let (mut depth, mut in_str, mut esc) = (0i32, false, false);
-        for c in json.chars() {
-            if in_str {
-                if esc { esc = false } else if c == '\\' { esc = true } else if c == '"' { in_str = false }
-                continue;
+    #[test]
+    fn a_wire_name() {
+        let module: ItemMod = syn::parse_quote! {
+            mod tickets {
+                pub enum Status { Draft, #[wire("In Review")] InReview }
+                pub struct Tickets;
+                impl Tickets { pub fn status(&self) -> Status { todo!() } }
             }
-            match c {
-                '"' => in_str = true,
-                '{' | '[' => depth += 1,
-                '}' | ']' => depth -= 1,
-                _ => {}
-            }
-            assert!(depth >= 0, "{json}");
-        }
-        assert!(depth == 0 && !in_str, "{json}");
+        };
+        let (ir, tokens) = expand(quote!(describe), module).unwrap();
+        let json = ir.json_line();
+        assert!(json.contains(r#"[{"name": "draft"}, {"name": "in-review", "wire": "In Review"}]"#), "{json}");
+        assert!(!tokens.to_string().contains("# [wire"), "{tokens}");
+        let ts = write::ts(&ir);
+        assert!(ts.contains(r#"const toStatus = (v: Status): any => (({ "in-review": "In Review" } as any)[v] ?? v);"#), "{ts}");
     }
 
     #[test]
@@ -627,8 +667,7 @@ mod tests {
         };
         let args = quote!(describe, roles(viewer = ["whoami"], editor = [viewer, "close", "attach"]));
         let (ir, tokens) = expand(args, module).unwrap();
-        serde_free_json_check(&ir.json());
-        let json = ir.json_flat();
+        let json = ir.json_line();
         for want in [
             r#""alias": "string", "limits": {"min-len": 1, "max-len": 64, "pattern": "^[A-Z]+-[0-9]+$"}"#,
             r#""default": "Draft""#,
@@ -649,7 +688,6 @@ mod tests {
         assert!(!json.contains(r#""name": "caller""#) && !json.contains(r#""name": "file""#), "the caller and the input are no parameters\n{json}");
         let rust = tokens.to_string();
         assert!(!rust.contains("# [target]") && !rust.contains("# [child") && !rust.contains("# [limit"), "{rust}");
-        assert!(ir.proto().contains("rpc Attach(stream AttachUpload) returns (AttachResponse);"), "{}", ir.proto());
-        assert!(ir.wit().contains("type ticket-id = string;"), "{}", ir.wit());
+        assert!(write::wit(&ir).contains("type ticket-id = string;"), "{}", write::wit(&ir));
     }
 }
