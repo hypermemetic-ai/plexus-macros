@@ -370,7 +370,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     // Methods and children: every `pub fn` taking `&self` or `&mut self`.
     let iface = format_ident!("{}", module.ident);
     let exports = quote!(self::exports::plexus::#iface::#iface);
-    let (mut glue, mut served) = (Vec::new(), Vec::new());
+    let (mut glue, mut served, mut mounted) = (Vec::new(), Vec::new(), Vec::new());
     for item in &imp.items {
         let ImplItem::Fn(f) = item else { continue };
         if !matches!(f.vis, syn::Visibility::Public(_)) {
@@ -438,6 +438,9 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                         _ => return err(a, "`list = \"..\"` or `search = \"..\"`"),
                     }
                 }
+            }
+            if !describe {
+                mounted.push(mounted_child(&child, f, held)?);
             }
             ir.children.push(child);
             continue;
@@ -511,9 +514,11 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         let items = plain(items).into_iter().map(|i| i.into_token_stream());
         return Ok((ir, quote! { #(#attrs)* #vis mod #ident { #(#items)* #consts } }));
     }
-    if !ir.children.is_empty() {
-        return err(&module, "children are not in a component yet: use #[activation(describe)]");
-    }
+    // Natively a child is served; a component holds none yet.
+    let no_component = (!ir.children.is_empty()).then(|| {
+        let e = Error::new(module.ident.span(), "children are not in a component yet: build this activation natively, or use #[activation(describe)]").to_compile_error();
+        quote!(#[cfg(target_arch = "wasm32")] const _: () = { #e };)
+    });
     let world = format!("{}-activation", ir.activation);
     let kept = plain(&kept);
     let native_types = data.iter().zip(&ir.types).map(|(item, def)| native_type(&ir, item, def));
@@ -544,22 +549,35 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             #[cfg(target_arch = "wasm32")]
             export!(__Component);
 
+            #no_component
+
             /// Serve `activation` on `server` at `at` (its name, unless a
-            /// parent holds it): every method, its IR and its hash. The
-            /// activation is moved to a thread of its own, where every call
-            /// runs, as in a component (`plexus::__private::Local`).
+            /// parent holds it): every method, its IR and its hash, and every
+            /// child under `<at>.<child>`. The activation is moved to a
+            /// thread of its own, where every call runs, as in a component
+            /// (`plexus::__private::Local`); a child held by reference runs
+            /// there too.
             #[cfg(not(target_arch = "wasm32"))]
             pub fn serve(activation: #activation, server: &mut ::plexus::Server, at: &str) {
-                let __plexus_local = ::plexus::__private::Local::start(activation);
+                let (__plexus_local, __plexus_later) = ::plexus::__private::Local::later();
                 server.hello(HASH);
-                server.describe(at, IR).expect("the IR says its hash");
-                #(#served)*
+                <#activation as ::plexus::Serve>::held(&activation, &__plexus_local, |__plexus_a| __plexus_a, server, at);
+                __plexus_later.start(activation);
             }
             #[cfg(not(target_arch = "wasm32"))]
             impl ::plexus::Serve for #activation {
                 const NAME: &'static str = #name;
                 fn serve(self, server: &mut ::plexus::Server, at: &str) {
                     serve(self, server, at)
+                }
+                fn held<__P, __G>(&self, __plexus_local: &::plexus::__private::Local<__P>, __plexus_get: __G, server: &mut ::plexus::Server, at: &str)
+                where
+                    __P: ::std::marker::Send + 'static,
+                    __G: for<'__a> ::std::ops::Fn(&'__a __P) -> &'__a Self + ::std::marker::Copy + ::std::marker::Send + ::std::marker::Sync + 'static,
+                {
+                    server.describe(at, IR).expect("the IR says its hash");
+                    #(#served)*
+                    #(#mounted)*
                 }
             }
         }
@@ -665,6 +683,38 @@ fn native_type(ir: &Ir, item: &Item, def: &TypeDef) -> proc_macro2::TokenStream 
     quote!(#(#refused)* #[cfg(not(target_arch = "wasm32"))] #derive #extra #krate #item)
 }
 
+/// One child's serving, for a native build, under `<at>.<child>`. One
+/// held by reference (`&Kiln`, an activation written with `#[activation]`
+/// here or in another crate) is served in this process, on its parent's
+/// thread, found there through its parent. One that is anything
+/// (`Box<dyn Activation>`) or fits an interface (`Box<dyn Glazes>`, where
+/// `trait Glazes: plexus::Activation`) is asked for once, when the parent
+/// is served, and mounted: every call under its place is passed to it.
+fn mounted_child(child: &Child, f: &syn::ImplItemFn, held: &Type) -> Res<proc_macro2::TokenStream> {
+    let (method, name) = (&f.sig.ident, &child.name);
+    if child.key.is_some() || child.list.is_some() || child.search.is_some() {
+        return err(&f.sig, "a child per key is described, not served yet: use #[activation(describe)]");
+    }
+    if child.fails.is_some() {
+        return err(&f.sig.output, "a child that may fail to be there is described, not served yet: return the child itself, or use #[activation(describe)]");
+    }
+    let at = quote!(&::std::format!("{}.{}", at, #name));
+    Ok(match child.held {
+        Held::Fixed => {
+            let Type::Reference(r) = held else {
+                return err(held, "a child held in this process is returned by reference: `&Kiln`");
+            };
+            let ty = &r.elem;
+            quote! {
+                <#ty as ::plexus::Serve>::held(self.#method(), __plexus_local, move |__plexus_p: &__P| __plexus_get(__plexus_p).#method(), server, #at);
+            }
+        }
+        Held::Interface | Held::Any => quote! {
+            server.mount(#at, { let __plexus_c: ::std::boxed::Box<dyn ::plexus::Activation> = self.#method(); __plexus_c });
+        },
+    })
+}
+
 /// One method's registration on a `plexus::Server`, for a native build:
 /// its body read by the value layout (a wrong one fails `invalid-params`,
 /// naming the parameter, and the method does not run), the call made on
@@ -693,7 +743,7 @@ fn served_method(ir: &Ir, m: &Method, f: &syn::ImplItemFn, idents: &[syn::Ident]
             .and_then(|__plexus_p| ::std::result::Result::Ok((#(#takes,)*)));
     };
     let wait = f.sig.asyncness.is_some().then(|| quote!(.await));
-    let call = quote!(__plexus_a.#method(#(#idents),*) #wait);
+    let call = quote!(__plexus_get(&*__plexus_a).#method(#(#idents),*) #wait);
     let tokens = if let Some((item, iterator)) = stream_of(&f.sig.output) {
         let items = if iterator { quote!(::plexus::__private::futures::stream::iter(#call)) } else { call };
         let each = match &m.returns {
@@ -704,7 +754,7 @@ fn served_method(ir: &Ir, m: &Method, f: &syn::ImplItemFn, idents: &[syn::Ident]
             let __plexus_local = __plexus_local.clone();
             server.stream(&::std::format!("{}{}", at, #path), move |__plexus_body: ::plexus::Raw| {
                 #args
-                __plexus_local.stream(__plexus_args, move |__plexus_a: ::std::rc::Rc<_>, (#(#idents,)*), __plexus_asks| async move {
+                __plexus_local.stream(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*), __plexus_asks| async move {
                     ::plexus::__private::feed(__plexus_asks, #items, |__plexus_item: #item| #each).await
                 })
             });
@@ -736,7 +786,7 @@ fn served_method(ir: &Ir, m: &Method, f: &syn::ImplItemFn, idents: &[syn::Ident]
             let __plexus_local = __plexus_local.clone();
             server.method(&::std::format!("{}{}", at, #path), move |__plexus_body: ::plexus::Raw| {
                 #args
-                __plexus_local.call(__plexus_args, move |__plexus_a: ::std::rc::Rc<_>, (#(#idents,)*)| async move { #answer })
+                __plexus_local.call(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*)| async move { #answer })
             });
         }
     };
@@ -1002,6 +1052,55 @@ mod tests {
         ] {
             assert!(rust.contains(want), "missing {want}\n{rust}");
         }
+    }
+
+    #[test]
+    fn children_served_natively() {
+        let module: ItemMod = syn::parse_quote! {
+            mod studio {
+                pub trait Glazes: plexus::Activation {}
+                pub struct Studio { kiln: Kiln, glaze: plexus::Remote }
+                impl Studio {
+                    #[child]
+                    pub fn kiln(&self) -> &Kiln { &self.kiln }
+                    #[child]
+                    pub fn glaze(&self) -> Box<dyn Activation> { todo!() }
+                    #[child]
+                    pub fn supplier(&self) -> Box<dyn Glazes> { todo!() }
+                }
+            }
+        };
+        let rust = expand(Default::default(), module).unwrap().1.to_string();
+        for want in [
+            r#"< Kiln as :: plexus :: Serve > :: held (self . kiln () , __plexus_local , move | __plexus_p : & __P | __plexus_get (__plexus_p) . kiln () , server , & :: std :: format ! ("{}.{}" , at , "kiln"))"#,
+            r#"server . mount (& :: std :: format ! ("{}.{}" , at , "glaze") , { let __plexus_c : :: std :: boxed :: Box < dyn :: plexus :: Activation > = self . glaze () ; __plexus_c })"#,
+            r#"server . mount (& :: std :: format ! ("{}.{}" , at , "supplier")"#,
+            r#"# [cfg (target_arch = "wasm32")] const _ : () = { :: core :: compile_error ! { "children are not in a component yet"#,
+        ] {
+            assert!(rust.contains(want), "missing {want}\n{rust}");
+        }
+    }
+
+    #[test]
+    fn a_child_per_key_is_described_only() {
+        let module: ItemMod = syn::parse_quote! {
+            mod studio {
+                pub struct Studio;
+                impl Studio {
+                    #[child(list = "shelves")]
+                    pub fn shelf(&self, number: u32) -> Result<Kiln, NotFound> { todo!() }
+                    pub fn shelves(&self) -> Vec<u32> { vec![] }
+                }
+            }
+        };
+        let e = expand(Default::default(), module.clone()).unwrap_err().to_string();
+        assert_eq!(e, "a child per key is described, not served yet: use #[activation(describe)]");
+        assert!(expand(quote!(describe), module).is_ok());
+        let owned: ItemMod = syn::parse_quote! {
+            mod studio { pub struct Studio; impl Studio { #[child] pub fn kiln(&self) -> Kiln { todo!() } } }
+        };
+        let e = expand(Default::default(), owned).unwrap_err().to_string();
+        assert_eq!(e, "a child held in this process is returned by reference: `&Kiln`");
     }
 
     #[test]
