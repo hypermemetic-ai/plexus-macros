@@ -15,6 +15,7 @@ quote = "1"
 proc-macro2 = "1"
 heck = "0.5"
 plexus-ir = { path = "../plexus-ir" }
+plexus-gen = { path = "../plexus-gen" }
 serde_json = "1"
 
 [dev-dependencies]

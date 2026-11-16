@@ -1,6 +1,6 @@
 //! `#[activation]` on a module: the module's types and its one `impl` block
-//! are read into an IR (`plexus-ir`), and from the IR come its WIT and its
-//! TypeScript.
+//! are read into an IR (`plexus-ir`), and from the IR `plexus-gen` writes its
+//! WIT and its TypeScript.
 //!
 //! Two forms:
 //!
@@ -13,8 +13,6 @@
 //!   `IR`, `WIT` and `CLIENT_TS`. Everything the IR can say is read; nothing is
 //!   wired to run. This is where the caller, grants, roles, children,
 //!   progress and a stream in can be written today.
-
-mod write;
 
 use heck::ToKebabCase;
 use plexus_ir::{Caller, Child, Deprecated, Field, Held, Ir, Method, Returns, Role, Shape, Ty, TypeDef};
@@ -233,10 +231,14 @@ fn returns(ret: &ReturnType) -> Res<(Returns, Option<Ty>)> {
     Ok((Returns::One(ty(t)?), None))
 }
 
+/// Where each name a role holds is written: the role, the name as the IR
+/// keeps it, and its span.
+type RoleSpans = Vec<(String, String, proc_macro2::Span)>;
+
 /// `roles(viewer = ["list"], editor = [viewer, "open"])` of the attribute.
-fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Role>)> {
+fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Role>, RoleSpans)> {
     let metas = syn::parse::Parser::parse2(Punctuated::<Meta, Token![,]>::parse_terminated, args)?;
-    let (mut describe, mut out) = (false, Vec::new());
+    let (mut describe, mut out, mut spans) = (false, Vec::new(), Vec::new());
     for m in metas {
         match &m {
             Meta::Path(p) if p.is_ident("describe") => describe = true,
@@ -245,10 +247,12 @@ fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Rol
                     let Expr::Array(items) = &nv.value else { return err(&nv.value, "a role is a list: [\"method\", other_role]") };
                     let mut role = Role { name: nv.path.get_ident().map(kebab).unwrap_or_default(), includes: Vec::new(), grants: Vec::new() };
                     for e in &items.elems {
-                        match e {
-                            Expr::Path(p) => role.includes.push(p.path.get_ident().map(kebab).unwrap_or_default()),
-                            other => role.grants.push(format!("{activation}.{}", string(other)?.to_kebab_case())),
-                        }
+                        let name = match e {
+                            Expr::Path(p) => p.path.get_ident().map(kebab).unwrap_or_default(),
+                            other => format!("{activation}.{}", string(other)?.to_kebab_case()),
+                        };
+                        spans.push((role.name.clone(), name.clone(), e.span()));
+                        if matches!(e, Expr::Path(_)) { role.includes.push(name) } else { role.grants.push(name) }
                     }
                     out.push(role);
                 }
@@ -256,7 +260,7 @@ fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Rol
             other => return err(other, "`describe` or `roles(..)`"),
         }
     }
-    Ok((describe, out))
+    Ok((describe, out, spans))
 }
 
 /// The module with this macro's own attributes taken off, so it is plain Rust.
@@ -304,7 +308,7 @@ fn fields_of(named: &syn::FieldsNamed) -> Res<Vec<Field>> {
 /// The module's IR, and the module as a component (or, described, as itself).
 fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macro2::TokenStream)> {
     let name = kebab(&module.ident);
-    let (describe, roles) = roles(args, &name)?;
+    let (describe, roles, role_spans) = roles(args, &name)?;
     let Some((_, items)) = &module.content else { return err(&module, "#[activation] goes on `mod name { .. }` with its body") };
     let Some(imp) = items.iter().find_map(|i| if let Item::Impl(i) = i { i.trait_.is_none().then_some(i) } else { None }) else {
         return err(&module, "the module needs one `impl` block: the activation's methods");
@@ -469,10 +473,20 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 glue.push(quote!(fn #method(#(#idents: #tys),*) #out { __ACTIVATION.with(|s| s.#method(#(#idents),*)) }));
             }
         }
+        // WIT keeps one namespace for an interface's types and its functions.
+        if let Some(at) = ir.types.iter().position(|t| t.name == m.name) {
+            let mut e = Error::new(method.span(), format!("method `{method}` and type `{}` are both `{}` in WIT: rename one", names[at], m.name));
+            e.combine(Error::new(names[at].span(), format!("type `{}` is here", names[at])));
+            return Err(e);
+        }
         ir.methods.push(m);
     }
+    if let Some((role, held, why)) = ir.unknown_in_roles() {
+        let at = role_spans.iter().find(|(r, n, _)| *r == role.name && n == held).map(|(.., s)| *s).unwrap_or_else(|| module.span());
+        return Err(Error::new(at, why));
+    }
 
-    let (wit, json, ts) = (write::wit(&ir), ir.json(), write::ts(&ir));
+    let (wit, json, ts) = (plexus_gen::wit(&ir), ir.json(), plexus_gen::ts(&ir));
     let (vis, ident, attrs) = (&module.vis, &module.ident, &module.attrs);
     let consts = quote! {
         /// This activation's IR, as JSON.
@@ -531,20 +545,20 @@ mod tests {
         let (Ok(path), Ok(what)) = (std::env::var("ACTIVATION_FILE"), std::env::var("EMIT")) else { return };
         let ir = ir_of_file(path.as_ref());
         let text = match what.as_str() {
-            "wit" => write::wit(&ir),
-            "ts" => write::ts(&ir),
+            "wit" => plexus_gen::wit(&ir),
+            "ts" => plexus_gen::ts(&ir),
             _ => ir.json(),
         };
         println!("-----8<-----\n{text}-----8<-----");
     }
 
-    /// Every example in `../plexus-examples` writes the IR kept for it in
-    /// its `ir/`: a showcase file as `ir/<file>.json`, kiln and glaze as
-    /// `ir/kiln.json` and `ir/glaze.json`. `BLESS=1 cargo test goldens`
-    /// writes them anew.
-    #[test]
-    fn goldens() {
-        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../plexus-examples");
+    fn examples() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../plexus-examples")
+    }
+
+    /// Each example by the name its goldens are kept under, and its source.
+    fn sources() -> Vec<(String, std::path::PathBuf)> {
+        let examples = examples();
         let mut sources: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(examples.join("showcase/src"))
             .expect("plexus-examples beside this checkout")
             .map(|e| e.unwrap().path())
@@ -553,6 +567,31 @@ mod tests {
             .collect();
         sources.extend(["kiln", "glaze"].map(|c| (c.to_string(), examples.join(c).join("src/lib.rs"))));
         sources.sort();
+        sources
+    }
+
+    /// `CLIENT_TS` is the TypeScript `plexus-gen ts` writes from the kept IR
+    /// (`ts/` in plexus-examples, plexus-gen's goldens), and `WIT` its WIT
+    /// but for `async`, which an IR read from JSON does not keep.
+    #[test]
+    fn the_text_is_plexus_gens() {
+        for (name, path) in sources() {
+            let mut ir = ir_of_file(&path);
+            let ts = std::fs::read_to_string(examples().join(format!("ts/{name}.plexus.ts"))).unwrap();
+            assert!(plexus_gen::ts(&ir) == ts, "{name}: CLIENT_TS is not ts/{name}.plexus.ts");
+            ir.methods.iter_mut().for_each(|m| m.waits = false);
+            let wit = std::fs::read_to_string(examples().join(format!("wit/{name}.wit"))).unwrap();
+            assert!(plexus_gen::wit(&ir) == wit, "{name}: WIT is not wit/{name}.wit");
+        }
+    }
+
+    /// Every example in `../plexus-examples` writes the IR kept for it in
+    /// its `ir/`: a showcase file as `ir/<file>.json`, kiln and glaze as
+    /// `ir/kiln.json` and `ir/glaze.json`. `BLESS=1 cargo test goldens`
+    /// writes them anew.
+    #[test]
+    fn goldens() {
+        let (examples, sources) = (examples(), sources());
         let bless = std::env::var_os("BLESS").is_some();
         let mut wrong = Vec::new();
         for (name, path) in &sources {
@@ -599,7 +638,7 @@ mod tests {
 
     #[test]
     fn the_wit() {
-        let wit = write::wit(&shop().0);
+        let wit = plexus_gen::wit(&shop().0);
         assert!(wit.contains("  record item {\n    name: string,\n    in-stock: u32,\n  }"), "{wit}");
         assert!(wit.contains("  variant shop-error {\n    sold-out,\n    no-such(string),\n  }"), "{wit}");
         assert!(wit.contains("  enum size {\n    small,\n    large,\n  }"), "{wit}");
@@ -634,14 +673,14 @@ mod tests {
             mod tickets {
                 pub enum Status { Draft, #[wire("In Review")] InReview }
                 pub struct Tickets;
-                impl Tickets { pub fn status(&self) -> Status { todo!() } }
+                impl Tickets { pub fn current(&self) -> Status { todo!() } }
             }
         };
         let (ir, tokens) = expand(quote!(describe), module).unwrap();
         let json = ir.json_line();
         assert!(json.contains(r#"[{"name": "draft"}, {"name": "in-review", "wire": "In Review"}]"#), "{json}");
         assert!(!tokens.to_string().contains("# [wire"), "{tokens}");
-        let ts = write::ts(&ir);
+        let ts = plexus_gen::ts(&ir);
         assert!(ts.contains(r#"const toStatus = (v: Status): any => (({ "in-review": "In Review" } as any)[v] ?? v);"#), "{ts}");
     }
 
@@ -688,6 +727,33 @@ mod tests {
         assert!(!json.contains(r#""name": "caller""#) && !json.contains(r#""name": "file""#), "the caller and the input are no parameters\n{json}");
         let rust = tokens.to_string();
         assert!(!rust.contains("# [target]") && !rust.contains("# [child") && !rust.contains("# [limit"), "{rust}");
-        assert!(write::wit(&ir).contains("type ticket-id = string;"), "{}", write::wit(&ir));
+        assert!(plexus_gen::wit(&ir).contains("type ticket-id = string;"), "{}", plexus_gen::wit(&ir));
+    }
+
+    #[test]
+    fn a_role_grants_a_method_that_is_not_there() {
+        let module: ItemMod = syn::parse_quote! {
+            mod tickets { pub struct Tickets; impl Tickets { pub fn fetch(&self) -> String { todo!() } } }
+        };
+        let e = expand(quote!(describe, roles(viewer = ["get"])), module.clone()).unwrap_err().to_string();
+        assert_eq!(e, "role `viewer` grants `tickets.get`, which is no method of `tickets`");
+        let e = expand(quote!(describe, roles(editor = [viewer, "fetch"])), module.clone()).unwrap_err().to_string();
+        assert_eq!(e, "role `editor` includes `viewer`, which is no role");
+        assert!(expand(quote!(describe, roles(viewer = ["fetch"])), module).is_ok());
+    }
+
+    #[test]
+    fn a_method_and_a_type_of_one_name() {
+        let module: ItemMod = syn::parse_quote! {
+            mod jobs {
+                pub struct Batch { pub size: u32 }
+                #[derive(Default)]
+                pub struct Jobs;
+                impl Jobs { pub fn batch(&self) -> Batch { todo!() } }
+            }
+        };
+        let e = expand(Default::default(), module).unwrap_err();
+        let said: Vec<String> = e.into_iter().map(|e| e.to_string()).collect();
+        assert_eq!(said, ["method `batch` and type `Batch` are both `batch` in WIT: rename one", "type `Batch` is here"]);
     }
 }
