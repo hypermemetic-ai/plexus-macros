@@ -1,14 +1,14 @@
-//! `#[service]` on a module: the module's types and its one `impl` block
+//! `#[activation]` on a module: the module's types and its one `impl` block
 //! are read into an IR, and from the IR come its WIT and its gRPC `.proto`.
 //!
 //! Two forms:
 //!
-//! - `#[service]`: the module also becomes a WebAssembly component that
-//!   exports the WIT. The service is made once, with `Default`, and its
+//! - `#[activation]`: the module also becomes a WebAssembly component that
+//!   exports the WIT. The activation is made once, with `Default`, and its
 //!   methods take `&self`. An `async fn` is an `async func`; a method that
 //!   returns `impl Stream<Item = T>` gives a `stream<T>`. Data types are
 //!   replaced by the ones wit-bindgen makes from the WIT.
-//! - `#[service(describe)]`: the module is left as ordinary Rust and gains
+//! - `#[activation(describe)]`: the module is left as ordinary Rust and gains
 //!   `IR`, `WIT` and `PROTO`. Everything the IR can say is read; nothing is
 //!   wired to run. This is where the caller, grants, roles, children,
 //!   progress and a stream in can be written today.
@@ -26,7 +26,7 @@ use syn::{Attribute, Error, Expr, Fields, FnArg, GenericArgument, ImplItem, Item
 type Res<T> = Result<T, Error>;
 
 #[proc_macro_attribute]
-pub fn service(args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn activation(args: TokenStream, input: TokenStream) -> TokenStream {
     let module = syn::parse_macro_input!(input as ItemMod);
     expand(args.into(), module).map(|(_, tokens)| tokens).unwrap_or_else(|e| e.to_compile_error()).into()
 }
@@ -228,7 +228,7 @@ fn returns(ret: &ReturnType) -> Res<(Returns, Option<Ty>)> {
 }
 
 /// `roles(viewer = ["list"], editor = [viewer, "open"])` of the attribute.
-fn roles(args: proc_macro2::TokenStream, service: &str) -> Res<(bool, Vec<Role>)> {
+fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Role>)> {
     let metas = syn::parse::Parser::parse2(Punctuated::<Meta, Token![,]>::parse_terminated, args)?;
     let (mut describe, mut out) = (false, Vec::new());
     for m in metas {
@@ -241,7 +241,7 @@ fn roles(args: proc_macro2::TokenStream, service: &str) -> Res<(bool, Vec<Role>)
                     for e in &items.elems {
                         match e {
                             Expr::Path(p) => role.includes.push(p.path.get_ident().map(kebab).unwrap_or_default()),
-                            other => role.grants.push(format!("{service}.{}", string(other)?.to_kebab_case())),
+                            other => role.grants.push(format!("{activation}.{}", string(other)?.to_kebab_case())),
                         }
                     }
                     out.push(role);
@@ -293,20 +293,20 @@ fn fields_of(named: &syn::FieldsNamed) -> Res<Vec<Field>> {
 fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macro2::TokenStream)> {
     let name = kebab(&module.ident);
     let (describe, roles) = roles(args, &name)?;
-    let Some((_, items)) = &module.content else { return err(&module, "#[service] goes on `mod name { .. }` with its body") };
+    let Some((_, items)) = &module.content else { return err(&module, "#[activation] goes on `mod name { .. }` with its body") };
     let Some(imp) = items.iter().find_map(|i| if let Item::Impl(i) = i { i.trait_.is_none().then_some(i) } else { None }) else {
-        return err(&module, "the module needs one `impl` block: the service's methods");
+        return err(&module, "the module needs one `impl` block: the activation's methods");
     };
-    let Type::Path(self_ty) = &*imp.self_ty else { return err(&imp.self_ty, "the service is a named type") };
-    let service = self_ty.path.segments.last().expect("a path has a segment").ident.clone();
-    let mut ir = Ir { service: name.clone(), doc: doc(&module.attrs), types: Vec::new(), methods: Vec::new(), children: Vec::new(), roles };
+    let Type::Path(self_ty) = &*imp.self_ty else { return err(&imp.self_ty, "the activation is a named type") };
+    let activation = self_ty.path.segments.last().expect("a path has a segment").ident.clone();
+    let mut ir = Ir { activation: name.clone(), doc: doc(&module.attrs), types: Vec::new(), methods: Vec::new(), children: Vec::new(), roles };
 
     // Data: every other struct, enum and alias goes into the IR.
     let (mut kept, mut names) = (Vec::new(), Vec::new());
     for item in items {
         match item {
-            // A struct with no fields is no data: a service of its own, held as a child.
-            Item::Struct(s) if s.ident != service && !matches!(s.fields, Fields::Unit) => {
+            // A struct with no fields is no data: an activation of its own, held as a child.
+            Item::Struct(s) if s.ident != activation && !matches!(s.fields, Fields::Unit) => {
                 let Fields::Named(named) = &s.fields else { return err(s, "a record has named fields") };
                 ir.types.push(TypeDef { name: kebab(&s.ident), doc: doc(&s.attrs), shape: Shape::Record(fields_of(named)?) });
                 names.push(s.ident.clone());
@@ -352,7 +352,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         }
         let Some(FnArg::Receiver(recv)) = f.sig.inputs.first() else { continue };
         if recv.mutability.is_some() && !describe {
-            return err(recv, "a service's methods take `&self`: two calls can be running at once. Keep what changes in a Cell or a RefCell");
+            return err(recv, "an activation's methods take `&self`: two calls can be running at once. Keep what changes in a Cell or a RefCell");
         }
         let method = &f.sig.ident;
         let mut m = Method { name: kebab(method), doc: doc(&f.attrs), params: Vec::new(), returns: Returns::Nothing, fails: None, input: None, progress: None, caller: None, grant: None, target: None, waits: f.sig.asyncness.is_some() || stream_item(&f.sig.output).is_some() };
@@ -381,29 +381,29 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 }
             }
             if !describe {
-                return err(&t.ty, "the caller, a stream in and progress are not in a component yet: use #[service(describe)]");
+                return err(&t.ty, "the caller, a stream in and progress are not in a component yet: use #[activation(describe)]");
             }
         }
         if let Some(a) = attr(&f.attrs, "child") {
-            // A child: the service this function hands back.
+            // A child: the activation this function hands back.
             let ReturnType::Type(_, ret) = &f.sig.output else { return err(&f.sig, "a child function returns the child") };
             let (held, fails) = match result_of(ret)? {
                 Some((ok, e)) => (ok, Some(ty(e)?)),
                 None => (&**ret, None),
             };
-            // `&Commits` is a service written here. `Box<dyn Forge>` is anything
-            // that fits an interface. `Box<dyn Service>` is anything at all.
-            let Some(seg) = last_segment(held) else { return err(held, "a child is a named service") };
+            // `&Commits` is an activation written here. `Box<dyn Forge>` is anything
+            // that fits an interface. `Box<dyn Activation>` is anything at all.
+            let Some(seg) = last_segment(held) else { return err(held, "a child is a named activation") };
             let boxed = (seg.ident == "Box").then(|| type_args(&seg.arguments).first().copied()).flatten().and_then(|t| match t {
                 Type::TraitObject(o) => o.bounds.iter().find_map(|b| if let TypeParamBound::Trait(t) = b { t.path.segments.last().map(|s| s.ident.clone()) } else { None }),
                 _ => None,
             });
-            let (service, how) = match &boxed {
-                Some(i) if i == "Service" => (String::new(), Held::Any),
+            let (activation, how) = match &boxed {
+                Some(i) if i == "Activation" => (String::new(), Held::Any),
                 Some(i) => (kebab(i), Held::Interface),
                 None => (kebab(&seg.ident), Held::Fixed),
             };
-            let mut child = Child { name: m.name, doc: m.doc, service, held: how, key: m.params.into_iter().next(), list: None, search: None, fails };
+            let mut child = Child { name: m.name, doc: m.doc, activation, held: how, key: m.params.into_iter().next(), list: None, search: None, fails };
             if matches!(a.meta, Meta::List(_)) {
                 for (k, v) in pairs(a)? {
                     match k.as_str() {
@@ -430,9 +430,9 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 glue.push(quote! {
                     async fn #method(#(#idents: #tys),*) -> ::wit_bindgen::StreamReader<#item> {
                         let (mut tx, rx) = self::wit_stream::new();
-                        let service = __SERVICE.with(::std::clone::Clone::clone);
+                        let activation = __ACTIVATION.with(::std::clone::Clone::clone);
                         ::wit_bindgen::spawn_local(async move {
-                            let made = service.#method(#(#idents),*);
+                            let made = activation.#method(#(#idents),*);
                             let mut items = ::std::pin::pin!(#walk);
                             while let ::std::option::Option::Some(item) = ::futures::StreamExt::next(&mut items).await {
                                 if !tx.write_all(::std::vec![item]).await.is_empty() {
@@ -446,12 +446,12 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             } else if f.sig.asyncness.is_some() {
                 glue.push(quote! {
                     async fn #method(#(#idents: #tys),*) #out {
-                        let service = __SERVICE.with(::std::clone::Clone::clone);
-                        service.#method(#(#idents),*).await
+                        let activation = __ACTIVATION.with(::std::clone::Clone::clone);
+                        activation.#method(#(#idents),*).await
                     }
                 });
             } else {
-                glue.push(quote!(fn #method(#(#idents: #tys),*) #out { __SERVICE.with(|s| s.#method(#(#idents),*)) }));
+                glue.push(quote!(fn #method(#(#idents: #tys),*) #out { __ACTIVATION.with(|s| s.#method(#(#idents),*)) }));
             }
         }
         ir.methods.push(m);
@@ -460,13 +460,13 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     let (wit, json, proto, ts) = (ir.wit(), ir.json(), ir.proto(), ir.ts());
     let (vis, ident, attrs) = (&module.vis, &module.ident, &module.attrs);
     let consts = quote! {
-        /// This service's IR, as JSON.
+        /// This activation's IR, as JSON.
         pub const IR: &str = #json;
         /// Its WIT, written from the IR.
         pub const WIT: &str = #wit;
         /// Its gRPC service and messages, written from the IR.
         pub const PROTO: &str = #proto;
-        /// Its typed client and its service side, in TypeScript, written from the IR.
+        /// Its typed client and its activation side, in TypeScript, written from the IR.
         pub const CLIENT_TS: &str = #ts;
     };
     if describe {
@@ -474,9 +474,9 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         return Ok((ir, quote! { #(#attrs)* #vis mod #ident { #(#items)* #consts } }));
     }
     if !ir.children.is_empty() {
-        return err(&module, "children are not in a component yet: use #[service(describe)]");
+        return err(&module, "children are not in a component yet: use #[activation(describe)]");
     }
-    let world = format!("{}-service", ir.service);
+    let world = format!("{}-activation", ir.activation);
     let tokens = quote! {
         #(#attrs)*
         #vis mod #ident {
@@ -486,7 +486,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             #(#kept)*
 
             ::std::thread_local! {
-                static __SERVICE: ::std::rc::Rc<#service> = ::std::rc::Rc::new(<#service as ::std::default::Default>::default());
+                static __ACTIVATION: ::std::rc::Rc<#activation> = ::std::rc::Rc::new(<#activation as ::std::default::Default>::default());
             }
             struct __Component;
             impl #exports::Guest for __Component {
@@ -502,16 +502,16 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
 mod tests {
     use super::*;
 
-    /// `EMIT=ir|wit|proto SERVICE_FILE=path/to/lib.rs cargo test -p plexus-macros -- --nocapture emit`
-    /// prints that form of the first `#[service]` module in the file.
+    /// `EMIT=ir|wit|proto ACTIVATION_FILE=path/to/lib.rs cargo test -p plexus-macros -- --nocapture emit`
+    /// prints that form of the first `#[activation]` module in the file.
     #[test]
     fn emit_for_a_file() {
-        let (Ok(path), Ok(what)) = (std::env::var("SERVICE_FILE"), std::env::var("EMIT")) else { return };
+        let (Ok(path), Ok(what)) = (std::env::var("ACTIVATION_FILE"), std::env::var("EMIT")) else { return };
         let file = syn::parse_file(&std::fs::read_to_string(&path).expect("the file")).expect("Rust");
         let mut module = file.items.into_iter().find_map(|i| if let Item::Mod(m) = i { Some(m) } else { None }).expect("a module");
-        let at = module.attrs.iter().position(|a| a.path().segments.last().is_some_and(|s| s.ident == "service")).expect("#[service]");
+        let at = module.attrs.iter().position(|a| a.path().segments.last().is_some_and(|s| s.ident == "activation")).expect("#[activation]");
         let args = match module.attrs.remove(at).meta { Meta::List(l) => l.tokens, _ => Default::default() };
-        let (ir, _) = expand(args, module).expect("a service");
+        let (ir, _) = expand(args, module).expect("an activation");
         let text = match what.as_str() {
             "ir" => ir.json(),
             "wit" => ir.wit(),
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn the_ir() {
         let json = shop().0.json();
-        assert!(json.contains(r#""service": "shop""#), "{json}");
+        assert!(json.contains(r#""activation": "shop""#), "{json}");
         assert!(json.contains(r#""name": "buy""#) && json.contains(r#""fails": "shop-error""#), "{json}");
         serde_free_json_check(&json);
         assert!(json.contains(r#""stream": "f32""#), "{json}");
@@ -641,7 +641,7 @@ mod tests {
             r#""input": "bytes""#,
             r#""progress": "u8""#,
             r#"{"name": "editor", "includes": ["viewer"], "grants": ["tickets.close", "tickets.attach"]}"#,
-            r#""name": "commits", "service": "commits""#,
+            r#""name": "commits", "activation": "commits""#,
             r#""list": "projects""#,
         ] {
             assert!(json.contains(want), "missing {want}\n{json}");

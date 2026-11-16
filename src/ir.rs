@@ -1,4 +1,4 @@
-//! The IR: what a service is, as data. Everything else is written from it.
+//! The IR: what an activation is, as data. Everything else is written from it.
 //!
 //! Names in the IR are kebab-case (`loaded-by`, `kiln-error`); each target
 //! respells them its own way.
@@ -11,7 +11,7 @@ pub enum Ty {
     /// `string`, `bool`, `u8`..`u64`, `s8`..`s64`, `f32`, `f64`, `char`,
     /// `bytes` (raw octets) and `json` (any JSON value).
     Prim(&'static str),
-    /// A type of this service, by name.
+    /// A type of this activation, by name.
     Named(String),
     List(Box<Ty>),
     Option(Box<Ty>),
@@ -101,15 +101,15 @@ pub struct Role {
     pub grants: Vec<String>,
 }
 
-/// A service held under this one.
+/// An activation held under this one.
 #[derive(Debug, Clone)]
 pub struct Child {
     pub name: String,
     pub doc: String,
     /// The child's own interface, by name.
-    pub service: String,
-    /// `service` names a service written here (`Fixed`), an interface any
-    /// service may fit (`Interface`), or nothing: any service at all (`Any`).
+    pub activation: String,
+    /// `activation` names an activation written here (`Fixed`), an interface any
+    /// activation may fit (`Interface`), or nothing: any activation at all (`Any`).
     pub held: Held,
     /// For one child per key: the key.
     pub key: Option<Field>,
@@ -129,7 +129,7 @@ pub enum Held {
 
 #[derive(Debug, Clone)]
 pub struct Ir {
-    pub service: String,
+    pub activation: String,
     pub doc: String,
     pub types: Vec<TypeDef>,
     pub methods: Vec<Method>,
@@ -216,7 +216,7 @@ fn field_json(f: &Field) -> J {
 
 impl Ir {
     fn tree(&self, hash: Option<&str>) -> J {
-        let mut o = vec![("ir", s("plexus/0")), ("service", s(&self.service))];
+        let mut o = vec![("ir", s("plexus/0")), ("activation", s(&self.activation))];
         if let Some(h) = hash {
             o.push(("hash", s(h)));
         }
@@ -286,8 +286,8 @@ impl Ir {
             o.push(("children", J::Arr(self.children.iter().map(|c| {
                 let mut o = vec![("name", s(&c.name))];
                 match c.held {
-                    Held::Fixed => o.push(("service", s(&c.service))),
-                    Held::Interface => o.push(("interface", s(&c.service))),
+                    Held::Fixed => o.push(("activation", s(&c.activation))),
+                    Held::Interface => o.push(("interface", s(&c.activation))),
                     Held::Any => o.push(("any", J::Raw("true".into()))),
                 }
                 if let Some(k) = &c.key {
@@ -443,7 +443,7 @@ impl Ir {
     /// The IR as a WIT package: one interface, one world that exports it.
     /// A stream out is WIT's own `stream<T>`.
     pub fn wit(&self) -> String {
-        let name = &self.service;
+        let name = &self.activation;
         let unsaid = self.unsaid("wit");
         let note = if unsaid.is_empty() { String::new() } else { format!("// In the IR and not in WIT: {}.\n", unsaid.join("; ")) };
         let mut out = format!("package plexus:{name}@0.0.1;\n\n{note}{}interface {name} {{\n", doc_lines(&self.doc, "", "///"));
@@ -496,7 +496,7 @@ impl Ir {
             let word = if m.waits { "async func" } else { "func" };
             out += &format!("  {}: {word}({params}){ret};\n", m.name);
         }
-        out + &format!("}}\n\nworld {name}-service {{\n  export {name};\n}}\n")
+        out + &format!("}}\n\nworld {name}-activation {{\n  export {name};\n}}\n")
     }
 }
 
@@ -562,7 +562,7 @@ impl Ir {
     /// The IR as a proto3 file with a gRPC service. Protobuf has no
     /// `result`, so a method that can fail answers a message with a `oneof`.
     pub fn proto(&self) -> String {
-        let svc = camel(&self.service);
+        let svc = camel(&self.activation);
         let mut messages = String::new();
         for t in &self.types {
             match &t.shape {
@@ -659,7 +659,7 @@ impl Ir {
         }
         let unsaid = self.unsaid("proto");
         let note = if unsaid.is_empty() { String::new() } else { format!("// In the IR and not in protobuf: {}.\n", unsaid.join("; ")) };
-        let (pkg, doc) = (snake(&self.service), doc_lines(&self.doc, "", "//"));
+        let (pkg, doc) = (snake(&self.activation), doc_lines(&self.doc, "", "//"));
         let messages = messages.trim_end();
         format!("syntax = \"proto3\";\n\npackage plexus.{pkg}.v0;\n\n{imports}{note}{doc}service {svc} {{\n{rpcs}}}\n\n{messages}\n")
     }
@@ -732,17 +732,17 @@ fn ts_fields(fields: &[Field]) -> String {
 }
 
 impl Ir {
-    /// A typed client and the service's side of the same calls, as one
+    /// A typed client and the activation's side of the same calls, as one
     /// TypeScript module. Both speak frames over a `Channel`.
     ///
     /// On the wire a record is an object keyed by the IR's names; an enum
     /// is its name; a variant's case is `{"case": value}`, or its bare name
     /// when it carries nothing.
     pub fn ts(&self) -> String {
-        let svc = camel(&self.service);
+        let svc = camel(&self.activation);
         let mut out = format!(
             "// Generated from the IR of `{}` (interface {}). Not edited by hand.\n\nimport {{ Connection, Server, each, b64, unb64 }} from \"./plexus-rt.ts\";\n\n",
-            self.service, self.hash()
+            self.activation, self.hash()
         );
         if !self.every_type().iter().any(|t| mentions(t, "bytes")) {
             out = out.replace(", b64, unb64", "");
@@ -822,10 +822,10 @@ impl Ir {
         let args = |m: &Method| m.params.iter().map(|p| format!("{}: {}", lower_camel(&p.name), ty_ts(p.ty.as_ref().expect("a parameter has a type")))).collect::<Vec<_>>().join(", ");
         let fail = |m: &Method, out: bool| m.fails.as_ref().map(|e| format!(", (e: any) => {}", conv(e, "e", out))).unwrap_or_default();
 
-        out += &format!("\n/// The IR this file was generated from: what `_ir` answers.\nexport const {}Ir = {};\n", lower_camel(&self.service), self.tree(Some(&self.hash())).flat());
+        out += &format!("\n/// The IR this file was generated from: what `_ir` answers.\nexport const {}Ir = {};\n", lower_camel(&self.activation), self.tree(Some(&self.hash())).flat());
         // The stub: what a caller holds.
-        out += &format!("\n/// The caller's side of `{}`: every method, typed, sent as frames.\nexport class {svc}Client {{\n  /// The interface this client was generated from.\n  static readonly interface = \"{}\";\n", self.service, self.hash());
-        out += &format!("  private conn: Connection;\n  private at: string;\n  /// `at` is where the service is mounted: its own name unless a parent holds it.\n  constructor(conn: Connection, at: string = \"{0}\") {{\n    this.conn = conn;\n    this.at = at;\n  }}\n  /// Ask what is served at `at`, once, and refuse if it is not this interface.\n  async bind(): Promise<this> {{\n    const served = await this.conn.call(this.at + \"._hash\", {{}});\n    if (served !== {1}Client.interface) throw new Error(`${{this.at}} serves interface ${{served}}; this client was generated from ${{{1}Client.interface}}`);\n    return this;\n  }}\n", self.service, svc);
+        out += &format!("\n/// The caller's side of `{}`: every method, typed, sent as frames.\nexport class {svc}Client {{\n  /// The interface this client was generated from.\n  static readonly interface = \"{}\";\n", self.activation, self.hash());
+        out += &format!("  private conn: Connection;\n  private at: string;\n  /// `at` is where the activation is mounted: its own name unless a parent holds it.\n  constructor(conn: Connection, at: string = \"{0}\") {{\n    this.conn = conn;\n    this.at = at;\n  }}\n  /// Ask what is served at `at`, once, and refuse if it is not this interface.\n  async bind(): Promise<this> {{\n    const served = await this.conn.call(this.at + \"._hash\", {{}});\n    if (served !== {1}Client.interface) throw new Error(`${{this.at}} serves interface ${{served}}; this client was generated from ${{{1}Client.interface}}`);\n    return this;\n  }}\n", self.activation, svc);
         for m in &self.methods {
             let (name, path) = (lower_camel(&m.name), format!("this.at + \".{}\"", m.name));
             out += &doc_lines(&m.doc, "  ", "///");
@@ -837,8 +837,8 @@ impl Ir {
         }
         out += "}\n";
 
-        // The skeleton: what the service's side runs.
-        out += &format!("\n/// What `{}` must offer to be served: a transpiled component does.\nexport interface {svc}Service {{\n", self.service);
+        // The skeleton: what the activation's side runs.
+        out += &format!("\n/// What `{}` must offer to be served: a transpiled component does.\nexport interface {svc}Activation {{\n", self.activation);
         for m in &self.methods {
             let ret = match &m.returns {
                 Returns::Stream(item) => format!("AsyncIterable<{0}> | Promise<AsyncIterable<{0}>>", ty_ts(item)),
@@ -847,10 +847,10 @@ impl Ir {
             };
             out += &format!("  {}({}): {ret};\n", lower_camel(&m.name), args(m));
         }
-        out += &format!("}}\n\n/// The service's side: each `open` frame becomes a call into `service`.\n/// `at` is where it is mounted: its own name unless a parent holds it.\nexport function serve{svc}(service: {svc}Service, server: Server, at: string = \"{}\"): void {{\n", self.service);
+        out += &format!("}}\n\n/// The activation's side: each `open` frame becomes a call into `activation`.\n/// `at` is where it is mounted: its own name unless a parent holds it.\nexport function serve{svc}(activation: {svc}Activation, server: Server, at: string = \"{}\"): void {{\n", self.activation);
         for m in &self.methods {
             let (name, path) = (lower_camel(&m.name), format!("at + \".{}\"", m.name));
-            let call = format!("service.{name}({})", params_obj(m, true));
+            let call = format!("activation.{name}({})", params_obj(m, true));
             match &m.returns {
                 Returns::Stream(item) => out += &format!("  server.stream({path}, (p: any) => each({call}, (v: any) => {}){});\n", conv(item, "v", true), fail(m, true)),
                 Returns::One(t) if conv(t, "v", true) == "v" => out += &format!("  server.method({path}, (p: any) => {call}{});\n", fail(m, true)),
@@ -858,7 +858,7 @@ impl Ir {
                 Returns::Nothing => out += &format!("  server.method({path}, async (p: any) => {{ await {call}; }}{});\n", fail(m, true)),
             }
         }
-        out += &format!("  server.describe(at, {}Ir);\n}}\n", lower_camel(&self.service));
+        out += &format!("  server.describe(at, {}Ir);\n}}\n", lower_camel(&self.activation));
         out
     }
 }

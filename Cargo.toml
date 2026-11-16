@@ -1,6 +1,6 @@
 [package]
 name = "plexus-macros"
-description = "#[service]: a Rust module becomes a WebAssembly component, its WIT written from the code."
+description = "#[activation]: a Rust module becomes a WebAssembly component, its WIT written from the code."
 edition = "2024"
 version = "0.0.0"
 license = "MIT"
