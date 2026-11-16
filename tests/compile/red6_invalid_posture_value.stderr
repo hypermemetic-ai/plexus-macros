@@ -1,5 +1,0 @@
-error: auth must be one of "required", "optional", "mixed", "none"; got "strict_please"
-  --> tests/compile/red6_invalid_posture_value.rs:17:12
-   |
-17 |     auth = "strict_please",
-   |            ^^^^^^^^^^^^^^^

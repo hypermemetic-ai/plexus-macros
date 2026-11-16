@@ -1,8 +1,0 @@
-repo_name = "plexus-macros"
-org = "hypermemetic-ai"
-forges = [
-    "codeberg",
-    "github",
-]
-visibility = "public"
-description = ""

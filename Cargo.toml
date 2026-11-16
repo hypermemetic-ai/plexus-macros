@@ -1,104 +1,17 @@
-[workspace]
-# MACRO-2: `plexus-client` is the runtime half of the client this crate
-# generates. It lives here rather than in plexus-core because it must build
-# for wasm32-unknown-unknown, and because a macro and the runtime its output
-# links against have to move together — one repo, one tag, no version skew.
-members = [
-    ".",
-    "plexus-client",
-    # MACRO-2 criterion 1's two fixtures: an activation crate that is
-    # reachable from wasm32, and a consumer that reaches it in one
-    # dependency line. Not published.
-    "fixtures/tickets-api",
-    "fixtures/tickets-wasm-consumer",
-    # MACRO-13: the `server` feature default (gated with no `server_cfg`
-    # written; `--no-default-features` has no plexus-core), and a crate with
-    # no plexus-client, which gets no client and no error.
-    "fixtures/macro13-echo",
-    "fixtures/macro13-no-client",
-    # RETURNS-7's conformance fixture: one activation per signature form.
-    # RETURNS-8 serves it in-process against its `expected/` JSON
-    # (`fixtures/conformance/tests/serve.rs`).
-    "fixtures/conformance",
-    # RETURNS-40's: a service of several activations, served whole — the IR
-    # plexus-core writes for it held equal to synapse's.
-    "fixtures/ir-service",
-    # RETURNS-46's: a tree of activations — a static child with a static
-    # child of its own, and a dynamic child — and its nested aggregates.
-    "fixtures/aggregate-tree",
-    # RETURNS-46's review probes: the shapes the tree must survive, names,
-    # memory and the per-event cost.
-    "fixtures/aggregate-probe",
-    # The README's example, built from its own manifest.
-    "examples/counter",
-]
-
 [package]
 name = "plexus-macros"
-version = "0.11.2"
-edition = "2021"
+description = "#[service]: a Rust module becomes a WebAssembly component, its WIT written from the code."
+edition = "2024"
+version = "0.0.0"
 license = "MIT"
-description = "Procedural macros for Plexus RPC activations"
-repository = "https://github.com/hypermemetic-ai/plexus-macros"
-# DIST-2: the published crate is the macro alone — not the plans, design
-# notes, fixtures or hooks that live beside it in the repository.
-include = ["src/**", "README.md", "LICENSE", "Cargo.toml"]
+publish = false
 
 [lib]
 proc-macro = true
 
 [dependencies]
-proc-macro2 = "1.0"
-proc-macro-crate = "3"
-quote = "1.0"
-syn = { version = "2.0", features = ["full", "parsing", "extra-traits", "visit"] }
-uuid = { version = "1.0", features = ["v5"] }
-# SYNAPSE-13: an `example(params = r#"{…}"#)` is checked to be a JSON object
-# naming the method's params at expansion time.
-serde_json = "1.0"
-# PLEXUS-44: the server trait's by-name parameters accept the snake_case and
-# lowerCamelCase spellings jsonrpsee's `#[rpc]` accepted, spelled by the same
-# crate (0.5, jsonrpsee-proc-macros 0.26's).
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
 heck = "0.5"
-
-[features]
-# Enables the no-op JsonSchema proc_macro_derive, used by plexus-schemars-compat
-# to intercept #[derive(schemars::JsonSchema)] in test code.
-schemars-compat = []
-
-
-[dev-dependencies]
-plexus-macros = { path = "." }
-plexus-core = { path = "../plexus-core" }
-# MACRO-2: the runtime the generated client links against. A dev-dependency
-# here because the macro only *emits* paths into it; consumers of a generated
-# client depend on it directly.
-plexus-client = { path = "plexus-client", version = "0.11.0" }
-# Needed by the AUTHZ-CRED-MACRO-1 trybuild fixtures: the macro emits code
-# that references `Credential`, `CredentialKind`, `AttachmentSite`,
-# `CredentialScheme`, `Scope`, `MethodPath`, `HeaderName`, `CookieName`,
-# `ParamName`, and `CredentialKindName` from `plexus_auth_core`.
-plexus-auth-core = { path = "../plexus-auth-core", version = "0.3" }
-dialectic = { version = "0.4.1", features = ["tokio"] }
-schemars = { version = "1.1", features = ["derive", "uuid1"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-trybuild = "1.0"
-uuid = { version = "1.0", features = ["v4"] }
-# Runtime dependencies needed by `#[plexus_macros::activation]`-generated code in compile tests
-jsonrpsee = { version = "0.26", features = ["server", "macros"] }
-async-trait = "0.1"
-tokio = { version = "1.0", features = ["full"] }
-futures = "0.3"
-async-stream = "0.3"
-
-# PERF-6 (PLEXUS/PERF-6): the one build perf runs and releases use, PERF-1's
-# `profiles` fork built to its recommendation. Release, with LTO across every
-# crate and one codegen unit, and line tables kept for flamegraphs; `panic` is
-# release's (menger's tests rely on unwinding). Dev, test and release are
-# unchanged. `cargo build --profile perf`; plexus-bench measures with it.
-[profile.perf]
-inherits = "release"
-lto = "fat"
-codegen-units = 1
-debug = "line-tables-only"
+sha2 = "0.10"
