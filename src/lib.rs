@@ -4,13 +4,17 @@
 //!
 //! Two forms:
 //!
-//! - `#[activation]`: the module also becomes a WebAssembly component that
-//!   exports the WIT. The activation is made once, with `Default`, and its
-//!   methods take `&self`. An `async fn` is an `async func`; a method that
-//!   returns `impl Stream<Item = T>` gives a `stream<T>`. Data types are
-//!   replaced by the ones wit-bindgen makes from the WIT.
+//! - `#[activation]`: built to `wasm32`, the module also becomes a
+//!   WebAssembly component that exports the WIT. The activation is made
+//!   once, with `Default`, and its methods take `&self`. An `async fn` is an
+//!   `async func`; a method that returns `impl Stream<Item = T>` gives a
+//!   `stream<T>`. Data types are replaced by the ones wit-bindgen makes from
+//!   the WIT. Built natively, the data types stay as written, with serde's
+//!   derives by the value layout, and the module gains `serve(activation,
+//!   server, at)` and `impl plexus::Serve`: the same methods on a
+//!   `plexus::Server`, for `plexus::main`.
 //! - `#[activation(describe)]`: the module is left as ordinary Rust and gains
-//!   `IR`, `WIT` and `CLIENT_TS`. Everything the IR can say is read; nothing is
+//!   `IR`, `HASH`, `WIT` and `CLIENT_TS`. Everything the IR can say is read; nothing is
 //!   wired to run. This is where the caller, grants, roles, children,
 //!   progress and a stream in can be written today.
 
@@ -318,7 +322,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     let mut ir = Ir { activation: name.clone(), doc: doc(&module.attrs), types: Vec::new(), methods: Vec::new(), children: Vec::new(), roles };
 
     // Data: every other struct, enum and alias goes into the IR.
-    let (mut kept, mut names) = (Vec::new(), Vec::new());
+    let (mut kept, mut names, mut data) = (Vec::new(), Vec::new(), Vec::new());
     for item in items {
         match item {
             // A struct with no fields is no data: an activation of its own, held as a child.
@@ -326,6 +330,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 let Fields::Named(named) = &s.fields else { return err(s, "a record has named fields") };
                 ir.types.push(TypeDef { name: kebab(&s.ident), doc: doc(&s.attrs), shape: Shape::Record(fields_of(named)?) });
                 names.push(s.ident.clone());
+                data.push(item.clone());
             }
             Item::Enum(e) => {
                 let mut cases = Vec::new();
@@ -345,6 +350,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 let shape = if cases.iter().all(|c| c.ty.is_none() && c.record.is_none()) { Shape::Enum(cases) } else { Shape::Variant(cases) };
                 ir.types.push(TypeDef { name: kebab(&e.ident), doc: doc(&e.attrs), shape });
                 names.push(e.ident.clone());
+                data.push(item.clone());
             }
             Item::Type(t) => {
                 let mut limits = Vec::new();
@@ -355,6 +361,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 }
                 ir.types.push(TypeDef { name: kebab(&t.ident), doc: doc(&t.attrs), shape: Shape::Alias(ty(&t.ty)?, limits) });
                 names.push(t.ident.clone());
+                data.push(item.clone());
             }
             other => kept.push(other.clone()),
         }
@@ -363,7 +370,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     // Methods and children: every `pub fn` taking `&self` or `&mut self`.
     let iface = format_ident!("{}", module.ident);
     let exports = quote!(self::exports::plexus::#iface::#iface);
-    let mut glue = Vec::new();
+    let (mut glue, mut served) = (Vec::new(), Vec::new());
     for item in &imp.items {
         let ImplItem::Fn(f) = item else { continue };
         if !matches!(f.vis, syn::Visibility::Public(_)) {
@@ -440,6 +447,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             m.grant = Some(format!("{name}.{}", m.name));
         }
         if !describe {
+            served.push(served_method(&ir, &m, f, &idents, &tys));
             let out = &f.sig.output;
             if let Some((item, iterator)) = stream_of(&f.sig.output) {
                 // A stream out: a task of its own walks the method's stream
@@ -488,9 +496,12 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
 
     let (wit, json, ts) = (plexus_gen::wit(&ir), ir.json(), plexus_gen::ts(&ir));
     let (vis, ident, attrs) = (&module.vis, &module.ident, &module.attrs);
+    let hash = ir.hash();
     let consts = quote! {
         /// This activation's IR, as JSON.
         pub const IR: &str = #json;
+        /// Its interface hash: what a server says at hello.
+        pub const HASH: &str = #hash;
         /// Its WIT, written from the IR.
         pub const WIT: &str = #wit;
         /// Its typed client and its activation side, in TypeScript, written from the IR.
@@ -504,25 +515,232 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         return err(&module, "children are not in a component yet: use #[activation(describe)]");
     }
     let world = format!("{}-activation", ir.activation);
+    let kept = plain(&kept);
+    let native_types = data.iter().zip(&ir.types).map(|(item, def)| native_type(&ir, item, def));
+    // One file, two builds: to wasm, a component exporting the WIT, its
+    // data types wit-bindgen's; natively, the data types as written, read
+    // and written by the value layout, and `serve`.
     let tokens = quote! {
         #(#attrs)*
         #vis mod #ident {
+            #[cfg(target_arch = "wasm32")]
             ::wit_bindgen::generate!({ inline: #wit, world: #world });
+            #[cfg(target_arch = "wasm32")]
             pub use #exports::{#(#names),*};
+            #(#native_types)*
             #consts
             #(#kept)*
 
+            #[cfg(target_arch = "wasm32")]
             ::std::thread_local! {
                 static __ACTIVATION: ::std::rc::Rc<#activation> = ::std::rc::Rc::new(<#activation as ::std::default::Default>::default());
             }
+            #[cfg(target_arch = "wasm32")]
             struct __Component;
+            #[cfg(target_arch = "wasm32")]
             impl #exports::Guest for __Component {
                 #(#glue)*
             }
+            #[cfg(target_arch = "wasm32")]
             export!(__Component);
+
+            /// Serve `activation` on `server` at `at` (its name, unless a
+            /// parent holds it): every method, its IR and its hash. The
+            /// activation is moved to a thread of its own, where every call
+            /// runs, as in a component (`plexus::__private::Local`).
+            #[cfg(not(target_arch = "wasm32"))]
+            pub fn serve(activation: #activation, server: &mut ::plexus::Server, at: &str) {
+                let __plexus_local = ::plexus::__private::Local::start(activation);
+                server.hello(HASH);
+                server.describe(at, IR).expect("the IR says its hash");
+                #(#served)*
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            impl ::plexus::Serve for #activation {
+                const NAME: &'static str = #name;
+                fn serve(self, server: &mut ::plexus::Server, at: &str) {
+                    serve(self, server, at)
+                }
+            }
         }
     };
     Ok((ir, tokens))
+}
+
+/// A type as the IR has it, through any aliases.
+fn resolved<'a>(ir: &'a Ir, t: &'a Ty) -> &'a Ty {
+    match t {
+        Ty::Named(n) => match ir.types.iter().find(|d| d.name == *n).map(|d| &d.shape) {
+            Some(Shape::Alias(t, _)) => resolved(ir, t),
+            _ => t,
+        },
+        t => t,
+    }
+}
+
+fn is_bytes(ir: &Ir, t: &Ty) -> bool {
+    *resolved(ir, t) == Ty::Prim("bytes")
+}
+
+/// Bytes inside a list, an option, a map or a tuple: the value layout
+/// writes them as base64, which serde's own does not, so they are not
+/// served natively yet.
+fn holds_bytes(ir: &Ir, t: &Ty) -> bool {
+    match resolved(ir, t) {
+        Ty::List(t) | Ty::Option(t) | Ty::Map(t) => is_bytes(ir, t) || holds_bytes(ir, t),
+        Ty::Tuple(ts) => ts.iter().any(|t| is_bytes(ir, t) || holds_bytes(ir, t)),
+        _ => false,
+    }
+}
+
+fn not_served_yet(at: impl Spanned) -> proc_macro2::TokenStream {
+    let e = Error::new(at.span(), "bytes inside a list, an option, a map or a tuple are not served natively yet: make them a field of a record").to_compile_error();
+    quote!(#[cfg(not(target_arch = "wasm32"))] const _: () = { #e };)
+}
+
+/// The serde attributes of one field: its wire name, an option left out
+/// when none, bytes as base64.
+fn serde_field(ir: &Ir, wire: &str, t: &Ty) -> proc_macro2::TokenStream {
+    let mut out = quote!(#[serde(rename = #wire)]);
+    if matches!(t, Ty::Option(_)) {
+        out.extend(quote!(#[serde(default, skip_serializing_if = "::std::option::Option::is_none")]));
+    }
+    if is_bytes(ir, t) {
+        out.extend(quote!(#[serde(with = "::plexus::__private::bytes")]));
+    }
+    out
+}
+
+/// Each field's serde attributes, beside its IR's.
+fn field_attrs(ir: &Ir, fields: &mut Fields, irs: &[Field], refused: &mut Vec<proc_macro2::TokenStream>) {
+    for (f, x) in fields.iter_mut().zip(irs) {
+        let t = x.ty.as_ref().expect("a field has a type");
+        if holds_bytes(ir, t) {
+            refused.push(not_served_yet(&f.ty));
+        }
+        let attrs = serde_field(ir, &x.name, t);
+        f.attrs.extend(syn::parse::Parser::parse2(Attribute::parse_outer, attrs).expect("attributes"));
+    }
+}
+
+/// A data type as written, for a native build: wit-bindgen's derives (the
+/// component's own type has them), and serde's, by the value layout.
+fn native_type(ir: &Ir, item: &Item, def: &TypeDef) -> proc_macro2::TokenStream {
+    let mut item = plain(std::slice::from_ref(item)).remove(0);
+    let derive = quote!(#[derive(::std::clone::Clone, ::std::fmt::Debug, ::plexus::__private::serde::Serialize, ::plexus::__private::serde::Deserialize)]);
+    let krate = quote!(#[serde(crate = "::plexus::__private::serde")]);
+    let mut refused = Vec::new();
+    let extra = match (&mut item, &def.shape) {
+        (Item::Struct(s), Shape::Record(fields)) => {
+            s.attrs.retain(|a| !a.path().is_ident("derive"));
+            field_attrs(ir, &mut s.fields, fields, &mut refused);
+            quote!()
+        }
+        (Item::Enum(e), Shape::Enum(cases) | Shape::Variant(cases)) => {
+            e.attrs.retain(|a| !a.path().is_ident("derive"));
+            for (v, c) in e.variants.iter_mut().zip(cases) {
+                let wire = c.wire.as_deref().unwrap_or(&c.name);
+                v.attrs.push(syn::parse_quote!(#[serde(rename = #wire)]));
+                match (&mut v.fields, &c.ty) {
+                    (Fields::Unnamed(u), Some(t)) => {
+                        if holds_bytes(ir, t) {
+                            refused.push(not_served_yet(&u.unnamed[0].ty));
+                        } else if is_bytes(ir, t) {
+                            u.unnamed[0].attrs.push(syn::parse_quote!(#[serde(with = "::plexus::__private::bytes")]));
+                        }
+                    }
+                    (fields @ Fields::Named(_), None) => field_attrs(ir, fields, c.record.as_deref().unwrap_or_default(), &mut refused),
+                    _ => {}
+                }
+            }
+            if matches!(def.shape, Shape::Enum(_)) {
+                quote!(#[derive(::std::marker::Copy, ::std::cmp::PartialEq, ::std::cmp::Eq, ::std::cmp::PartialOrd, ::std::cmp::Ord)])
+            } else {
+                quote!()
+            }
+        }
+        // An alias is itself.
+        _ => return quote!(#[cfg(not(target_arch = "wasm32"))] #item),
+    };
+    quote!(#(#refused)* #[cfg(not(target_arch = "wasm32"))] #derive #extra #krate #item)
+}
+
+/// One method's registration on a `plexus::Server`, for a native build:
+/// its body read by the value layout (a wrong one fails `invalid-params`,
+/// naming the parameter, and the method does not run), the call made on
+/// the activation's thread, and its answer, items or typed failure written.
+fn served_method(ir: &Ir, m: &Method, f: &syn::ImplItemFn, idents: &[syn::Ident], tys: &[Type]) -> proc_macro2::TokenStream {
+    let (method, path) = (&f.sig.ident, format!(".{}", m.name));
+    let wires: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
+    let mut refused = Vec::new();
+    let takes = m.params.iter().zip(tys).map(|(p, ty)| {
+        let (wire, t) = (&p.name, p.ty.as_ref().expect("a parameter has a type"));
+        if holds_bytes(ir, t) {
+            refused.push(not_served_yet(ty));
+        }
+        let default = match &p.default {
+            Some(d) => {
+                let d = d.to_string();
+                quote!(::std::option::Option::Some(#d))
+            }
+            None => quote!(::std::option::Option::None),
+        };
+        if is_bytes(ir, t) { quote!(__plexus_p.take::<::plexus::__private::B64>(#wire, #default)?.0) } else { quote!(__plexus_p.take::<#ty>(#wire, #default)?) }
+    }).collect::<Vec<_>>();
+    let write = |t: &Ty, v: proc_macro2::TokenStream| if is_bytes(ir, t) { quote!(::plexus::raw(&::plexus::__private::B64(#v))) } else { quote!(::plexus::raw(&#v)) };
+    let args = quote! {
+        let __plexus_args = ::plexus::__private::params(&__plexus_body, &[#(#wires),*])
+            .and_then(|__plexus_p| ::std::result::Result::Ok((#(#takes,)*)));
+    };
+    let wait = f.sig.asyncness.is_some().then(|| quote!(.await));
+    let call = quote!(__plexus_a.#method(#(#idents),*) #wait);
+    let tokens = if let Some((item, iterator)) = stream_of(&f.sig.output) {
+        let items = if iterator { quote!(::plexus::__private::futures::stream::iter(#call)) } else { call };
+        let each = match &m.returns {
+            Returns::Stream(t) => write(t, quote!(__plexus_item)),
+            _ => unreachable!("a stream returns a stream"),
+        };
+        quote! {
+            let __plexus_local = __plexus_local.clone();
+            server.stream(&::std::format!("{}{}", at, #path), move |__plexus_body: ::plexus::Raw| {
+                #args
+                __plexus_local.stream(__plexus_args, move |__plexus_a: ::std::rc::Rc<_>, (#(#idents,)*), __plexus_asks| async move {
+                    ::plexus::__private::feed(__plexus_asks, #items, |__plexus_item: #item| #each).await
+                })
+            });
+        }
+    } else {
+        let ok = match &m.returns {
+            Returns::One(t) => write(t, quote!(__plexus_v)),
+            _ => quote!(::plexus::raw(&__plexus_v)),
+        };
+        let answer = match &m.fails {
+            None => quote!({ let __plexus_v = #call; #ok }),
+            Some(e) => {
+                let cases = match ir.types.iter().find(|d| Ty::Named(d.name.clone()) == *e).map(|d| &d.shape) {
+                    Some(Shape::Enum(cs) | Shape::Variant(cs)) => cs.iter().map(|c| {
+                        let (wire, name, doc) = (c.wire.as_deref().unwrap_or(&c.name), &c.name, &c.doc);
+                        quote!((#wire, #name, #doc))
+                    }).collect(),
+                    _ => Vec::new(),
+                };
+                quote! {
+                    match #call {
+                        ::std::result::Result::Ok(__plexus_v) => #ok,
+                        ::std::result::Result::Err(__plexus_e) => ::std::result::Result::Err(::plexus::__private::failed(&__plexus_e, &[#(#cases),*])),
+                    }
+                }
+            }
+        };
+        quote! {
+            let __plexus_local = __plexus_local.clone();
+            server.method(&::std::format!("{}{}", at, #path), move |__plexus_body: ::plexus::Raw| {
+                #args
+                __plexus_local.call(__plexus_args, move |__plexus_a: ::std::rc::Rc<_>, (#(#idents,)*)| async move { #answer })
+            });
+        }
+    };
+    quote!(#(#refused)* { #tokens })
 }
 
 #[cfg(test)]
@@ -571,15 +789,13 @@ mod tests {
     }
 
     /// `CLIENT_TS` is the TypeScript `plexus-gen ts` writes from the kept IR
-    /// (`ts/` in plexus-examples, plexus-gen's goldens), and `WIT` its WIT
-    /// but for `async`, which an IR read from JSON does not keep.
+    /// (`ts/` in plexus-examples, plexus-gen's goldens), and `WIT` its WIT.
     #[test]
     fn the_text_is_plexus_gens() {
         for (name, path) in sources() {
-            let mut ir = ir_of_file(&path);
+            let ir = ir_of_file(&path);
             let ts = std::fs::read_to_string(examples().join(format!("ts/{name}.plexus.ts"))).unwrap();
             assert!(plexus_gen::ts(&ir) == ts, "{name}: CLIENT_TS is not ts/{name}.plexus.ts");
-            ir.methods.iter_mut().for_each(|m| m.waits = false);
             let wit = std::fs::read_to_string(examples().join(format!("wit/{name}.wit"))).unwrap();
             assert!(plexus_gen::wit(&ir) == wit, "{name}: WIT is not wit/{name}.wit");
         }
@@ -755,5 +971,50 @@ mod tests {
         let e = expand(Default::default(), module).unwrap_err();
         let said: Vec<String> = e.into_iter().map(|e| e.to_string()).collect();
         assert_eq!(said, ["method `batch` and type `Batch` are both `batch` in WIT: rename one", "type `Batch` is here"]);
+    }
+
+    #[test]
+    fn served_natively() {
+        let module: ItemMod = syn::parse_quote! {
+            mod shop {
+                pub struct Item { pub in_stock: u32, pub photo: Bytes, pub note: Option<String> }
+                pub enum ShopError { SoldOut, #[wire("No Such")] NoSuch(String) }
+                #[derive(Default)]
+                pub struct Shop;
+                impl Shop {
+                    pub async fn buy(&self, name: String, #[default(1)] count: u32) -> Result<Item, ShopError> { todo!() }
+                    pub fn prices(&self, upto: u32) -> impl Iterator<Item = f32> { (0..upto).map(|n| n as f32) }
+                }
+            }
+        };
+        let rust = expand(Default::default(), module).unwrap().1.to_string();
+        for want in [
+            r#"# [cfg (not (target_arch = "wasm32"))] pub fn serve (activation : Shop , server : & mut :: plexus :: Server , at : & str)"#,
+            r#"impl :: plexus :: Serve for Shop"#,
+            r#"# [serde (rename = "in-stock")] pub in_stock"#,
+            r#"# [serde (rename = "photo")] # [serde (with = "::plexus::__private::bytes")] pub photo"#,
+            r#"# [serde (default , skip_serializing_if = "::std::option::Option::is_none")] pub note"#,
+            r#"# [serde (rename = "No Such")] NoSuch"#,
+            r#"__plexus_p . take :: < u32 > ("count" , :: std :: option :: Option :: Some ("1")) ?"#,
+            r#"& [("sold-out" , "sold-out" , "") , ("No Such" , "no-such" , "")]"#,
+            r#":: plexus :: __private :: futures :: stream :: iter"#,
+            r#"# [cfg (target_arch = "wasm32")] :: wit_bindgen :: generate !"#,
+        ] {
+            assert!(rust.contains(want), "missing {want}\n{rust}");
+        }
+    }
+
+    #[test]
+    fn bytes_inside_an_option_are_refused_natively() {
+        let module: ItemMod = syn::parse_quote! {
+            mod shop {
+                pub struct Item { pub photo: Option<Bytes> }
+                #[derive(Default)]
+                pub struct Shop;
+                impl Shop { pub fn get(&self) -> Item { todo!() } }
+            }
+        };
+        let rust = expand(Default::default(), module).unwrap().1.to_string();
+        assert!(rust.contains(r#"# [cfg (not (target_arch = "wasm32"))] const _ : () = { :: core :: compile_error ! { "bytes inside a list"#), "{rust}");
     }
 }
