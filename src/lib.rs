@@ -520,6 +520,23 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         quote!(#[cfg(target_arch = "wasm32")] const _: () = { #e };)
     });
     let world = format!("{}-activation", ir.activation);
+    // Each field of the activation's struct is offered to the runtime when it
+    // is served: a `Store` among them is claimed by the place, so its
+    // database is the activation's own (plexus's `store`).
+    let fields = items.iter().find_map(|i| match i {
+        Item::Struct(s) if s.ident == activation => Some(&s.fields),
+        _ => None,
+    });
+    let members: Vec<syn::Member> = fields.into_iter().flatten().enumerate().map(|(n, f)| match &f.ident {
+        Some(name) => syn::Member::Named(name.clone()),
+        None => syn::Member::Unnamed(n.into()),
+    }).collect();
+    let claims = (!members.is_empty()).then(|| quote! {
+        {
+            use ::plexus::__private::{ClaimNone as _, ClaimStore as _};
+            #((&self.#members).__plexus_claim(at);)*
+        }
+    });
     let kept = plain(&kept);
     let native_types = data.iter().zip(&ir.types).map(|(item, def)| native_type(&ir, item, def));
     // One file, two builds: to wasm, a component exporting the WIT, its
@@ -575,6 +592,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                     __P: ::std::marker::Send + 'static,
                     __G: for<'__a> ::std::ops::Fn(&'__a __P) -> &'__a Self + ::std::marker::Copy + ::std::marker::Send + ::std::marker::Sync + 'static,
                 {
+                    #claims
                     server.describe(at, IR).expect("the IR says its hash");
                     #(#served)*
                     #(#mounted)*
@@ -1076,6 +1094,8 @@ mod tests {
             r#"server . mount (& :: std :: format ! ("{}.{}" , at , "glaze") , { let __plexus_c : :: std :: boxed :: Box < dyn :: plexus :: Activation > = self . glaze () ; __plexus_c })"#,
             r#"server . mount (& :: std :: format ! ("{}.{}" , at , "supplier")"#,
             r#"# [cfg (target_arch = "wasm32")] const _ : () = { :: core :: compile_error ! { "children are not in a component yet"#,
+            // every field offered, before anything is registered: a Store among them is claimed by the place
+            r#"{ use :: plexus :: __private :: { ClaimNone as _ , ClaimStore as _ } ; (& self . kiln) . __plexus_claim (at) ; (& self . glaze) . __plexus_claim (at) ; } server . describe (at , IR)"#,
         ] {
             assert!(rust.contains(want), "missing {want}\n{rust}");
         }
