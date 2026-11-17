@@ -752,7 +752,7 @@ fn served_method(ir: &Ir, m: &Method, f: &syn::ImplItemFn, idents: &[syn::Ident]
         };
         quote! {
             let __plexus_local = __plexus_local.clone();
-            server.stream(&::std::format!("{}{}", at, #path), move |__plexus_body: ::plexus::Raw| {
+            ::plexus::__private::stream(server, &::std::format!("{}{}", at, #path), move |__plexus_body: ::plexus::Raw| {
                 #args
                 __plexus_local.stream(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*), __plexus_asks| async move {
                     ::plexus::__private::feed(__plexus_asks, #items, |__plexus_item: #item| #each).await
