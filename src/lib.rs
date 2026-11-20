@@ -669,8 +669,8 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 }
             }
             if !describe {
-                if context.is_some() || m.caller.is_some() {
-                    return err(&f.sig, "a child cannot be served under an activation context or take a caller");
+                if takes_context || m.caller.is_some() {
+                    return err(&f.sig, "a mounted child factory cannot take a context or caller");
                 }
                 mounted.push(mounted_child(&child, f, held)?);
             }
@@ -780,6 +780,8 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             #((&self.#members).__plexus_claim(at);)*
         }
     });
+    // Bootstrap may mount descendants after serving this activation.
+    let descendant_guard = context.as_ref().map(|context| guard_descendants(&ir, context, &activation));
     let kept = plain(&kept);
     let native_types = data.iter().zip(&ir.types).map(|(item, def)| native_type(&ir, item, def));
     // One file, two builds: to wasm, a component exporting the WIT, its
@@ -840,6 +842,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                     #claims
                     server.describe(at, IR).expect("the IR says its hash");
                     #(#served)*
+                    #descendant_guard
                     #(#mounted)*
                 }
             }
@@ -994,6 +997,47 @@ fn typed_failure(ir: &Ir, ty: &Ty) -> proc_macro2::TokenStream {
     quote!(::plexus::__private::failed(&__plexus_e, &[#(#cases),*]))
 }
 
+fn context_ty(context: &ActivationContext<'_>, activation: &syn::Ident) -> proc_macro2::TokenStream {
+    let name = context.name;
+    quote!(<#name as ::plexus::Context<#activation>>)
+}
+
+/// Resolve the context and check the gate on the thread owning the activation.
+fn make_context(ir: &Ir, context: &ActivationContext<'_>, ty: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    let open = context.open.zip(context.ir.fails.as_ref()).map(|(f, error)| {
+        let method = &f.sig.ident;
+        let failure = typed_failure(ir, error);
+        quote! {
+            __plexus_this.#method(&__plexus_context).map_err(|__plexus_e| #failure)?;
+        }
+    });
+    quote! {
+        let __plexus_this = __plexus_get(&*__plexus_a);
+        #ty::from_context(__plexus_this, __plexus_call.caller(), __plexus_call.keys())
+            .and_then(|__plexus_context| {
+                #open
+                ::std::result::Result::Ok(__plexus_context)
+            })
+    }
+}
+
+fn guard_descendants(ir: &Ir, context: &ActivationContext<'_>, activation: &syn::Ident) -> proc_macro2::TokenStream {
+    let ty = context_ty(context, activation);
+    let make = make_context(ir, context, &ty);
+    let required = context.requires_caller.then(|| quote!(__plexus_call.require_caller()?;));
+    quote! {
+        {
+            let __plexus_local = __plexus_local.clone();
+            server.guard_descendants(at, #ty::KEYS, move |__plexus_call| {
+                __plexus_local.validate(__plexus_call, move |__plexus_a: ::std::rc::Rc<__P>, __plexus_call| {
+                    #required
+                    { #make }.map(|_| ())
+                })
+            });
+        }
+    }
+}
+
 /// One method's registration on a `plexus::Server`, for a native build:
 /// its body read by the value layout (a wrong one fails `invalid-params`,
 /// naming the parameter, and the method does not run), the call made on
@@ -1039,30 +1083,11 @@ fn served_method(
     } else {
         quote!(__plexus_body: ::plexus::Raw)
     };
-    let context_ty = context.map(|c| {
-        let name = c.name;
-        quote!(<#name as ::plexus::Context<#activation>>)
-    });
+    let context_ty = context.map(|c| context_ty(c, activation));
     let require_caller = (m.caller == Some(Caller::Required)
         || context.is_some_and(|c| c.requires_caller))
         .then(|| quote!(__plexus_call.require_caller()));
-    let make_context = context.zip(context_ty.as_ref()).map(|(c, ty)| {
-        let open = c.open.zip(c.ir.fails.as_ref()).map(|(f, error)| {
-            let method = &f.sig.ident;
-            let failure = typed_failure(ir, error);
-            quote! {
-                __plexus_this.#method(&__plexus_context).map_err(|__plexus_e| #failure)?;
-            }
-        });
-        quote! {
-            let __plexus_this = __plexus_get(&*__plexus_a);
-            #ty::from_context(__plexus_this, __plexus_call.caller(), __plexus_call.keys())
-                .and_then(|__plexus_context| {
-                    #open
-                    ::std::result::Result::Ok(__plexus_context)
-                })
-        }
-    });
+    let make_context = context.zip(context_ty.as_ref()).map(|(c, ty)| make_context(ir, c, ty));
     let tokens = if let Some((item, iterator)) = stream_of(&f.sig.output) {
         let items = if iterator { quote!(::plexus::__private::futures::stream::iter(#call)) } else { call };
         let each = match &m.returns {
@@ -1435,9 +1460,10 @@ mod tests {
         assert_eq!(ir.methods[0].params[0].name, "text");
         let rust = tokens.to_string();
         assert!(rust.contains("must be built natively"));
-        assert_eq!(rust.matches(". open (& __plexus_context)").count(), 2);
+        assert_eq!(rust.matches(". open (& __plexus_context)").count(), 3);
         assert!(rust.contains("method_with_context"));
         assert!(rust.contains("stream_with_context"));
+        assert!(rust.contains("guard_descendants"));
     }
 
     #[test]
@@ -1450,19 +1476,66 @@ mod tests {
     }
 
     #[test]
-    fn contextual_children_fail_closed_at_expansion() {
+    fn contextual_children_register_an_ancestor_guard() {
         let module: ItemMod = syn::parse_quote! {
             mod studio {
-                pub struct StudioCx { studio_id: u32 }
+                pub struct StudioCx {
+                    #[from(caller)]
+                    caller: Caller,
+                    studio_id: u32,
+                }
+                pub enum Denied { Missing }
                 pub struct Studio;
                 impl Studio {
+                    #[open]
+                    pub fn open(&self, cx: &StudioCx) -> Result<(), Denied> { todo!() }
+                    pub fn status(&self) -> u32 { todo!() }
                     #[child]
                     pub fn kiln(&self) -> &Kiln { todo!() }
+                    #[child]
+                    pub fn glaze(&self) -> Box<dyn Activation> { todo!() }
+                    #[child]
+                    pub fn supplier(&self) -> Box<dyn Glazes> { todo!() }
                 }
             }
         };
-        let e = expand(quote!(context = StudioCx), module).unwrap_err().to_string();
-        assert!(e.contains("a child cannot be served under an activation context"), "{e}");
+        let (ir, tokens) = expand(quote!(context = StudioCx), module).unwrap();
+        assert_eq!(ir.children.len(), 3);
+        assert!(ir.children.iter().all(|child| child.key.is_none()));
+        assert!(ir.methods[0].params.is_empty());
+        let rust = tokens.to_string();
+        assert_eq!(rust.matches("server . guard_descendants").count(), 1);
+        assert_eq!(rust.matches(". open (& __plexus_context)").count(), 2);
+        for want in [
+            "must be built natively",
+            "guard_descendants (at , < StudioCx as :: plexus :: Context < Studio >> :: KEYS",
+            "__plexus_local . validate (__plexus_call",
+            "__plexus_call . require_caller () ?",
+            "__plexus_call . caller () , __plexus_call . keys ()",
+            ":: plexus :: __private :: failed (& __plexus_e",
+            "< Kiln as :: plexus :: Serve > :: held",
+            "server . mount",
+        ] {
+            assert!(rust.contains(want), "missing {want}\n{rust}");
+        }
+    }
+
+    #[test]
+    fn mounted_factories_cannot_receive_request_credentials() {
+        for argument in [quote!(cx: &StudioCx), quote!(caller: &Caller)] {
+            let module: ItemMod = syn::parse_quote! {
+                mod studio {
+                    pub struct StudioCx { studio_id: u32 }
+                    pub struct Studio;
+                    impl Studio {
+                        #[child]
+                        pub fn kiln(&self, #argument) -> &Kiln { todo!() }
+                    }
+                }
+            };
+            let e = expand(quote!(context = StudioCx), module).unwrap_err().to_string();
+            assert_eq!(e, "a mounted child factory cannot take a context or caller");
+        }
     }
 
     #[test]
@@ -1509,6 +1582,18 @@ mod tests {
         let e = expand(Default::default(), module.clone()).unwrap_err().to_string();
         assert_eq!(e, "a child per key is described, not served yet: use #[activation(describe)]");
         assert!(expand(quote!(describe), module).is_ok());
+        let contextual: ItemMod = syn::parse_quote! {
+            mod studio {
+                pub struct StudioCx { studio_id: u32 }
+                pub struct Studio;
+                impl Studio {
+                    #[child]
+                    pub fn shelf(&self, number: u32) -> &Kiln { todo!() }
+                }
+            }
+        };
+        let e = expand(quote!(context = StudioCx), contextual).unwrap_err().to_string();
+        assert_eq!(e, "a child per key is described, not served yet: use #[activation(describe)]");
         let owned: ItemMod = syn::parse_quote! {
             mod studio { pub struct Studio; impl Studio { #[child] pub fn kiln(&self) -> Kiln { todo!() } } }
         };
