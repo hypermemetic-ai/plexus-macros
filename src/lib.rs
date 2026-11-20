@@ -35,6 +35,65 @@ pub fn activation(args: TokenStream, input: TokenStream) -> TokenStream {
     expand(args.into(), module).map(|(_, tokens)| tokens).unwrap_or_else(|e| e.to_compile_error()).into()
 }
 
+#[proc_macro_derive(Context, attributes(from))]
+pub fn context(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    derive_context(input).unwrap_or_else(|e| e.to_compile_error()).into()
+}
+
+fn from_caller(field: &syn::Field) -> Res<bool> {
+    let mut sources = field.attrs.iter().filter(|attr| attr.path().is_ident("from"));
+    let Some(source) = sources.next() else { return Ok(false) };
+    if let Some(duplicate) = sources.next() {
+        return err(duplicate, "a context field has only one source");
+    }
+    if source.parse_args::<syn::Ident>()? != "caller" {
+        return err(source, "the context field source is #[from(caller)]");
+    }
+    Ok(true)
+}
+
+fn derive_context(input: syn::DeriveInput) -> Res<proc_macro2::TokenStream> {
+    let syn::Data::Struct(data) = &input.data else { return err(&input, "a context is a struct with named fields") };
+    let Fields::Named(fields) = &data.fields else { return err(&input, "a context is a struct with named fields") };
+    let name = &input.ident;
+    let activation = format_ident!("__PlexusActivation");
+    let mut generics = input.generics.clone();
+    generics.params.push(syn::parse_quote!(#activation));
+    let (_, type_generics, _) = input.generics.split_for_impl();
+    let (mut keys, mut initializers) = (Vec::new(), Vec::new());
+    for field in &fields.named {
+        let ident = field.ident.as_ref().expect("named");
+        let ty = &field.ty;
+        let value = if from_caller(field)? {
+            generics.make_where_clause().predicates.push(syn::parse_quote!(#ty: ::plexus::FromCaller<#activation>));
+            quote!(<#ty as ::plexus::FromCaller<#activation>>::from_caller(activation, ::plexus::require_caller(caller)?)?)
+        } else {
+            let key = kebab(ident);
+            if keys.contains(&key) {
+                return Err(Error::new(ident.span(), format!("duplicate context key `{key}`")));
+            }
+            keys.push(key.clone());
+            generics.make_where_clause().predicates.push(syn::parse_quote!(#ty: ::std::str::FromStr));
+            quote!(keys.parse::<#ty>(#key)?)
+        };
+        initializers.push(quote!(#ident: #value));
+    }
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
+    Ok(quote! {
+        impl #impl_generics ::plexus::Context<#activation> for #name #type_generics #where_clause {
+            const KEYS: &'static [&'static str] = &[#(#keys),*];
+            fn from_context(
+                activation: &#activation,
+                caller: ::std::option::Option<&::plexus::Caller>,
+                keys: &::plexus::ContextKeys,
+            ) -> ::std::result::Result<Self, ::plexus::Failure> {
+                Ok(Self { #(#initializers),* })
+            }
+        }
+    })
+}
+
 fn err<T>(at: impl Spanned, msg: &str) -> Res<T> {
     Err(Error::new(at.span(), msg))
 }
@@ -61,7 +120,7 @@ fn doc(attrs: &[Attribute]) -> String {
 }
 
 /// The attributes this macro reads and Rust does not know.
-const OURS: [&str; 4] = ["default", "target", "child", "limit"];
+const OURS: [&str; 5] = ["default", "target", "child", "limit", "open"];
 
 fn attr<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a Attribute> {
     attrs.iter().find(|a| a.path().is_ident(name))
@@ -240,9 +299,9 @@ fn returns(ret: &ReturnType) -> Res<(Returns, Option<Ty>)> {
 type RoleSpans = Vec<(String, String, proc_macro2::Span)>;
 
 /// `roles(viewer = ["list"], editor = [viewer, "open"])` of the attribute.
-fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Role>, RoleSpans)> {
+fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Role>, RoleSpans, Option<syn::Ident>)> {
     let metas = syn::parse::Parser::parse2(Punctuated::<Meta, Token![,]>::parse_terminated, args)?;
-    let (mut describe, mut out, mut spans) = (false, Vec::new(), Vec::new());
+    let (mut describe, mut out, mut spans, mut context) = (false, Vec::new(), Vec::new(), None);
     for m in metas {
         match &m {
             Meta::Path(p) if p.is_ident("describe") => describe = true,
@@ -261,10 +320,17 @@ fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Rol
                     out.push(role);
                 }
             }
-            other => return err(other, "`describe` or `roles(..)`"),
+            Meta::NameValue(nv) if nv.path.is_ident("context") => {
+                let Expr::Path(path) = &nv.value else { return err(&nv.value, "context names a struct in this activation") };
+                let Some(name) = path.path.get_ident() else { return err(path, "context names a struct in this activation") };
+                if context.replace(name.clone()).is_some() {
+                    return err(nv, "an activation has only one context");
+                }
+            }
+            other => return err(other, "`describe`, `roles(..)` or `context = Type`"),
         }
     }
-    Ok((describe, out, spans))
+    Ok((describe, out, spans, context))
 }
 
 /// The module with this macro's own attributes taken off, so it is plain Rust.
@@ -309,21 +375,156 @@ fn fields_of(named: &syn::FieldsNamed) -> Res<Vec<Field>> {
     }).collect()
 }
 
+/// The context and its optional preflight method, neither of which is on the wire.
+struct ActivationContext<'a> {
+    name: &'a syn::Ident,
+    open: Option<&'a syn::ImplItemFn>,
+    ir: plexus_ir::Context,
+    caller_types: Vec<syn::Ident>,
+    key_types: Vec<proc_macro2::TokenStream>,
+    requires_caller: bool,
+}
+
+fn token_mentions(tokens: proc_macro2::TokenStream, name: &syn::Ident) -> bool {
+    tokens.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(i) => i == *name,
+        proc_macro2::TokenTree::Group(g) => token_mentions(g.stream(), name),
+        _ => false,
+    })
+}
+
+fn data_name(item: &Item) -> Option<&syn::Ident> {
+    match item {
+        Item::Struct(s) => Some(&s.ident),
+        Item::Enum(e) => Some(&e.ident),
+        Item::Type(t) => Some(&t.ident),
+        _ => None,
+    }
+}
+
+fn private_context_types<'a>(
+    context: &ActivationContext<'_>,
+    activation: &syn::Ident,
+    items: &'a [Item],
+    imp: &syn::ItemImpl,
+) -> Vec<&'a syn::Ident> {
+    // Ordinary data definitions and method signatures still expose types
+    // that are also used in the context.
+    let mut wire: Vec<_> = imp.items.iter().filter_map(|item| match item {
+        ImplItem::Fn(f) if matches!(f.vis, syn::Visibility::Public(_))
+            || attr(&f.attrs, "open").is_some() => Some(f.sig.to_token_stream()),
+        _ => None,
+    }).collect();
+    wire.extend(context.key_types.iter().cloned());
+    let mut candidates = Vec::new();
+    for item in items {
+        let Some(name) = data_name(item) else { continue };
+        if name == context.name || name == activation {
+            continue;
+        }
+        let tokens = item.to_token_stream();
+        if context.caller_types.contains(name) {
+            candidates.push((name, tokens));
+        } else {
+            wire.push(tokens);
+        }
+    }
+    // Include dependencies of any otherwise context-only type used on the wire.
+    while let Some(i) = candidates.iter().position(|(name, _)|
+        wire.iter().any(|tokens| token_mentions(tokens.clone(), name))) {
+        wire.push(candidates.swap_remove(i).1);
+    }
+    candidates.into_iter().map(|(name, _)| name).collect()
+}
+
+fn is_named(t: &Type, name: &syn::Ident) -> bool {
+    last_segment(t).is_some_and(|s| s.ident == *name)
+}
+
+fn is_shared_ref(t: &Type, name: &syn::Ident) -> bool {
+    matches!(t, Type::Reference(r) if r.mutability.is_none() && matches!(&*r.elem, Type::Path(_)) && is_named(&r.elem, name))
+}
+
+fn activation_context<'a>(name: Option<&'a syn::Ident>, items: &'a [Item], imp: &'a syn::ItemImpl) -> Res<Option<ActivationContext<'a>>> {
+    let opens = imp.items.iter().filter_map(|item| match item {
+        ImplItem::Fn(f) if attr(&f.attrs, "open").is_some() => Some(f),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let Some(name) = name else {
+        return match opens.first() {
+            Some(f) => err(&f.sig, "#[open] requires #[activation(context = Type)]"),
+            None => Ok(None),
+        };
+    };
+    let found = items.iter().find_map(|item| match item {
+        Item::Struct(s) if s.ident == *name => Some(s),
+        _ => None,
+    });
+    let Some(found) = found else { return err(name, "declare the context struct inside this activation") };
+    let Fields::Named(fields) = &found.fields else { return err(found, "a context is a struct with named fields") };
+    let mut context = ActivationContext {
+        name,
+        open: opens.first().copied(),
+        ir: plexus_ir::Context { keys: Vec::new(), fails: None },
+        caller_types: Vec::new(),
+        key_types: Vec::new(),
+        requires_caller: false,
+    };
+    for field in &fields.named {
+        if from_caller(field)? {
+            context.requires_caller = true;
+            context.caller_types.extend(last_segment(&field.ty).map(|s| s.ident.clone()));
+        } else {
+            let ident = field.ident.as_ref().expect("named");
+            let name = kebab(ident);
+            if context.ir.keys.iter().any(|key| key.name == name) {
+                return Err(Error::new(ident.span(), format!("duplicate context key `{name}`")));
+            }
+            context.key_types.push(field.ty.to_token_stream());
+            context.ir.keys.push(Field { name, doc: doc(&field.attrs), ty: Some(ty(&field.ty)?), ..Field::default() });
+        }
+    }
+    if opens.len() > 1 {
+        return err(&opens[1].sig, "an activation has only one #[open]");
+    }
+    if let Some(f) = context.open {
+        let (recv, ctx) = (f.sig.inputs.first(), f.sig.inputs.iter().nth(1));
+        let valid_recv = matches!(recv, Some(FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none() && r.colon_token.is_none());
+        let valid_ctx = matches!(ctx, Some(FnArg::Typed(t)) if is_shared_ref(&t.ty, name));
+        if f.sig.asyncness.is_some() || !valid_recv || !valid_ctx || f.sig.inputs.len() != 2 {
+            return err(&f.sig, "#[open] takes &self and a shared reference to the activation context");
+        }
+        let ReturnType::Type(_, output) = &f.sig.output else { return err(&f.sig, "#[open] returns Result<(), E>") };
+        let Some((ok, failure)) = result_of(output)? else { return err(output, "#[open] returns Result<(), E>") };
+        if !matches!(ok, Type::Tuple(t) if t.elems.is_empty()) {
+            return err(ok, "#[open] returns Result<(), E>");
+        }
+        context.ir.fails = Some(ty(failure)?);
+    }
+    Ok(Some(context))
+}
+
 /// The module's IR, and the module as a component (or, described, as itself).
 fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macro2::TokenStream)> {
     let name = kebab(&module.ident);
-    let (describe, roles, role_spans) = roles(args, &name)?;
+    let (describe, roles, role_spans, context_name) = roles(args, &name)?;
     let Some((_, items)) = &module.content else { return err(&module, "#[activation] goes on `mod name { .. }` with its body") };
     let Some(imp) = items.iter().find_map(|i| if let Item::Impl(i) = i { i.trait_.is_none().then_some(i) } else { None }) else {
         return err(&module, "the module needs one `impl` block: the activation's methods");
     };
     let Type::Path(self_ty) = &*imp.self_ty else { return err(&imp.self_ty, "the activation is a named type") };
     let activation = self_ty.path.segments.last().expect("a path has a segment").ident.clone();
-    let mut ir = Ir { activation: name.clone(), doc: doc(&module.attrs), types: Vec::new(), methods: Vec::new(), children: Vec::new(), roles };
+    let context = activation_context(context_name.as_ref(), items, imp)?;
+    let mut ir = Ir { activation: name.clone(), doc: doc(&module.attrs), types: Vec::new(), methods: Vec::new(), children: Vec::new(), roles, context: context.as_ref().map(|c| c.ir.clone()) };
 
     // Data: every other struct, enum and alias goes into the IR.
     let (mut kept, mut names, mut data) = (Vec::new(), Vec::new(), Vec::new());
+    let private_context = context.as_ref().map(|c| private_context_types(c, &activation, items, imp)).unwrap_or_default();
     for item in items {
+        if data_name(item).is_some_and(|n| context.as_ref().is_some_and(|c| n == c.name) || private_context.contains(&n)) {
+            kept.push(item.clone());
+            continue;
+        }
         match item {
             // A struct with no fields is no data: an activation of its own, held as a child.
             Item::Struct(s) if s.ident != activation && !matches!(s.fields, Fields::Unit) => {
@@ -373,7 +574,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     let (mut glue, mut served, mut mounted) = (Vec::new(), Vec::new(), Vec::new());
     for item in &imp.items {
         let ImplItem::Fn(f) = item else { continue };
-        if !matches!(f.vis, syn::Visibility::Public(_)) {
+        if attr(&f.attrs, "open").is_some() || !matches!(f.vis, syn::Visibility::Public(_)) {
             continue;
         }
         let Some(FnArg::Receiver(recv)) = f.sig.inputs.first() else { continue };
@@ -382,18 +583,48 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         }
         let method = &f.sig.ident;
         let mut m = Method { name: kebab(method), doc: doc(&f.attrs), params: Vec::new(), returns: Returns::Nothing, fails: None, input: None, progress: None, caller: None, grant: None, target: None, waits: f.sig.asyncness.is_some() || stream_item(&f.sig.output).is_some() };
-        let (mut idents, mut tys) = (Vec::new(), Vec::new());
+        let (mut idents, mut tys, mut call_args) = (Vec::new(), Vec::new(), Vec::new());
+        let mut takes_context = false;
+        let caller_type = format_ident!("Caller");
         for arg in f.sig.inputs.iter().skip(1) {
             let FnArg::Typed(t) = arg else { continue };
             let Pat::Ident(p) = &*t.pat else { return err(&t.pat, "a parameter is a plain name") };
-            // Three kinds of parameter are not sent as parameters.
             let seg = last_segment(&t.ty);
-            let inner = |seg: &syn::PathSegment| type_args(&seg.arguments).first().copied().map(ty).transpose();
+            let inner_type = seg.and_then(|s| type_args(&s.arguments).first().copied());
+            let caller = if is_named(&t.ty, &caller_type) {
+                Some((Caller::Required, &*t.ty))
+            } else if seg.is_some_and(|s| s.ident == "Option") {
+                inner_type.filter(|t| is_named(t, &caller_type)).map(|t| (Caller::Optional, t))
+            } else {
+                None
+            };
+            if let Some((caller, inner)) = caller {
+                if !describe && (!is_shared_ref(inner, &caller_type)
+                    || (caller == Caller::Optional && !matches!(&*t.ty, Type::Path(_)))) {
+                    return err(&t.ty, "an injected caller is &Caller or Option<&Caller>");
+                }
+                if m.caller.is_some() {
+                    return err(&t.ty, "a method takes at most one caller");
+                }
+                call_args.push(match caller {
+                    Caller::Required => quote!(__plexus_required_caller),
+                    Caller::Optional => quote!(__plexus_call.caller()),
+                });
+                m.caller = Some(caller);
+                continue;
+            }
+            if let Some(c) = context.as_ref().filter(|c| is_named(&t.ty, c.name)) {
+                if takes_context || !is_shared_ref(&t.ty, c.name) {
+                    return err(&t.ty, "a method takes at most one shared reference to the activation context");
+                }
+                takes_context = true;
+                call_args.push(quote!(&__plexus_context));
+                continue;
+            }
             match seg.map(|s| s.ident.to_string()).as_deref() {
-                Some("Caller") => m.caller = Some(Caller::Required),
-                Some("Option") if seg.and_then(|s| type_args(&s.arguments).first().copied()).and_then(last_segment).is_some_and(|s| s.ident == "Caller") => m.caller = Some(Caller::Optional),
-                Some("Input") => m.input = inner(seg.expect("a segment"))?,
-                Some("Progress") => m.progress = inner(seg.expect("a segment"))?,
+                Some("Input") if describe => m.input = inner_type.map(ty).transpose()?,
+                Some("Progress") if describe => m.progress = inner_type.map(ty).transpose()?,
+                Some("Input" | "Progress") => return err(&t.ty, "a stream in and progress are only described: use #[activation(describe)]"),
                 _ => {
                     let mut field = Field { name: kebab(&p.ident), ty: Some(ty(&t.ty)?), ..Field::default() };
                     extras(&t.attrs, &mut field)?;
@@ -403,11 +634,9 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                     m.params.push(field);
                     idents.push(p.ident.clone());
                     tys.push((*t.ty).clone());
-                    continue;
+                    let ident = &p.ident;
+                    call_args.push(quote!(#ident));
                 }
-            }
-            if !describe {
-                return err(&t.ty, "the caller, a stream in and progress are not in a component yet: use #[activation(describe)]");
             }
         }
         if let Some(a) = attr(&f.attrs, "child") {
@@ -440,6 +669,9 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 }
             }
             if !describe {
+                if context.is_some() || m.caller.is_some() {
+                    return err(&f.sig, "a child cannot be served under an activation context or take a caller");
+                }
                 mounted.push(mounted_child(&child, f, held)?);
             }
             ir.children.push(child);
@@ -450,7 +682,12 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             m.grant = Some(format!("{name}.{}", m.name));
         }
         if !describe {
-            served.push(served_method(&ir, &m, f, &idents, &tys));
+            served.push(served_method(&ir, &m, f, &idents, &tys, &call_args, context.as_ref(), &activation));
+        }
+        if context.as_ref().is_some_and(|c| c.requires_caller) {
+            m.caller = Some(Caller::Required);
+        }
+        if !describe && m.caller.is_none() && context.is_none() {
             let out = &f.sig.output;
             if let Some((item, iterator)) = stream_of(&f.sig.output) {
                 // A stream out: a task of its own walks the method's stream
@@ -514,6 +751,12 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         let items = plain(items).into_iter().map(|i| i.into_token_stream());
         return Ok((ir, quote! { #(#attrs)* #vis mod #ident { #(#items)* #consts } }));
     }
+    let native_only = ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some());
+    let native_module = native_only.then(|| quote!(#[cfg(not(target_arch = "wasm32"))]));
+    let native_error = native_only.then(|| {
+        let e = Error::new(module.ident.span(), "activations using a caller or context must be built natively").to_compile_error();
+        quote!(#[cfg(target_arch = "wasm32")] const _: () = { #e };)
+    });
     // Natively a child is served; a component holds none yet.
     let no_component = (!ir.children.is_empty()).then(|| {
         let e = Error::new(module.ident.span(), "children are not in a component yet: build this activation natively, or use #[activation(describe)]").to_compile_error();
@@ -543,6 +786,8 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     // data types wit-bindgen's; natively, the data types as written, read
     // and written by the value layout, and `serve`.
     let tokens = quote! {
+        #native_error
+        #native_module
         #(#attrs)*
         #vis mod #ident {
             #[cfg(target_arch = "wasm32")]
@@ -733,11 +978,36 @@ fn mounted_child(child: &Child, f: &syn::ImplItemFn, held: &Type) -> Res<proc_ma
     })
 }
 
+/// The error translation shared by an open check and a method body.
+fn typed_failure(ir: &Ir, ty: &Ty) -> proc_macro2::TokenStream {
+    let cases = match resolved(ir, ty) {
+        Ty::Named(name) => ir.types.iter().find(|d| d.name == *name).map(|d| &d.shape),
+        _ => None,
+    };
+    let cases: Vec<_> = match cases {
+        Some(Shape::Enum(cs) | Shape::Variant(cs)) => cs.iter().map(|c| {
+            let (wire, name, doc) = (c.wire.as_deref().unwrap_or(&c.name), &c.name, &c.doc);
+            quote!((#wire, #name, #doc))
+        }).collect(),
+        _ => Vec::new(),
+    };
+    quote!(::plexus::__private::failed(&__plexus_e, &[#(#cases),*]))
+}
+
 /// One method's registration on a `plexus::Server`, for a native build:
 /// its body read by the value layout (a wrong one fails `invalid-params`,
 /// naming the parameter, and the method does not run), the call made on
 /// the activation's thread, and its answer, items or typed failure written.
-fn served_method(ir: &Ir, m: &Method, f: &syn::ImplItemFn, idents: &[syn::Ident], tys: &[Type]) -> proc_macro2::TokenStream {
+fn served_method(
+    ir: &Ir,
+    m: &Method,
+    f: &syn::ImplItemFn,
+    idents: &[syn::Ident],
+    tys: &[Type],
+    call_args: &[proc_macro2::TokenStream],
+    context: Option<&ActivationContext<'_>>,
+    activation: &syn::Ident,
+) -> proc_macro2::TokenStream {
     let (method, path) = (&f.sig.ident, format!(".{}", m.name));
     let wires: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
     let mut refused = Vec::new();
@@ -761,21 +1031,74 @@ fn served_method(ir: &Ir, m: &Method, f: &syn::ImplItemFn, idents: &[syn::Ident]
             .and_then(|__plexus_p| ::std::result::Result::Ok((#(#takes,)*)));
     };
     let wait = f.sig.asyncness.is_some().then(|| quote!(.await));
-    let call = quote!(__plexus_get(&*__plexus_a).#method(#(#idents),*) #wait);
+    let call = quote!(__plexus_get(&*__plexus_a).#method(#(#call_args),*) #wait);
+    let path = quote!(&::std::format!("{}{}", at, #path));
+    let needs_call = context.is_some() || m.caller.is_some();
+    let handler_args = if needs_call {
+        quote!(__plexus_body: ::plexus::Raw, __plexus_call)
+    } else {
+        quote!(__plexus_body: ::plexus::Raw)
+    };
+    let context_ty = context.map(|c| {
+        let name = c.name;
+        quote!(<#name as ::plexus::Context<#activation>>)
+    });
+    let require_caller = (m.caller == Some(Caller::Required)
+        || context.is_some_and(|c| c.requires_caller))
+        .then(|| quote!(__plexus_call.require_caller()));
+    let make_context = context.zip(context_ty.as_ref()).map(|(c, ty)| {
+        let open = c.open.zip(c.ir.fails.as_ref()).map(|(f, error)| {
+            let method = &f.sig.ident;
+            let failure = typed_failure(ir, error);
+            quote! {
+                __plexus_this.#method(&__plexus_context).map_err(|__plexus_e| #failure)?;
+            }
+        });
+        quote! {
+            let __plexus_this = __plexus_get(&*__plexus_a);
+            #ty::from_context(__plexus_this, __plexus_call.caller(), __plexus_call.keys())
+                .and_then(|__plexus_context| {
+                    #open
+                    ::std::result::Result::Ok(__plexus_context)
+                })
+        }
+    });
     let tokens = if let Some((item, iterator)) = stream_of(&f.sig.output) {
         let items = if iterator { quote!(::plexus::__private::futures::stream::iter(#call)) } else { call };
         let each = match &m.returns {
             Returns::Stream(t) => write(t, quote!(__plexus_item)),
             _ => unreachable!("a stream returns a stream"),
         };
-        quote! {
-            let __plexus_local = __plexus_local.clone();
-            ::plexus::__private::stream(server, &::std::format!("{}{}", at, #path), move |__plexus_body: ::plexus::Raw| {
+        let (register, scope) = if let Some(ty) = &context_ty {
+            (quote!(::plexus::__private::stream_with_context), quote!(at, #ty::KEYS,))
+        } else if needs_call {
+            (quote!(::plexus::__private::stream_with_caller), quote!())
+        } else {
+            (quote!(::plexus::__private::stream), quote!())
+        };
+        let reject = |name: proc_macro2::TokenStream, make: proc_macro2::TokenStream| quote! {
+            let #name = match { #make } {
+                ::std::result::Result::Ok(value) => value,
+                ::std::result::Result::Err(failure) => {
+                    return ::plexus::__private::fail_stream(__plexus_asks, failure);
+                }
+            };
+        };
+        let required = require_caller.map(|make| reject(quote!(__plexus_required_caller), make));
+        let context = make_context.map(|make| reject(quote!(__plexus_context), make));
+        let handler = quote! {
+            move |#handler_args| {
                 #args
                 __plexus_local.stream(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*), __plexus_asks| async move {
+                    #required
+                    #context
                     ::plexus::__private::feed(__plexus_asks, #items, |__plexus_item: #item| #each).await
                 })
-            });
+            }
+        };
+        quote! {
+            let __plexus_local = __plexus_local.clone();
+            #register(server, #path, #scope #handler);
         }
     } else {
         let ok = match &m.returns {
@@ -785,26 +1108,33 @@ fn served_method(ir: &Ir, m: &Method, f: &syn::ImplItemFn, idents: &[syn::Ident]
         let answer = match &m.fails {
             None => quote!({ let __plexus_v = #call; #ok }),
             Some(e) => {
-                let cases = match ir.types.iter().find(|d| Ty::Named(d.name.clone()) == *e).map(|d| &d.shape) {
-                    Some(Shape::Enum(cs) | Shape::Variant(cs)) => cs.iter().map(|c| {
-                        let (wire, name, doc) = (c.wire.as_deref().unwrap_or(&c.name), &c.name, &c.doc);
-                        quote!((#wire, #name, #doc))
-                    }).collect(),
-                    _ => Vec::new(),
-                };
+                let failure = typed_failure(ir, e);
                 quote! {
                     match #call {
                         ::std::result::Result::Ok(__plexus_v) => #ok,
-                        ::std::result::Result::Err(__plexus_e) => ::std::result::Result::Err(::plexus::__private::failed(&__plexus_e, &[#(#cases),*])),
+                        ::std::result::Result::Err(__plexus_e) => ::std::result::Result::Err(#failure),
                     }
                 }
             }
         };
+        let (register, scope) = if let Some(ty) = &context_ty {
+            (quote!(method_with_context), quote!(at, #ty::KEYS,))
+        } else if needs_call {
+            (quote!(method_with_caller), quote!())
+        } else {
+            (quote!(method), quote!())
+        };
+        let required = require_caller.map(|make| quote!(let __plexus_required_caller = #make?;));
+        let context = make_context.map(|make| quote!(let __plexus_context = { #make }?;));
         quote! {
             let __plexus_local = __plexus_local.clone();
-            server.method(&::std::format!("{}{}", at, #path), move |__plexus_body: ::plexus::Raw| {
+            server.#register(#path, #scope move |#handler_args| {
                 #args
-                __plexus_local.call(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*)| async move { #answer })
+                __plexus_local.call(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*)| async move {
+                    #required
+                    #context
+                    #answer
+                })
             });
         }
     };
@@ -1070,6 +1400,69 @@ mod tests {
         ] {
             assert!(rust.contains(want), "missing {want}\n{rust}");
         }
+    }
+
+    #[test]
+    fn context_describes_only_wire_types_and_keys() {
+        let module: ItemMod = syn::parse_quote! {
+            mod studio {
+                #[derive(plexus::Context)]
+                pub struct StudioCx {
+                    #[from(caller)]
+                    user: User,
+                    studio_id: u32,
+                }
+                struct User(String);
+                pub enum Denied { Missing }
+                pub struct Studio;
+                impl Studio {
+                    #[open]
+                    pub fn open(&self, cx: &StudioCx) -> Result<(), Denied> { todo!() }
+                    pub fn query(&self, cx: &StudioCx, text: String) -> u32 { todo!() }
+                    pub fn events(&self) -> impl Iterator<Item = u32> { todo!() }
+                }
+            }
+        };
+        let (ir, tokens) = expand(quote!(context = StudioCx), module).unwrap();
+        assert_eq!(ir.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["denied"]);
+        let context = ir.context.unwrap();
+        assert_eq!(context.keys[0].name, "studio-id");
+        assert_eq!(context.keys[0].ty, Some(Ty::Prim("u32")));
+        assert_eq!(context.fails, Some(Ty::Named("denied".into())));
+        assert_eq!(ir.methods.len(), 2);
+        assert!(ir.methods.iter().all(|m| m.caller == Some(Caller::Required)));
+        assert_eq!(ir.methods[0].params.len(), 1);
+        assert_eq!(ir.methods[0].params[0].name, "text");
+        let rust = tokens.to_string();
+        assert!(rust.contains("must be built natively"));
+        assert_eq!(rust.matches(". open (& __plexus_context)").count(), 2);
+        assert!(rust.contains("method_with_context"));
+        assert!(rust.contains("stream_with_context"));
+    }
+
+    #[test]
+    fn context_keys_must_have_distinct_wire_names() {
+        let input: syn::DeriveInput = syn::parse_quote! {
+            struct StudioCx { studio_id: u32, studio__id: u32 }
+        };
+        let e = derive_context(input).unwrap_err().to_string();
+        assert_eq!(e, "duplicate context key `studio-id`");
+    }
+
+    #[test]
+    fn contextual_children_fail_closed_at_expansion() {
+        let module: ItemMod = syn::parse_quote! {
+            mod studio {
+                pub struct StudioCx { studio_id: u32 }
+                pub struct Studio;
+                impl Studio {
+                    #[child]
+                    pub fn kiln(&self) -> &Kiln { todo!() }
+                }
+            }
+        };
+        let e = expand(quote!(context = StudioCx), module).unwrap_err().to_string();
+        assert!(e.contains("a child cannot be served under an activation context"), "{e}");
     }
 
     #[test]
