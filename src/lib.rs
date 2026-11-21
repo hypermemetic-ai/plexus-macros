@@ -15,8 +15,8 @@
 //!   `plexus::Server`, for `plexus::main`.
 //! - `#[activation(describe)]`: the module is left as ordinary Rust and gains
 //!   `IR`, `HASH`, `WIT` and `CLIENT_TS`. Everything the IR can say is read; nothing is
-//!   wired to run. This is where the caller, grants, roles, children,
-//!   progress and a stream in can be written today.
+//!   wired to run. Native serving supports callers, contexts, mounted children, and
+//!   credit-paced input streams. Progress is currently descriptive.
 
 use heck::ToKebabCase;
 use plexus_ir::{Caller, Child, Deprecated, Field, Held, Ir, Method, Returns, Role, Shape, Ty, TypeDef};
@@ -25,7 +25,10 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{Attribute, Error, Expr, Fields, FnArg, GenericArgument, ImplItem, Item, ItemMod, Lit, Meta, MetaNameValue, Pat, PathArguments, ReturnType, Token, Type, TypeParamBound};
+use syn::{Attribute, Error, Expr, Fields, FnArg, GenericArgument, ImplItem, Item, ItemMod, Lit, Meta, MetaNameValue, PathArguments, ReturnType, Token, Type, TypeParamBound};
+
+mod method_args;
+use method_args::MethodArgs;
 
 type Res<T> = Result<T, Error>;
 
@@ -583,63 +586,11 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         }
         let method = &f.sig.ident;
         let mut m = Method { name: kebab(method), doc: doc(&f.attrs), params: Vec::new(), returns: Returns::Nothing, fails: None, input: None, progress: None, caller: None, grant: None, target: None, waits: f.sig.asyncness.is_some() || stream_item(&f.sig.output).is_some() };
-        let (mut idents, mut tys, mut call_args) = (Vec::new(), Vec::new(), Vec::new());
-        let mut takes_context = false;
-        let caller_type = format_ident!("Caller");
-        for arg in f.sig.inputs.iter().skip(1) {
-            let FnArg::Typed(t) = arg else { continue };
-            let Pat::Ident(p) = &*t.pat else { return err(&t.pat, "a parameter is a plain name") };
-            let seg = last_segment(&t.ty);
-            let inner_type = seg.and_then(|s| type_args(&s.arguments).first().copied());
-            let caller = if is_named(&t.ty, &caller_type) {
-                Some((Caller::Required, &*t.ty))
-            } else if seg.is_some_and(|s| s.ident == "Option") {
-                inner_type.filter(|t| is_named(t, &caller_type)).map(|t| (Caller::Optional, t))
-            } else {
-                None
-            };
-            if let Some((caller, inner)) = caller {
-                if !describe && (!is_shared_ref(inner, &caller_type)
-                    || (caller == Caller::Optional && !matches!(&*t.ty, Type::Path(_)))) {
-                    return err(&t.ty, "an injected caller is &Caller or Option<&Caller>");
-                }
-                if m.caller.is_some() {
-                    return err(&t.ty, "a method takes at most one caller");
-                }
-                call_args.push(match caller {
-                    Caller::Required => quote!(__plexus_required_caller),
-                    Caller::Optional => quote!(__plexus_call.caller()),
-                });
-                m.caller = Some(caller);
-                continue;
-            }
-            if let Some(c) = context.as_ref().filter(|c| is_named(&t.ty, c.name)) {
-                if takes_context || !is_shared_ref(&t.ty, c.name) {
-                    return err(&t.ty, "a method takes at most one shared reference to the activation context");
-                }
-                takes_context = true;
-                call_args.push(quote!(&__plexus_context));
-                continue;
-            }
-            match seg.map(|s| s.ident.to_string()).as_deref() {
-                Some("Input") if describe => m.input = inner_type.map(ty).transpose()?,
-                Some("Progress") if describe => m.progress = inner_type.map(ty).transpose()?,
-                Some("Input" | "Progress") => return err(&t.ty, "a stream in and progress are only described: use #[activation(describe)]"),
-                _ => {
-                    let mut field = Field { name: kebab(&p.ident), ty: Some(ty(&t.ty)?), ..Field::default() };
-                    extras(&t.attrs, &mut field)?;
-                    if attr(&t.attrs, "target").is_some() {
-                        m.target = Some(field.name.clone());
-                    }
-                    m.params.push(field);
-                    idents.push(p.ident.clone());
-                    tys.push((*t.ty).clone());
-                    let ident = &p.ident;
-                    call_args.push(quote!(#ident));
-                }
-            }
-        }
+        let args = MethodArgs::read(&f.sig, &mut m, context.as_ref().map(|c| c.name), describe)?;
         if let Some(a) = attr(&f.attrs, "child") {
+            if m.input.is_some() {
+                return err(&f.sig, "a child factory cannot take an input stream");
+            }
             // A child: the activation this function hands back.
             let ReturnType::Type(_, ret) = &f.sig.output else { return err(&f.sig, "a child function returns the child") };
             let (held, fails) = match result_of(ret)? {
@@ -669,7 +620,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 }
             }
             if !describe {
-                if takes_context || m.caller.is_some() {
+                if args.takes_context || m.caller.is_some() {
                     return err(&f.sig, "a mounted child factory cannot take a context or caller");
                 }
                 mounted.push(mounted_child(&child, f, held)?);
@@ -682,12 +633,13 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             m.grant = Some(format!("{name}.{}", m.name));
         }
         if !describe {
-            served.push(served_method(&ir, &m, f, &idents, &tys, &call_args, context.as_ref(), &activation));
+            served.push(served_method(&ir, &m, f, &args, context.as_ref(), &activation));
         }
         if context.as_ref().is_some_and(|c| c.requires_caller) {
             m.caller = Some(Caller::Required);
         }
-        if !describe && m.caller.is_none() && context.is_none() {
+        if !describe && m.caller.is_none() && context.is_none() && m.input.is_none() {
+            let (idents, tys) = (&args.wire_names, &args.wire_types);
             let out = &f.sig.output;
             if let Some((item, iterator)) = stream_of(&f.sig.output) {
                 // A stream out: a task of its own walks the method's stream
@@ -751,10 +703,16 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         let items = plain(items).into_iter().map(|i| i.into_token_stream());
         return Ok((ir, quote! { #(#attrs)* #vis mod #ident { #(#items)* #consts } }));
     }
-    let native_only = ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some());
+    let has_input = ir.methods.iter().any(|m| m.input.is_some());
+    let native_only = ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input;
     let native_module = native_only.then(|| quote!(#[cfg(not(target_arch = "wasm32"))]));
     let native_error = native_only.then(|| {
-        let e = Error::new(module.ident.span(), "activations using a caller or context must be built natively").to_compile_error();
+        let message = if has_input {
+            "Rust component input streams are not served yet: build this activation natively, or use #[activation(describe)]"
+        } else {
+            "activations using a caller or context must be built natively"
+        };
+        let e = Error::new(module.ident.span(), message).to_compile_error();
         quote!(#[cfg(target_arch = "wasm32")] const _: () = { #e };)
     });
     // Natively a child is served; a component holds none yet.
@@ -1046,12 +1004,11 @@ fn served_method(
     ir: &Ir,
     m: &Method,
     f: &syn::ImplItemFn,
-    idents: &[syn::Ident],
-    tys: &[Type],
-    call_args: &[proc_macro2::TokenStream],
+    args: &MethodArgs,
     context: Option<&ActivationContext<'_>>,
     activation: &syn::Ident,
 ) -> proc_macro2::TokenStream {
+    let MethodArgs { wire_names: idents, wire_types: tys, invocation: call_args, .. } = args;
     let (method, path) = (&f.sig.ident, format!(".{}", m.name));
     let wires: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
     let mut refused = Vec::new();
@@ -1077,8 +1034,22 @@ fn served_method(
     let wait = f.sig.asyncness.is_some().then(|| quote!(.await));
     let call = quote!(__plexus_get(&*__plexus_a).#method(#(#call_args),*) #wait);
     let path = quote!(&::std::format!("{}{}", at, #path));
-    let needs_call = context.is_some() || m.caller.is_some();
-    let handler_args = if needs_call {
+    let input = m.input.as_ref().map(|t| {
+        if holds_bytes(ir, t) {
+            refused.push(not_served_yet(&f.sig));
+        }
+        if is_bytes(ir, t) {
+            quote!(__plexus_call.take_input(|raw| {
+                ::plexus::__private::decode_input::<::plexus::__private::B64>(raw).map(|v| v.0)
+            }))
+        } else {
+            quote!(__plexus_call.take_input(::plexus::__private::decode_input))
+        }
+    });
+    let needs_call = context.is_some() || m.caller.is_some() || input.is_some();
+    let handler_args = if input.is_some() {
+        quote!(__plexus_body: ::plexus::Raw, mut __plexus_call)
+    } else if needs_call {
         quote!(__plexus_body: ::plexus::Raw, __plexus_call)
     } else {
         quote!(__plexus_body: ::plexus::Raw)
@@ -1109,12 +1080,14 @@ fn served_method(
                 }
             };
         };
+        let input = input.map(|make| reject(quote!(__plexus_input), make));
         let required = require_caller.map(|make| reject(quote!(__plexus_required_caller), make));
         let context = make_context.map(|make| reject(quote!(__plexus_context), make));
         let handler = quote! {
             move |#handler_args| {
                 #args
                 __plexus_local.stream(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*), __plexus_asks| async move {
+                    #input
                     #required
                     #context
                     ::plexus::__private::feed(__plexus_asks, #items, |__plexus_item: #item| #each).await
@@ -1149,6 +1122,7 @@ fn served_method(
         } else {
             (quote!(method), quote!())
         };
+        let input = input.map(|make| quote!(let __plexus_input = #make?;));
         let required = require_caller.map(|make| quote!(let __plexus_required_caller = #make?;));
         let context = make_context.map(|make| quote!(let __plexus_context = { #make }?;));
         quote! {
@@ -1156,6 +1130,7 @@ fn served_method(
             server.#register(#path, #scope move |#handler_args| {
                 #args
                 __plexus_local.call(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*)| async move {
+                    #input
                     #required
                     #context
                     #answer
@@ -1163,7 +1138,8 @@ fn served_method(
             });
         }
     };
-    quote!(#(#refused)* { #tokens })
+    let accepts_input = m.input.as_ref().map(|_| quote!(server.accepts_input(#path);));
+    quote!(#(#refused)* { #tokens #accepts_input })
 }
 
 #[cfg(test)]
@@ -1367,6 +1343,42 @@ mod tests {
         let rust = tokens.to_string();
         assert!(!rust.contains("# [target]") && !rust.contains("# [child") && !rust.contains("# [limit"), "{rust}");
         assert!(plexus_gen::wit(&ir).contains("type ticket-id = string;"), "{}", plexus_gen::wit(&ir));
+    }
+
+    #[test]
+    fn input_stream_is_injected_separately_from_ordinary_params() {
+        let module: ItemMod = syn::parse_quote! {
+            mod media {
+                pub struct Media;
+                impl Media {
+                    pub async fn put(&self, data: Input<Bytes>, name: String, caller: &Caller) -> String { todo!() }
+                    pub fn words(&self, data: Input<String>) -> impl Stream<Item = String> { todo!() }
+                }
+            }
+        };
+        let (ir, generated) = expand(Default::default(), module).unwrap();
+        let put = &ir.methods[0];
+        assert_eq!(put.input, Some(Ty::Prim("bytes")));
+        assert_eq!(put.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["name"]);
+        let rust = generated.to_string();
+        for want in ["take_input", "decode_input :: < :: plexus :: __private :: B64 >",
+                     "accepts_input", "put (__plexus_input , name , __plexus_required_caller)", "stream_with_caller"] {
+            assert!(rust.contains(want), "missing {want}");
+        }
+    }
+
+    #[test]
+    fn refuses_ambiguous_inputs() {
+        for (params, why) in [
+            (quote!(a: Input<u8>, b: Input<u8>), "at most one Input"),
+            (quote!(a: &Input<u8>), "an owned Input"),
+            (quote!(a: Input), "an owned Input"),
+        ] {
+            let module: ItemMod = syn::parse_quote! {
+                mod media { pub struct Media; impl Media { pub fn put(&self, #params) {} } }
+            };
+            assert!(expand(Default::default(), module).unwrap_err().to_string().contains(why));
+        }
     }
 
     #[test]
