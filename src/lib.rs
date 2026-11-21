@@ -1039,9 +1039,7 @@ fn served_method(
             refused.push(not_served_yet(&f.sig));
         }
         if is_bytes(ir, t) {
-            quote!(__plexus_call.take_input(|raw| {
-                ::plexus::__private::decode_input::<::plexus::__private::B64>(raw).map(|v| v.0)
-            }))
+            quote!(__plexus_call.take_byte_input())
         } else {
             quote!(__plexus_call.take_input(::plexus::__private::decode_input))
         }
@@ -1361,7 +1359,7 @@ mod tests {
         assert_eq!(put.input, Some(Ty::Prim("bytes")));
         assert_eq!(put.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["name"]);
         let rust = generated.to_string();
-        for want in ["take_input", "decode_input :: < :: plexus :: __private :: B64 >",
+        for want in ["take_input", "take_byte_input",
                      "accepts_input", "put (__plexus_input , name , __plexus_required_caller)", "stream_with_caller"] {
             assert!(rust.contains(want), "missing {want}");
         }
@@ -1379,6 +1377,26 @@ mod tests {
             };
             assert!(expand(Default::default(), module).unwrap_err().to_string().contains(why));
         }
+    }
+
+    #[test]
+    fn byte_alias_input_uses_the_byte_decoder_but_a_record_uses_serde() {
+        let module: ItemMod = syn::parse_quote! {
+            mod media {
+                pub type Chunk = Bytes;
+                pub type Blob = Chunk;
+                pub struct Photo { pub image: Blob }
+                pub struct Media;
+                impl Media {
+                    pub fn upload(&self, parts: Input<Blob>) { todo!() }
+                    pub fn import(&self, photos: Input<Photo>) { todo!() }
+                }
+            }
+        };
+        let (_, generated) = expand(Default::default(), module).unwrap();
+        let rust = generated.to_string();
+        assert_eq!(rust.matches("take_byte_input").count(), 1);
+        assert_eq!(rust.matches("take_input (:: plexus :: __private :: decode_input)").count(), 1);
     }
 
     #[test]

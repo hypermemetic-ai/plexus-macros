@@ -8,7 +8,9 @@ Native methods can take `&plexus::Caller` to require an authenticated caller or 
 
 A native method may accept one owned `Input<T>` alongside its ordinary arguments.
 It implements `Stream<Item = Result<T, plexus::Failure>>`. Input items arrive as
-the handler reads them. An input method can return a single result or stream its
+the handler reads them. For `Input<Bytes>`, including aliases of bytes, the handler
+receives the same byte vectors from raw frames and from JSON/base64 input.
+An input method can return a single result or stream its
 own items back. The generated WIT describes the input as `stream<T>`; the Rust
 component adapter for receiving input requires a future implementation.
 
