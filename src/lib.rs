@@ -703,12 +703,30 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         let items = plain(items).into_iter().map(|i| i.into_token_stream());
         return Ok((ir, quote! { #(#attrs)* #vis mod #ident { #(#items)* #consts } }));
     }
+    let grants = ir.methods.iter().filter_map(|method| {
+        let grant = method.grant.as_deref()?;
+        let mut roles = std::collections::BTreeSet::new();
+        loop {
+            let before = roles.len();
+            for role in &ir.roles {
+                if role.grants.iter().any(|g| g == grant) || role.includes.iter().any(|r| roles.contains(r.as_str())) {
+                    roles.insert(role.name.as_str());
+                }
+            }
+            if roles.len() == before { break; }
+        }
+        let name = &method.name;
+        Some(quote!(server.require_grant(format!("{at}.{}", #name), #grant, &[#(#roles),*]);))
+    });
+    let has_grants = ir.methods.iter().any(|m| m.grant.is_some());
     let has_input = ir.methods.iter().any(|m| m.input.is_some());
-    let native_only = ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input;
+    let native_only = ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input || has_grants;
     let native_module = native_only.then(|| quote!(#[cfg(not(target_arch = "wasm32"))]));
     let native_error = native_only.then(|| {
         let message = if has_input {
             "Rust component input streams are not served yet: build this activation natively, or use #[activation(describe)]"
+        } else if has_grants {
+            "method grants require a native server that enforces them"
         } else {
             "activations using a caller or context must be built natively"
         };
@@ -800,6 +818,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                     #claims
                     server.describe(at, IR).expect("the IR says its hash");
                     #(#served)*
+                    #(#grants)*
                     #descendant_guard
                     #(#mounted)*
                 }
