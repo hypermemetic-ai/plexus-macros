@@ -254,7 +254,8 @@ fn stream_item(ret: &ReturnType) -> Option<Type> {
 /// The same, and whether it is an iterator.
 fn stream_of(ret: &ReturnType) -> Option<(Type, bool)> {
     let ReturnType::Type(_, t) = ret else { return None };
-    let Type::ImplTrait(it) = &**t else { return None };
+    let ok = result_of(t).ok()?.map_or(&**t, |(ok, _)| ok);
+    let Type::ImplTrait(it) = ok else { return None };
     it.bounds.iter().find_map(|b| {
         let TypeParamBound::Trait(t) = b else { return None };
         let last = t.path.segments.last()?;
@@ -283,10 +284,11 @@ fn result_of(t: &Type) -> Res<Option<(&Type, &Type)>> {
 
 /// What a method gives back, and the error it can end with.
 fn returns(ret: &ReturnType) -> Res<(Returns, Option<Ty>)> {
-    if let Some(item) = stream_item(ret) {
-        return Ok((Returns::Stream(ty(&item)?), None));
-    }
     let ReturnType::Type(_, t) = ret else { return Ok((Returns::Nothing, None)) };
+    if let Some(item) = stream_item(ret) {
+        let fails = result_of(t)?.map(|(_, error)| ty(error)).transpose()?;
+        return Ok((Returns::Stream(ty(&item)?), fails));
+    }
     if let Some((ok, e)) = result_of(t)? {
         let ok = match ok {
             Type::Tuple(tu) if tu.elems.is_empty() => Returns::Nothing,
@@ -646,20 +648,35 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
                 // and writes each item into WIT's. The write waits for the
                 // reader, and a reader that has gone ends the walk.
                 let walk = if iterator { quote!(::futures::stream::iter(made)) } else { quote!(made) };
+                let wait = f.sig.asyncness.is_some().then(|| quote!(.await));
+                let call = quote!(activation.#method(#(#idents),*) #wait);
+                let (out, channel, make, finish) = if let ReturnType::Type(_, ty) = &f.sig.output
+                    && let Some((_, error)) = result_of(ty)? {
+                    (
+                        quote!(Result<::wit_bindgen::StreamReader<#item>, #error>),
+                        quote!(let (opened, ready) = ::futures::channel::oneshot::channel();),
+                        quote!(match #call {
+                            Ok(items) => { if opened.send(Ok(())).is_err() { return; } items }
+                            Err(e) => { let _ = opened.send(Err(e)); return; }
+                        }),
+                        quote!(ready.await.expect("stream opening task ended")?; Ok(rx)),
+                    )
+                } else {
+                    (quote!(::wit_bindgen::StreamReader<#item>), quote!(), call, quote!(rx))
+                };
                 glue.push(quote! {
-                    async fn #method(#(#idents: #tys),*) -> ::wit_bindgen::StreamReader<#item> {
+                    async fn #method(#(#idents: #tys),*) -> #out {
                         let (mut tx, rx) = self::wit_stream::new();
                         let activation = __ACTIVATION.with(::std::clone::Clone::clone);
+                        #channel
                         ::wit_bindgen::spawn_local(async move {
-                            let made = activation.#method(#(#idents),*);
+                            let made = #make;
                             let mut items = ::std::pin::pin!(#walk);
                             while let ::std::option::Option::Some(item) = ::futures::StreamExt::next(&mut items).await {
-                                if !tx.write_all(::std::vec![item]).await.is_empty() {
-                                    break;
-                                }
+                                if !tx.write_all(::std::vec![item]).await.is_empty() { break; }
                             }
                         });
-                        rx
+                        #finish
                     }
                 });
             } else if f.sig.asyncness.is_some() {
@@ -1077,7 +1094,14 @@ fn served_method(
         .then(|| quote!(__plexus_call.require_caller()));
     let make_context = context.zip(context_ty.as_ref()).map(|(c, ty)| make_context(ir, c, ty));
     let tokens = if let Some((item, iterator)) = stream_of(&f.sig.output) {
-        let items = if iterator { quote!(::plexus::__private::futures::stream::iter(#call)) } else { call };
+        let open = if let Some(error) = &m.fails {
+            let failure = typed_failure(ir, error);
+            quote!(match #call {
+                Ok(items) => items,
+                Err(__plexus_e) => return ::plexus::__private::fail_stream(__plexus_asks, #failure),
+            })
+        } else { call };
+        let items = if iterator { quote!(::plexus::__private::futures::stream::iter(#open)) } else { open };
         let each = match &m.returns {
             Returns::Stream(t) => write(t, quote!(__plexus_item)),
             _ => unreachable!("a stream returns a stream"),
@@ -1107,7 +1131,8 @@ fn served_method(
                     #input
                     #required
                     #context
-                    ::plexus::__private::feed(__plexus_asks, #items, |__plexus_item: #item| #each).await
+                    let __plexus_items = #items;
+                    ::plexus::__private::feed(__plexus_asks, __plexus_items, |__plexus_item: #item| #each).await
                 })
             }
         };
