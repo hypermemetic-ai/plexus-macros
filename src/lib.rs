@@ -281,20 +281,38 @@ fn result_of(t: &Type) -> Res<Option<(&Type, &Type)>> {
     Ok(Some((args[0], args[1])))
 }
 
+/// A native encoded answer advertises the payload type in the interface.
+fn encoded_inner(t: &Type) -> Option<&Type> {
+    let Type::Path(path) = t else { return None };
+    let segments = &path.path.segments;
+    let last = segments.last()?;
+    if last.ident != "Encoded" || !(segments.len() == 1 || (segments.len() == 2 && segments[0].ident == "plexus")) {
+        return None;
+    }
+    let args = type_args(&last.arguments);
+    match args.as_slice() { [inner] => Some(*inner), _ => None }
+}
+
+fn encoded_output(ret: &ReturnType) -> bool {
+    if let Some(item) = stream_item(ret) { return encoded_inner(&item).is_some(); }
+    let ReturnType::Type(_, t) = ret else { return false };
+    encoded_inner(result_of(t).ok().flatten().map_or(&**t, |(ok, _)| ok)).is_some()
+}
+
 /// What a method gives back, and the error it can end with.
 fn returns(ret: &ReturnType) -> Res<(Returns, Option<Ty>)> {
     if let Some(item) = stream_item(ret) {
-        return Ok((Returns::Stream(ty(&item)?), None));
+        return Ok((Returns::Stream(ty(encoded_inner(&item).unwrap_or(&item))?), None));
     }
     let ReturnType::Type(_, t) = ret else { return Ok((Returns::Nothing, None)) };
     if let Some((ok, e)) = result_of(t)? {
         let ok = match ok {
             Type::Tuple(tu) if tu.elems.is_empty() => Returns::Nothing,
-            other => Returns::One(ty(other)?),
+            other => Returns::One(ty(encoded_inner(other).unwrap_or(other))?),
         };
         return Ok((ok, Some(ty(e)?)));
     }
-    Ok((Returns::One(ty(t)?), None))
+    Ok((Returns::One(ty(encoded_inner(t).unwrap_or(t))?), None))
 }
 
 /// Where each name a role holds is written: the role, the name as the IR
@@ -575,6 +593,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     let iface = format_ident!("{}", module.ident);
     let exports = quote!(self::exports::plexus::#iface::#iface);
     let (mut glue, mut served, mut mounted) = (Vec::new(), Vec::new(), Vec::new());
+    let mut has_encoded = false;
     for item in &imp.items {
         let ImplItem::Fn(f) = item else { continue };
         if attr(&f.attrs, "open").is_some() || !matches!(f.vis, syn::Visibility::Public(_)) {
@@ -629,6 +648,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             continue;
         }
         (m.returns, m.fails) = returns(&f.sig.output)?;
+        has_encoded |= encoded_output(&f.sig.output);
         if !ir.roles.is_empty() || m.target.is_some() {
             m.grant = Some(format!("{name}.{}", m.name));
         }
@@ -720,11 +740,13 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     });
     let has_grants = ir.methods.iter().any(|m| m.grant.is_some());
     let has_input = ir.methods.iter().any(|m| m.input.is_some());
-    let native_only = ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input || has_grants;
+    let native_only = has_encoded || ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input || has_grants;
     let native_module = native_only.then(|| quote!(#[cfg(not(target_arch = "wasm32"))]));
     let native_error = native_only.then(|| {
         let message = if has_input {
             "Rust component input streams are not served yet: build this activation natively, or use #[activation(describe)]"
+        } else if has_encoded {
+            "Encoded<T> returns require a native activation"
         } else if has_grants {
             "method grants require a native server that enforces them"
         } else {
@@ -1045,7 +1067,19 @@ fn served_method(
         };
         if is_bytes(ir, t) { quote!(__plexus_p.take::<::plexus::__private::B64>(#wire, #default)?.0) } else { quote!(__plexus_p.take::<#ty>(#wire, #default)?) }
     }).collect::<Vec<_>>();
-    let write = |t: &Ty, v: proc_macro2::TokenStream| if is_bytes(ir, t) { quote!(::plexus::raw(&::plexus::__private::B64(#v))) } else { quote!(::plexus::raw(&#v)) };
+    let encoded = encoded_output(&f.sig.output);
+    let write = |t: &Ty, v: proc_macro2::TokenStream| {
+        if encoded {
+            if is_bytes(ir, t) || holds_bytes(ir, t) {
+                return Error::new(f.sig.output.span(), "a top-level encoded byte result requires the Layers base64 codec; return the byte value directly").to_compile_error();
+            }
+            quote!(::std::result::Result::Ok(::plexus::Encoded::into_raw(#v)))
+        } else if is_bytes(ir, t) {
+            quote!(::plexus::raw(&::plexus::__private::B64(#v)))
+        } else {
+            quote!(::plexus::raw(&#v))
+        }
+    };
     let args = quote! {
         let __plexus_args = ::plexus::__private::params(&__plexus_body, &[#(#wires),*])
             .and_then(|__plexus_p| ::std::result::Result::Ok((#(#takes,)*)));
@@ -1162,6 +1196,32 @@ fn served_method(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoded_results_preserve_the_interface_and_dispatch_through_the_typed_wrapper() {
+        let module = |result: proc_macro2::TokenStream| -> ItemMod {
+            syn::parse2(quote! {
+                mod tickets {
+                    pub struct Page { pub rows: Vec<String> }
+                    pub enum Denied { Missing }
+                    pub struct Tickets;
+                    impl Tickets {
+                        pub fn list(&self) -> #result { todo!() }
+                        pub fn checked(&self) -> Result<#result, Denied> { todo!() }
+                        pub fn watch(&self) -> impl Stream<Item = #result> { todo!() }
+                    }
+                }
+            }).unwrap()
+        };
+        let (before, _) = expand(quote!(), module(quote!(Page))).unwrap();
+        let (after, tokens) = expand(quote!(), module(quote!(plexus::Encoded<Page>))).unwrap();
+        assert_eq!(before.json(), after.json());
+        assert_eq!(plexus_gen::ts(&before), plexus_gen::ts(&after));
+        assert_eq!(plexus_gen::wit(&before), plexus_gen::wit(&after));
+        assert_eq!(tokens.to_string().matches("Encoded :: into_raw").count(), 3);
+        let (_, invalid) = expand(quote!(), module(quote!(plexus::Encoded<Vec<u8>>))).unwrap();
+        assert!(invalid.to_string().contains("requires the Layers base64 codec"));
+    }
 
     /// The IR of the first `#[activation]` module in a file.
     fn ir_of_file(path: &std::path::Path) -> Ir {
