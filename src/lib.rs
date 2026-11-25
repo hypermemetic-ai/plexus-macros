@@ -27,6 +27,7 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, Error, Expr, Fields, FnArg, GenericArgument, ImplItem, Item, ItemMod, Lit, Meta, MetaNameValue, PathArguments, ReturnType, Token, Type, TypeParamBound};
 
+mod watch_sources;
 mod method_args;
 use method_args::MethodArgs;
 
@@ -595,6 +596,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     let iface = format_ident!("{}", module.ident);
     let exports = quote!(self::exports::plexus::#iface::#iface);
     let (mut glue, mut served, mut mounted) = (Vec::new(), Vec::new(), Vec::new());
+    let mut subscriptions = Vec::new();
     let mut has_encoded = false;
     for item in &imp.items {
         let ImplItem::Fn(f) = item else { continue };
@@ -651,6 +653,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             continue;
         }
         (m.returns, m.fails) = returns(&f.sig.output)?;
+        let mut sources = Vec::new();
         if let Some(a) = attr(&f.attrs, "watch") {
             if !matches!(m.returns, Returns::One(_)) || m.input.is_some() || m.progress.is_some() {
                 return err(a, "watch requires a unary read with one result and no input stream or progress");
@@ -660,9 +663,19 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             if on != "on" || deps.elems.is_empty() { return err(a, "watch requires a nonempty list of dependencies"); }
             let mut names = Vec::new();
             for dep in &deps.elems {
-                let name = string(dep)?;
+                let name = if matches!(dep, Expr::Lit(_)) {
+                    string(dep)?
+                } else {
+                    let (name, source) = watch_sources::call(dep)?;
+                    sources.push(source);
+                    name
+                };
                 if name.trim().is_empty() || names.contains(&name) { return err(dep, "empty or duplicate watch dependency"); }
                 names.push(name);
+            }
+            if !sources.is_empty() {
+                if sources.len() != names.len() { return err(a, "use either source method calls or named dependencies in one watch"); }
+                subscriptions.push(watch_sources::helper(f, &sources));
             }
             m.watch = Some(plexus_ir::Watch { on: names, stream: format!("{}-watch", m.name) });
         }
@@ -671,7 +684,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             m.grant = Some(format!("{name}.{}", m.name));
         }
         if !describe {
-            served.push(served_method(&ir, &m, f, &args, context.as_ref(), &activation));
+            served.push(served_method(&ir, &m, f, &args, context.as_ref(), &activation, !sources.is_empty()));
         }
         if context.as_ref().is_some_and(|c| c.requires_caller) {
             m.caller = Some(Caller::Required);
@@ -834,6 +847,10 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     // Bootstrap may mount descendants after serving this activation.
     let descendant_guard = context.as_ref().map(|context| guard_descendants(&ir, context, &activation));
     let kept = plain(&kept);
+    let subscription_impl = (!subscriptions.is_empty()).then(|| quote! {
+        #[cfg(not(target_arch = "wasm32"))]
+        impl #activation { #(#subscriptions)* }
+    });
     let native_types = data.iter().zip(&ir.types).map(|(item, def)| native_type(&ir, item, def));
     // One file, two builds: to wasm, a component exporting the WIT, its
     // data types wit-bindgen's; natively, the data types as written, read
@@ -850,6 +867,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             #(#native_types)*
             #consts
             #(#kept)*
+            #subscription_impl
 
             #[cfg(target_arch = "wasm32")]
             ::std::thread_local! {
@@ -1101,6 +1119,7 @@ fn served_method(
     args: &MethodArgs,
     context: Option<&ActivationContext<'_>>,
     activation: &syn::Ident,
+    typed_sources: bool,
 ) -> proc_macro2::TokenStream {
     let MethodArgs { wire_names: idents, wire_types: tys, invocation: call_args, .. } = args;
     let (method, path) = (&f.sig.ident, format!(".{}", m.name));
@@ -1247,16 +1266,22 @@ fn served_method(
                 quote!({ let body = (#ok)?; let digest = ::plexus::watch_digest(&body); Ok((body, digest)) })
             };
             let refresh = make_answer(pair);
+            let (source_args, bindings, subscribe) = if typed_sources {
+                let helper = watch_sources::helper_name(method);
+                (quote!(__plexus_args), quote!((#(#idents,)*)), quote!(__plexus_get(&*__plexus_a).#helper(#(#call_args),*)))
+            } else {
+                (quote!(__plexus_args.map(|_| ())), quote!(()), quote!(::plexus::WatchSource::subscribe(__plexus_get(&*__plexus_a), &[#(#deps),*], &__plexus_call, &__plexus_body)))
+            };
             quote! {
                 let __subscribe = __plexus_local.clone();
                 let __refresh = __plexus_local.clone();
                 server.watch_method(#path, &format!("{at}.{}", #companion),
                     move |__plexus_body, __plexus_call| {
                         #args
-                        __subscribe.submit(__plexus_args.map(|_| ()), move |__plexus_a: ::std::rc::Rc<__P>, ()| async move {
+                        __subscribe.submit(#source_args, move |__plexus_a: ::std::rc::Rc<__P>, #bindings| async move {
                             #required
                             #context
-                            ::plexus::WatchSource::subscribe(__plexus_get(&*__plexus_a), &[#(#deps),*], &__plexus_call, &__plexus_body)
+                            #subscribe
                         })
                     },
                     move |__plexus_body, __plexus_call| {
