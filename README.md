@@ -17,3 +17,29 @@ component adapter for receiving input requires a future implementation.
 Part of Plexus, built from scratch (tracker: LAYERS-9). Its sibling crates are expected beside it: `../<crate>`.
 
 MIT.
+
+### Typed watch sources
+
+A native unary read can open a stream of authorized values when named data or
+policy sources change. Its source methods take the same typed arguments the
+read uses, including an injected caller or activation context.
+
+```rust
+#[watch(on = [store.tickets_changed(caller, &id), self.access.grants_changed(caller)?])]
+pub fn get(&self, caller: &Caller, id: String) -> Option<Ticket> {
+    self.store.get_visible(caller, &id)
+}
+```
+
+Both subscriptions open before the first read. A source registers interest
+synchronously and returns an owned `Stream<Item = ()> + Send + 'static`.
+Use `?` to propagate a registration failure. Dropping the stream must release
+its subscription. When several sources are ready together the runtime reruns
+the read once. When any source closes the watch ends. Each refresh goes
+through the original authorization checks.
+
+A bare field receiver such as `store` means `self.store`. The IR records the
+receiver and method path (`store.tickets_changed`, `access.grants_changed`).
+Each path appears once per watch. Applications with a shared dependency
+dispatcher can still use `#[watch(on = ["tickets", "membership"])]` and
+implement `WatchSource`. Use one form per attribute.
