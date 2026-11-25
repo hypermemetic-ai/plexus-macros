@@ -123,7 +123,7 @@ fn doc(attrs: &[Attribute]) -> String {
 }
 
 /// The attributes this macro reads and Rust does not know.
-const OURS: [&str; 5] = ["default", "target", "child", "limit", "open"];
+const OURS: [&str; 6] = ["default", "target", "child", "limit", "open", "watch"];
 
 fn attr<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a Attribute> {
     attrs.iter().find(|a| a.path().is_ident(name))
@@ -604,12 +604,13 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             return err(recv, "an activation's methods take `&self`: two calls can be running at once. Keep what changes in a Cell or a RefCell");
         }
         let method = &f.sig.ident;
-        let mut m = Method { name: kebab(method), doc: doc(&f.attrs), params: Vec::new(), returns: Returns::Nothing, fails: None, input: None, progress: None, caller: None, grant: None, target: None, waits: f.sig.asyncness.is_some() || stream_item(&f.sig.output).is_some() };
+        let mut m = Method { watch: None, name: kebab(method), doc: doc(&f.attrs), params: Vec::new(), returns: Returns::Nothing, fails: None, input: None, progress: None, caller: None, grant: None, target: None, waits: f.sig.asyncness.is_some() || stream_item(&f.sig.output).is_some() };
         let args = MethodArgs::read(&f.sig, &mut m, context.as_ref().map(|c| c.name), describe)?;
         if let Some(a) = attr(&f.attrs, "child") {
             if m.input.is_some() {
                 return err(&f.sig, "a child factory cannot take an input stream");
             }
+            if attr(&f.attrs, "watch").is_some() { return err(f, "a child cannot be a watchable read"); }
             // A child: the activation this function hands back.
             let ReturnType::Type(_, ret) = &f.sig.output else { return err(&f.sig, "a child function returns the child") };
             let (held, fails) = match result_of(ret)? {
@@ -648,6 +649,21 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             continue;
         }
         (m.returns, m.fails) = returns(&f.sig.output)?;
+        if let Some(a) = attr(&f.attrs, "watch") {
+            if !matches!(m.returns, Returns::One(_)) || m.input.is_some() || m.progress.is_some() {
+                return err(a, "watch requires a unary read with one result and no input stream or progress");
+            }
+            let fields = pairs(a)?;
+            let [(on, Expr::Array(deps))] = fields.as_slice() else { return err(a, "expected #[watch(on = [\"dependency\"])]") };
+            if on != "on" || deps.elems.is_empty() { return err(a, "watch requires a nonempty list of dependencies"); }
+            let mut names = Vec::new();
+            for dep in &deps.elems {
+                let name = string(dep)?;
+                if name.trim().is_empty() || names.contains(&name) { return err(dep, "empty or duplicate watch dependency"); }
+                names.push(name);
+            }
+            m.watch = Some(plexus_ir::Watch { on: names, stream: format!("{}-watch", m.name) });
+        }
         has_encoded |= encoded_output(&f.sig.output);
         if !ir.roles.is_empty() || m.target.is_some() {
             m.grant = Some(format!("{name}.{}", m.name));
@@ -699,7 +715,24 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             e.combine(Error::new(names[at].span(), format!("type `{}` is here", names[at])));
             return Err(e);
         }
+        let companion = m.watch.as_ref().map(|watch| {
+            let mut companion = m.clone();
+            companion.name = watch.stream.clone();
+            companion.watch = None;
+            let Returns::One(item) = &m.returns else { unreachable!() };
+            companion.returns = Returns::Stream(item.clone());
+            companion.waits = true;
+            companion
+        });
         ir.methods.push(m);
+        ir.methods.extend(companion);
+    }
+    for m in ir.methods.iter().filter(|m| m.watch.is_some()) {
+        let stream = &m.watch.as_ref().unwrap().stream;
+        if ir.methods.iter().filter(|other| &other.name == stream).count() != 1
+            || ir.children.iter().any(|child| &child.name == stream) || ir.types.iter().any(|ty| &ty.name == stream) {
+            return err(&module, &format!("generated watch method {stream} collides with another interface name"));
+        }
     }
     if let Some((role, held, why)) = ir.unknown_in_roles() {
         let at = role_spans.iter().find(|(r, n, _)| *r == role.name && n == held).map(|(.., s)| *s).unwrap_or_else(|| module.span());
@@ -740,10 +773,13 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     });
     let has_grants = ir.methods.iter().any(|m| m.grant.is_some());
     let has_input = ir.methods.iter().any(|m| m.input.is_some());
-    let native_only = has_encoded || ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input || has_grants;
+    let has_watches = ir.methods.iter().any(|m| m.watch.is_some());
+    let native_only = has_watches || has_encoded || ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input || has_grants;
     let native_module = native_only.then(|| quote!(#[cfg(not(target_arch = "wasm32"))]));
     let native_error = native_only.then(|| {
-        let message = if has_input {
+        let message = if has_watches {
+            "watchable reads require a native activation"
+        } else if has_input {
             "Rust component input streams are not served yet: build this activation natively, or use #[activation(describe)]"
         } else if has_encoded {
             "Encoded<T> returns require a native activation"
@@ -1154,7 +1190,7 @@ fn served_method(
             Returns::One(t) => write(t, quote!(__plexus_v)),
             _ => quote!(::plexus::raw(&__plexus_v)),
         };
-        let answer = match &m.fails {
+        let make_answer = |ok: proc_macro2::TokenStream| match &m.fails {
             None => quote!({ let __plexus_v = #call; #ok }),
             Some(e) => {
                 let failure = typed_failure(ir, e);
@@ -1166,6 +1202,7 @@ fn served_method(
                 }
             }
         };
+        let answer = make_answer(ok.clone());
         let (register, scope) = if let Some(ty) = &context_ty {
             (quote!(method_with_context), quote!(at, #ty::KEYS,))
         } else if needs_call {
@@ -1176,17 +1213,50 @@ fn served_method(
         let input = input.map(|make| quote!(let __plexus_input = #make?;));
         let required = require_caller.map(|make| quote!(let __plexus_required_caller = #make?;));
         let context = make_context.map(|make| quote!(let __plexus_context = { #make }?;));
+        let watch = m.watch.as_ref().map(|watch| {
+            let deps = &watch.on;
+            let companion = &watch.stream;
+            let pair = if encoded {
+                quote!(Ok(__plexus_v.into_watch_value()))
+            } else {
+                quote!({ let body = (#ok)?; let digest = ::plexus::watch_digest(&body); Ok((body, digest)) })
+            };
+            let refresh = make_answer(pair);
+            quote! {
+                let __subscribe = __plexus_local.clone();
+                let __refresh = __plexus_local.clone();
+                server.watch_method(#path, &format!("{at}.{}", #companion),
+                    move |__plexus_body, __plexus_call| {
+                        #args
+                        __subscribe.submit(__plexus_args.map(|_| ()), move |__plexus_a: ::std::rc::Rc<__P>, ()| async move {
+                            #required
+                            #context
+                            ::plexus::WatchSource::subscribe(__plexus_get(&*__plexus_a), &[#(#deps),*], &__plexus_call, &__plexus_body)
+                        })
+                    },
+                    move |__plexus_body, __plexus_call| {
+                        #args
+                        __refresh.submit(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*)| async move {
+                            #required
+                            #context
+                            #refresh
+                        })
+                    }
+                );
+            }
+        });
         quote! {
-            let __plexus_local = __plexus_local.clone();
+            let __unary = __plexus_local.clone();
             server.#register(#path, #scope move |#handler_args| {
                 #args
-                __plexus_local.call(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*)| async move {
+                __unary.call(__plexus_args, move |__plexus_a: ::std::rc::Rc<__P>, (#(#idents,)*)| async move {
                     #input
                     #required
                     #context
                     #answer
                 })
             });
+            #watch
         }
     };
     let accepts_input = m.input.as_ref().map(|_| quote!(server.accepts_input(#path);));
@@ -1196,6 +1266,34 @@ fn served_method(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_watch_preserves_contract_and_rejects_name_collisions() {
+        let module: ItemMod = syn::parse_quote! {
+            mod board {
+                struct Board;
+                impl Board {
+                    #[watch(on = ["rows", "membership"])]
+                    pub fn list(&self, caller: &Caller, #[target] group: String) -> Result<u32, String> { todo!() }
+                }
+            }
+        };
+        let (ir, _) = expand(quote!(roles(reader = ["list"])), module.clone()).unwrap();
+        assert_eq!(Ir::read(&ir.json()).unwrap(), ir);
+        let (read, stream) = (&ir.methods[0], &ir.methods[1]);
+        assert_eq!(read.watch.as_ref().unwrap().stream, stream.name);
+        assert_eq!(read.watch.as_ref().unwrap().on, ["rows", "membership"]);
+        assert_eq!(read.grant, stream.grant);
+        assert_eq!(read.target, stream.target);
+        assert_eq!(read.fails, stream.fails);
+        assert_eq!(read.params, stream.params);
+        assert_eq!(read.caller, stream.caller);
+        let mut collision = module;
+        let items=&mut collision.content.as_mut().unwrap().1;
+        let Item::Impl(imp)=&mut items[1] else {unreachable!()};
+        imp.items.push(syn::parse_quote!(pub fn list_watch(&self) -> u32 { 0 }));
+        assert!(expand(quote!(), collision).unwrap_err().to_string().contains("collides"));
+    }
 
     #[test]
     fn encoded_results_preserve_the_interface_and_dispatch_through_the_typed_wrapper() {
