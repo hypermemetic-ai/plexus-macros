@@ -28,6 +28,7 @@ use syn::spanned::Spanned;
 use syn::{Attribute, Error, Expr, Fields, FnArg, GenericArgument, ImplItem, Item, ItemMod, Lit, Meta, MetaNameValue, PathArguments, ReturnType, Token, Type, TypeParamBound};
 
 mod method_args;
+mod peer_client;
 use method_args::MethodArgs;
 
 type Res<T> = Result<T, Error>;
@@ -341,7 +342,7 @@ fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Rol
 /// The module with this macro's own attributes taken off, so it is plain Rust.
 fn plain(items: &[Item]) -> Vec<Item> {
     fn strip(attrs: &mut Vec<Attribute>, param: bool) {
-        attrs.retain(|a| !OURS.iter().any(|o| a.path().is_ident(o)) && !(param && a.path().is_ident("deprecated")));
+        attrs.retain(|a| !OURS.iter().any(|o| a.path().is_ident(o)) && !(param && (a.path().is_ident("deprecated") || a.path().is_ident("peer"))));
     }
     let mut items = items.to_vec();
     for item in &mut items {
@@ -577,6 +578,8 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     let iface = format_ident!("{}", module.ident);
     let exports = quote!(self::exports::plexus::#iface::#iface);
     let (mut glue, mut served, mut mounted) = (Vec::new(), Vec::new(), Vec::new());
+    let mut client_methods = Vec::new();
+    let mut has_peers = false;
     for item in &imp.items {
         let ImplItem::Fn(f) = item else { continue };
         if attr(&f.attrs, "open").is_some() || !matches!(f.vis, syn::Visibility::Public(_)) {
@@ -589,7 +592,9 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         let method = &f.sig.ident;
         let mut m = Method { name: kebab(method), doc: doc(&f.attrs), params: Vec::new(), returns: Returns::Nothing, fails: None, input: None, progress: None, caller: None, grant: None, target: None, waits: f.sig.asyncness.is_some() || stream_item(&f.sig.output).is_some() };
         let args = MethodArgs::read(&f.sig, &mut m, context.as_ref().map(|c| c.name), describe)?;
+        has_peers |= !args.peers.is_empty();
         if let Some(a) = attr(&f.attrs, "child") {
+            if !args.peers.is_empty() { return err(&f.sig, "a child factory cannot take a method peer"); }
             if m.input.is_some() {
                 return err(&f.sig, "a child factory cannot take an input stream");
             }
@@ -635,12 +640,13 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             m.grant = Some(format!("{name}.{}", m.name));
         }
         if !describe {
+            client_methods.push(peer_client::method(&ir, &m, f, &args)?);
             served.push(served_method(&ir, &m, f, &args, context.as_ref(), &activation));
         }
         if context.as_ref().is_some_and(|c| c.requires_caller) {
             m.caller = Some(Caller::Required);
         }
-        if !describe && m.caller.is_none() && context.is_none() && m.input.is_none() {
+        if !describe && m.caller.is_none() && context.is_none() && m.input.is_none() && args.peers.is_empty() {
             let (idents, tys) = (&args.wire_names, &args.wire_types);
             let out = &f.sig.output;
             if let Some((item, iterator)) = stream_of(&f.sig.output) {
@@ -737,10 +743,10 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     });
     let has_grants = ir.methods.iter().any(|m| m.grant.is_some());
     let has_input = ir.methods.iter().any(|m| m.input.is_some());
-    let native_only = ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input || has_grants;
+    let native_only = has_peers || ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input || has_grants;
     let native_module = native_only.then(|| quote!(#[cfg(not(target_arch = "wasm32"))]));
     let native_error = native_only.then(|| {
-        let message = if has_input {
+        let message = if has_peers { "injected peers require the native peer runtime" } else if has_input {
             "Rust component input streams are not served yet: build this activation natively, or use #[activation(describe)]"
         } else if has_grants {
             "method grants require a native server that enforces them"
@@ -792,6 +798,19 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             #(#native_types)*
             #consts
             #(#kept)*
+
+            #[cfg(not(target_arch = "wasm32"))]
+            #[doc(hidden)]
+            pub struct __PlexusPeerClient(::plexus::Connection);
+            #[cfg(not(target_arch = "wasm32"))]
+            impl __PlexusPeerClient { #(#client_methods)* }
+            #[cfg(not(target_arch = "wasm32"))]
+            impl ::plexus::PeerInterface for #activation {
+                const NAMESPACE: &'static str = #name;
+                const HASH: &'static str = HASH;
+                type Client = __PlexusPeerClient;
+                fn client(connection: ::plexus::Connection) -> Self::Client { __PlexusPeerClient(connection) }
+            }
 
             #[cfg(target_arch = "wasm32")]
             ::std::thread_local! {
@@ -1063,6 +1082,10 @@ fn served_method(
         if is_bytes(ir, t) { quote!(__plexus_p.take::<::plexus::__private::B64>(#wire, #default)?.0) } else { quote!(__plexus_p.take::<#ty>(#wire, #default)?) }
     }).collect::<Vec<_>>();
     let write = |t: &Ty, v: proc_macro2::TokenStream| if is_bytes(ir, t) { quote!(::plexus::raw(&::plexus::__private::B64(#v))) } else { quote!(::plexus::raw(&#v)) };
+    let peer_args: Vec<_> = args.peers.iter().map(|(local, ty, slot)| {
+        let slot = match slot { Some(name) => quote!(Some(#name)), None => quote!(None) };
+        (local, quote!(__plexus_call.peer::<#ty>(#slot)))
+    }).collect();
     let args = quote! {
         let __plexus_args = ::plexus::__private::params(&__plexus_body, &[#(#wires),*])
             .and_then(|__plexus_p| ::std::result::Result::Ok((#(#takes,)*)));
@@ -1080,7 +1103,7 @@ fn served_method(
             quote!(__plexus_call.take_input(::plexus::__private::decode_input))
         }
     });
-    let needs_call = context.is_some() || m.caller.is_some() || input.is_some();
+    let needs_call = !peer_args.is_empty() || context.is_some() || m.caller.is_some() || input.is_some();
     let handler_args = if input.is_some() {
         quote!(__plexus_body: ::plexus::Raw, mut __plexus_call)
     } else if needs_call {
@@ -1123,6 +1146,7 @@ fn served_method(
         };
         let input = input.map(|make| reject(quote!(__plexus_input), make));
         let required = require_caller.map(|make| reject(quote!(__plexus_required_caller), make));
+        let resolve = peer_args.iter().map(|(name, get)| reject(quote!(#name), get.clone()));
         let context = make_context.map(|make| reject(quote!(__plexus_context), make));
         let handler = quote! {
             move |#handler_args| {
@@ -1131,6 +1155,7 @@ fn served_method(
                     #input
                     #required
                     #context
+                    #(#resolve)*
                     let __plexus_items = #items;
                     ::plexus::__private::feed(__plexus_asks, __plexus_items, |__plexus_item: #item| #each).await
                 })
@@ -1166,6 +1191,7 @@ fn served_method(
         };
         let input = input.map(|make| quote!(let __plexus_input = #make?;));
         let required = require_caller.map(|make| quote!(let __plexus_required_caller = #make?;));
+        let resolve = peer_args.iter().map(|(name, get)| quote!(let #name = #get?;));
         let context = make_context.map(|make| quote!(let __plexus_context = { #make }?;));
         quote! {
             let __plexus_local = __plexus_local.clone();
@@ -1175,6 +1201,7 @@ fn served_method(
                     #input
                     #required
                     #context
+                    #(#resolve)*
                     #answer
                 })
             });

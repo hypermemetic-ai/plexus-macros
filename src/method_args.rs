@@ -15,6 +15,8 @@ pub(super) struct MethodArgs {
     /// Every argument passed to the Rust method, including injected values, in source order.
     pub(super) invocation: Vec<TokenStream>,
     pub(super) takes_context: bool,
+    pub(super) peers: Vec<(Ident, Type, Option<String>)>,
+    pub(super) input_type: Option<Type>,
 }
 
 impl MethodArgs {
@@ -33,6 +35,19 @@ impl MethodArgs {
             };
             let seg = last_segment(&t.ty);
             let inner_type = seg.and_then(|s| type_args(&s.arguments).first().copied());
+            let selector = attr(&t.attrs, "peer");
+            if seg.is_some_and(|s| s.ident == "Peer") {
+                let Some(inner) = inner_type.filter(|_| matches!(&*t.ty, Type::Path(_)) &&
+                    seg.is_some_and(|s| type_args(&s.arguments).len() == 1)) else {
+                    return err(&t.ty, "a peer is an owned Peer<Activation>");
+                };
+                let slot = selector.map(|a| a.parse_args::<syn::LitStr>().map(|s| s.value())).transpose()?;
+                let local = format_ident!("__plexus_peer_{}", args.peers.len());
+                args.invocation.push(quote!(#local));
+                args.peers.push((local, inner.clone(), slot));
+                continue;
+            }
+            if let Some(a) = selector { return err(a, "#[peer] selects a binding on Peer<T>"); }
             let caller = if is_named(&t.ty, &caller_type) {
                 Some((Caller::Required, &*t.ty))
             } else if seg.is_some_and(|s| s.ident == "Option") {
@@ -81,6 +96,7 @@ impl MethodArgs {
                     }) else {
                         return err(&t.ty, "an input stream is an owned Input<T>");
                     };
+                    args.input_type = Some(inner.clone());
                     method.input = Some(ty(inner)?);
                     args.invocation.push(quote!(__plexus_input));
                 }
