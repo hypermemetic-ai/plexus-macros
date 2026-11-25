@@ -15,8 +15,49 @@ pub(super) struct MethodArgs {
     /// Every argument passed to the Rust method, including injected values, in source order.
     pub(super) invocation: Vec<TokenStream>,
     pub(super) takes_context: bool,
-    pub(super) peers: Vec<(Ident, Type, Option<String>)>,
+    pub(super) injections: Vec<(Ident, Injection)>,
     pub(super) input_type: Option<Type>,
+}
+
+pub(super) enum Injection {
+    Peer(Type),
+    User(Type),
+}
+
+impl Injection {
+    pub(super) fn resolve(&self) -> TokenStream {
+        match self {
+            Self::Peer(interface) => quote!(__plexus_call.peer::<#interface>()),
+            Self::User(ty) => quote!(<#ty as ::plexus::FromCaller<_>>::from_caller(
+                __plexus_get(&*__plexus_a), __plexus_required_caller
+            )),
+        }
+    }
+}
+
+fn user_type(ty: &Type) -> bool {
+    let Type::Path(ty) = ty else { return false };
+    ty.qself.is_none()
+        && (ty.path.is_ident("User")
+            || (ty.path.segments.len() == 2
+                && ty.path.segments[0].ident == "plexus"
+                && ty.path.segments[1].ident == "User"
+                && ty.path.segments.iter().all(|s| s.arguments.is_none())))
+}
+
+/// The typed interface requested by an activation-level peer injection.
+pub(super) fn peer_interface(ty: &Type) -> Res<Option<&Type>> {
+    let Some(seg) = last_segment(ty).filter(|seg| seg.ident == "Peer") else {
+        return Ok(None);
+    };
+    if let Type::Path(_) = ty
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && args.args.len() == 1
+        && let Some(syn::GenericArgument::Type(interface)) = args.args.first()
+    {
+        return Ok(Some(interface));
+    }
+    err(ty, "a peer is an owned Peer<Activation>")
 }
 
 impl MethodArgs {
@@ -35,19 +76,29 @@ impl MethodArgs {
             };
             let seg = last_segment(&t.ty);
             let inner_type = seg.and_then(|s| type_args(&s.arguments).first().copied());
-            let selector = attr(&t.attrs, "peer");
-            if seg.is_some_and(|s| s.ident == "Peer") {
-                let Some(inner) = inner_type.filter(|_| matches!(&*t.ty, Type::Path(_)) &&
-                    seg.is_some_and(|s| type_args(&s.arguments).len() == 1)) else {
-                    return err(&t.ty, "a peer is an owned Peer<Activation>");
-                };
-                let slot = selector.map(|a| a.parse_args::<syn::LitStr>().map(|s| s.value())).transpose()?;
-                let local = format_ident!("__plexus_peer_{}", args.peers.len());
+            if let Some(selector) = attr(&t.attrs, "peer") {
+                return err(
+                    selector,
+                    "declare Peer<T> without a selector and bind its URL and key in the application with PeerHost::inject_peer",
+                );
+            }
+            let injection = if let Some(inner) = peer_interface(&t.ty)? {
+                Some(Injection::Peer(inner.clone()))
+            } else if user_type(&t.ty) {
+                if method.caller.is_some() {
+                    return err(&t.ty, "a method takes at most one caller");
+                }
+                method.caller = Some(Caller::Required);
+                Some(Injection::User((*t.ty).clone()))
+            } else {
+                None
+            };
+            if let Some(injection) = injection {
+                let local = format_ident!("__plexus_injection_{}", args.injections.len());
                 args.invocation.push(quote!(#local));
-                args.peers.push((local, inner.clone(), slot));
+                args.injections.push((local, injection));
                 continue;
             }
-            if let Some(a) = selector { return err(a, "#[peer] selects a binding on Peer<T>"); }
             let caller = if is_named(&t.ty, &caller_type) {
                 Some((Caller::Required, &*t.ty))
             } else if seg.is_some_and(|s| s.ident == "Option") {

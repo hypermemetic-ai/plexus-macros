@@ -304,13 +304,29 @@ fn returns(ret: &ReturnType) -> Res<(Returns, Option<Ty>)> {
 /// keeps it, and its span.
 type RoleSpans = Vec<(String, String, proc_macro2::Span)>;
 
-/// `roles(viewer = ["list"], editor = [viewer, "open"])` of the attribute.
-fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Role>, RoleSpans, Option<syn::Ident>)> {
+#[derive(Default)]
+struct ActivationOptions {
+    describe: bool,
+    roles: Vec<Role>,
+    role_spans: RoleSpans,
+    context_name: Option<syn::Ident>,
+    peer_types: Vec<Type>,
+}
+
+fn activation_options(args: proc_macro2::TokenStream, activation: &str) -> Res<ActivationOptions> {
     let metas = syn::parse::Parser::parse2(Punctuated::<Meta, Token![,]>::parse_terminated, args)?;
-    let (mut describe, mut out, mut spans, mut context) = (false, Vec::new(), Vec::new(), None);
+    let mut options = ActivationOptions::default();
     for m in metas {
         match &m {
-            Meta::Path(p) if p.is_ident("describe") => describe = true,
+            Meta::List(list) if list.path.is_ident("injections") => {
+                for ty in list.parse_args_with(Punctuated::<Type, Token![,]>::parse_terminated)? {
+                    let Some(interface) = method_args::peer_interface(&ty)? else {
+                        return err(&ty, "expected Peer<Activation> in injections");
+                    };
+                    options.peer_types.push(interface.clone());
+                }
+            }
+            Meta::Path(p) if p.is_ident("describe") => options.describe = true,
             Meta::List(l) if l.path.is_ident("roles") => {
                 for nv in l.parse_args_with(Punctuated::<MetaNameValue, Token![,]>::parse_terminated)? {
                     let Expr::Array(items) = &nv.value else { return err(&nv.value, "a role is a list: [\"method\", other_role]") };
@@ -320,29 +336,29 @@ fn roles(args: proc_macro2::TokenStream, activation: &str) -> Res<(bool, Vec<Rol
                             Expr::Path(p) => p.path.get_ident().map(kebab).unwrap_or_default(),
                             other => format!("{activation}.{}", string(other)?.to_kebab_case()),
                         };
-                        spans.push((role.name.clone(), name.clone(), e.span()));
+                        options.role_spans.push((role.name.clone(), name.clone(), e.span()));
                         if matches!(e, Expr::Path(_)) { role.includes.push(name) } else { role.grants.push(name) }
                     }
-                    out.push(role);
+                    options.roles.push(role);
                 }
             }
             Meta::NameValue(nv) if nv.path.is_ident("context") => {
                 let Expr::Path(path) = &nv.value else { return err(&nv.value, "context names a struct in this activation") };
                 let Some(name) = path.path.get_ident() else { return err(path, "context names a struct in this activation") };
-                if context.replace(name.clone()).is_some() {
+                if options.context_name.replace(name.clone()).is_some() {
                     return err(nv, "an activation has only one context");
                 }
             }
-            other => return err(other, "`describe`, `roles(..)` or `context = Type`"),
+            other => return err(other, "expected describe, roles(..), context = Type or injections(Peer<T>)"),
         }
     }
-    Ok((describe, out, spans, context))
+    Ok(options)
 }
 
 /// The module with this macro's own attributes taken off, so it is plain Rust.
 fn plain(items: &[Item]) -> Vec<Item> {
     fn strip(attrs: &mut Vec<Attribute>, param: bool) {
-        attrs.retain(|a| !OURS.iter().any(|o| a.path().is_ident(o)) && !(param && (a.path().is_ident("deprecated") || a.path().is_ident("peer"))));
+        attrs.retain(|a| !OURS.iter().any(|o| a.path().is_ident(o)) && !(param && a.path().is_ident("deprecated")));
     }
     let mut items = items.to_vec();
     for item in &mut items {
@@ -513,7 +529,7 @@ fn activation_context<'a>(name: Option<&'a syn::Ident>, items: &'a [Item], imp: 
 /// The module's IR, and the module as a component (or, described, as itself).
 fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macro2::TokenStream)> {
     let name = kebab(&module.ident);
-    let (describe, roles, role_spans, context_name) = roles(args, &name)?;
+    let ActivationOptions { describe, roles, role_spans, context_name, peer_types } = activation_options(args, &name)?;
     let Some((_, items)) = &module.content else { return err(&module, "#[activation] goes on `mod name { .. }` with its body") };
     let Some(imp) = items.iter().find_map(|i| if let Item::Impl(i) = i { i.trait_.is_none().then_some(i) } else { None }) else {
         return err(&module, "the module needs one `impl` block: the activation's methods");
@@ -579,7 +595,8 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     let exports = quote!(self::exports::plexus::#iface::#iface);
     let (mut glue, mut served, mut mounted) = (Vec::new(), Vec::new(), Vec::new());
     let mut client_methods = Vec::new();
-    let mut has_peers = false;
+    let mut peer_interfaces: std::collections::BTreeMap<_, _> = peer_types.into_iter()
+        .map(|ty| (ty.to_token_stream().to_string(), ty)).collect();
     for item in &imp.items {
         let ImplItem::Fn(f) = item else { continue };
         if attr(&f.attrs, "open").is_some() || !matches!(f.vis, syn::Visibility::Public(_)) {
@@ -592,9 +609,13 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         let method = &f.sig.ident;
         let mut m = Method { name: kebab(method), doc: doc(&f.attrs), params: Vec::new(), returns: Returns::Nothing, fails: None, input: None, progress: None, caller: None, grant: None, target: None, waits: f.sig.asyncness.is_some() || stream_item(&f.sig.output).is_some() };
         let args = MethodArgs::read(&f.sig, &mut m, context.as_ref().map(|c| c.name), describe)?;
-        has_peers |= !args.peers.is_empty();
+        for (_, injection) in &args.injections {
+            if let method_args::Injection::Peer(interface) = injection {
+                peer_interfaces.entry(interface.to_token_stream().to_string()).or_insert_with(|| interface.clone());
+            }
+        }
         if let Some(a) = attr(&f.attrs, "child") {
-            if !args.peers.is_empty() { return err(&f.sig, "a child factory cannot take a method peer"); }
+            if !args.injections.is_empty() { return err(&f.sig, "a child factory cannot take a method injection"); }
             if m.input.is_some() {
                 return err(&f.sig, "a child factory cannot take an input stream");
             }
@@ -646,7 +667,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
         if context.as_ref().is_some_and(|c| c.requires_caller) {
             m.caller = Some(Caller::Required);
         }
-        if !describe && m.caller.is_none() && context.is_none() && m.input.is_none() && args.peers.is_empty() {
+        if !describe && m.caller.is_none() && context.is_none() && m.input.is_none() && args.injections.is_empty() {
             let (idents, tys) = (&args.wire_names, &args.wire_types);
             let out = &f.sig.output;
             if let Some((item, iterator)) = stream_of(&f.sig.output) {
@@ -743,6 +764,8 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
     });
     let has_grants = ir.methods.iter().any(|m| m.grant.is_some());
     let has_input = ir.methods.iter().any(|m| m.input.is_some());
+    let has_peers = !peer_interfaces.is_empty();
+    let peer_interfaces = peer_interfaces.values();
     let native_only = has_peers || ir.context.is_some() || ir.methods.iter().any(|m| m.caller.is_some()) || has_input || has_grants;
     let native_module = native_only.then(|| quote!(#[cfg(not(target_arch = "wasm32"))]));
     let native_error = native_only.then(|| {
@@ -843,6 +866,7 @@ fn expand(args: proc_macro2::TokenStream, module: ItemMod) -> Res<(Ir, proc_macr
             #[cfg(not(target_arch = "wasm32"))]
             impl ::plexus::Serve for #activation {
                 const NAME: &'static str = #name;
+                const PEER_INJECTIONS: &'static [::plexus::PeerDependency] = &[#(::plexus::PeerDependency::of::<#peer_interfaces>()),*];
                 fn serve(self, server: &mut ::plexus::Server, at: &str) {
                     serve(self, server, at)
                 }
@@ -1082,10 +1106,7 @@ fn served_method(
         if is_bytes(ir, t) { quote!(__plexus_p.take::<::plexus::__private::B64>(#wire, #default)?.0) } else { quote!(__plexus_p.take::<#ty>(#wire, #default)?) }
     }).collect::<Vec<_>>();
     let write = |t: &Ty, v: proc_macro2::TokenStream| if is_bytes(ir, t) { quote!(::plexus::raw(&::plexus::__private::B64(#v))) } else { quote!(::plexus::raw(&#v)) };
-    let peer_args: Vec<_> = args.peers.iter().map(|(local, ty, slot)| {
-        let slot = match slot { Some(name) => quote!(Some(#name)), None => quote!(None) };
-        (local, quote!(__plexus_call.peer::<#ty>(#slot)))
-    }).collect();
+    let injections: Vec<_> = args.injections.iter().map(|(local, source)| (local, source.resolve())).collect();
     let args = quote! {
         let __plexus_args = ::plexus::__private::params(&__plexus_body, &[#(#wires),*])
             .and_then(|__plexus_p| ::std::result::Result::Ok((#(#takes,)*)));
@@ -1103,7 +1124,7 @@ fn served_method(
             quote!(__plexus_call.take_input(::plexus::__private::decode_input))
         }
     });
-    let needs_call = !peer_args.is_empty() || context.is_some() || m.caller.is_some() || input.is_some();
+    let needs_call = !injections.is_empty() || context.is_some() || m.caller.is_some() || input.is_some();
     let handler_args = if input.is_some() {
         quote!(__plexus_body: ::plexus::Raw, mut __plexus_call)
     } else if needs_call {
@@ -1146,7 +1167,7 @@ fn served_method(
         };
         let input = input.map(|make| reject(quote!(__plexus_input), make));
         let required = require_caller.map(|make| reject(quote!(__plexus_required_caller), make));
-        let resolve = peer_args.iter().map(|(name, get)| reject(quote!(#name), get.clone()));
+        let resolve = injections.iter().map(|(name, get)| reject(quote!(#name), get.clone()));
         let context = make_context.map(|make| reject(quote!(__plexus_context), make));
         let handler = quote! {
             move |#handler_args| {
@@ -1191,7 +1212,7 @@ fn served_method(
         };
         let input = input.map(|make| quote!(let __plexus_input = #make?;));
         let required = require_caller.map(|make| quote!(let __plexus_required_caller = #make?;));
-        let resolve = peer_args.iter().map(|(name, get)| quote!(let #name = #get?;));
+        let resolve = injections.iter().map(|(name, get)| quote!(let #name = #get?;));
         let context = make_context.map(|make| quote!(let __plexus_context = { #make }?;));
         quote! {
             let __plexus_local = __plexus_local.clone();
@@ -1468,6 +1489,17 @@ mod tests {
         let rust = generated.to_string();
         assert_eq!(rust.matches("take_byte_input").count(), 1);
         assert_eq!(rust.matches("take_input (:: plexus :: __private :: decode_input)").count(), 1);
+    }
+
+    #[test]
+    fn a_peer_selector_belongs_in_the_application() {
+        let module = syn::parse_quote! {
+            mod studio { pub struct Studio; impl Studio {
+                pub fn fire(&self, #[peer("north")] kiln: Peer<Kiln>) {}
+            } }
+        };
+        let error = expand(quote!(), module).unwrap_err();
+        assert!(error.to_string().contains("PeerHost::inject_peer"));
     }
 
     #[test]
